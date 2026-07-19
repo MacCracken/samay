@@ -10,5 +10,6 @@
 include "src/uuid.cyr"
 include "src/types.cyr"
 include "src/scheduler.cyr"
+include "src/cronexpr.cyr"
 include "src/cron.cyr"
 include "src/training.cyr"

@@ -1,9 +1,18 @@
-# cron.cyr — cron-like recurring task triggers (Rust CronScheduler).
+# cron.cyr — cron-like recurring task triggers (cron-expression driven).
 #
-# Optional fields use sentinels: specific_hour/specific_minute = -1 for
-# None (valid values 0-23 / 0-59); last_fired = 0 for None. Entries are a
-# cstr-keyed hashmap by name. Requires: hashmap, vec, str, string, chrono
-# + types.cyr.
+# v0.3.0 replaces the interval+hour/minute model with real cron expressions
+# (src/cronexpr.cyr) and an explicit missed-schedule policy: when the
+# scheduler was down across one or more fire times, an entry either fires
+# once per missed occurrence (CRON_CATCHUP, capped) or fires once and logs
+# the drop (CRON_SKIP). Missed occurrences are NEVER silently discarded.
+#
+# check_due_at(now_ns) is deterministic (injected clock) for testing;
+# check_due() wraps it with dt_now(). Requires: hashmap, vec, str, string,
+# chrono, result, sakshi + types.cyr + cronexpr.cyr.
+
+var CRON_CATCHUP_CAP = 1000;         # max tasks fired per entry per check
+var CRON_SCAN_WINDOW_SECS = 31622400; # 366 days — the catch-up look-back window
+var CRON_MAX_COUNT = 100000;          # bound the due-count scan (accurate log up to this)
 
 #derive(accessors)
 struct CronTaskTemplate {
@@ -24,27 +33,26 @@ fn cron_task_template_new(name, description, agent_id, priority, req): i64 {
     return p;
 }
 
-# specific_hour/specific_minute: -1 = None. last_fired: 0 = None (epoch-ns).
+# expr: a parsed CronExpr pointer. last_fired: epoch-ns, 0 = never.
+# missed_policy: CRON_CATCHUP | CRON_SKIP.
 #derive(accessors)
 struct CronEntry {
     name: Str;
-    interval_seconds: i64;
-    specific_hour: i64;
-    specific_minute: i64;
+    expr: i64;
     task_template: i64;
     enabled: i64;
     last_fired: i64;
+    missed_policy: i64;
 }
 
-fn cron_entry_new(name, interval_seconds, specific_hour, specific_minute, task_template, enabled, last_fired): i64 {
-    var p = alloc(56);
+fn cron_entry_new(name, expr, task_template, enabled, missed_policy): i64 {
+    var p = alloc(48);
     CronEntry_set_name(p, name);
-    CronEntry_set_interval_seconds(p, interval_seconds);
-    CronEntry_set_specific_hour(p, specific_hour);
-    CronEntry_set_specific_minute(p, specific_minute);
+    CronEntry_set_expr(p, expr);
     CronEntry_set_task_template(p, task_template);
     CronEntry_set_enabled(p, enabled);
-    CronEntry_set_last_fired(p, last_fired);
+    CronEntry_set_last_fired(p, 0);
+    CronEntry_set_missed_policy(p, missed_policy);
     return p;
 }
 
@@ -59,7 +67,19 @@ fn cron_scheduler_new(): i64 {
     return c;
 }
 
-# Add an entry; Err(1) if the name is empty (Rust bail!).
+# Parse + validate a cron expression, then register the entry. Ok(0) on
+# success; Err(1) if the name is empty or the expression is malformed
+# (validation happens here, at add time — not at execution).
+fn cron_scheduler_add(c, name, expr_str, task_template, enabled, missed_policy): i64 {
+    if (strlen(name) == 0) { return Err(1); }
+    var r = cron_expr_parse(expr_str);
+    if (is_err_result(r) == 1) { return Err(1); }
+    var entry = cron_entry_new(name, result_unwrap(r), task_template, enabled, missed_policy);
+    map_set(CronScheduler_entries(c), name, entry);
+    return Ok(0);
+}
+
+# Register a pre-built entry. Err(1) if the name is empty.
 fn cron_scheduler_add_entry(c, entry): i64 {
     if (strlen(CronEntry_name(entry)) == 0) { return Err(1); }
     map_set(CronScheduler_entries(c), CronEntry_name(entry), entry);
@@ -73,7 +93,6 @@ fn cron_scheduler_remove_entry(c, name): i64 {
     return Ok(0);
 }
 
-# All entries as a vec of pointers.
 fn cron_scheduler_list_entries(c): i64 {
     return map_values(CronScheduler_entries(c));
 }
@@ -87,10 +106,89 @@ fn _cron_task_name(base): i64 {
     return str_data(str_builder_build(sb));
 }
 
-# Check which entries are due; fires them (updates last_fired) and returns
-# a vec of freshly-created ScheduledTask pointers.
-fn cron_scheduler_check_due(c): i64 {
-    var now = dt_now();
+# Build a fresh ScheduledTask from an entry's template.
+fn _cron_fire(e): i64 {
+    var tmpl = CronEntry_task_template(e);
+    return scheduled_task_new(
+        _cron_task_name(CronTaskTemplate_name(tmpl)),
+        CronTaskTemplate_description(tmpl),
+        CronTaskTemplate_agent_id(tmpl),
+        CronTaskTemplate_priority(tmpl),
+        resource_req_clone(CronTaskTemplate_resource_requirements(tmpl)));
+}
+
+# Count matching minutes in (lf_secs, now_secs]. The scan is bounded to the
+# ~366-day catch-up window; if last_fired predates that window, *clamped_out is
+# set to 1 (occurrences older than the window are dropped and MUST be logged by
+# the caller — never silently). The count itself short-circuits at
+# CRON_MAX_COUNT so the returned value is accurate for realistic downtimes but
+# work stays bounded. Distinct from the fire cap (CRON_CATCHUP_CAP).
+fn _cron_count_due(expr, lf_secs, now_secs, clamped_out): i64 {
+    store64(clamped_out, 0);
+    var start = (lf_secs / 60) * 60 + 60;
+    var end = (now_secs / 60) * 60;
+    var min_start = end - CRON_SCAN_WINDOW_SECS;
+    if (start < min_start) {
+        start = min_start;
+        store64(clamped_out, 1);
+    }
+    var count = 0;
+    var t = start;
+    while (t <= end) {
+        if (cron_expr_matches(expr, t) == 1) {
+            count = count + 1;
+            if (count >= CRON_MAX_COUNT) { return count; }
+        }
+        t = t + 60;
+    }
+    return count;
+}
+
+fn _cron_log_skip(name, skipped): i64 {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "cron '");
+    str_builder_add_cstr(sb, name);
+    str_builder_add_cstr(sb, "': skip policy dropped ");
+    str_builder_add_int(sb, skipped);
+    str_builder_add_cstr(sb, " missed occurrence(s)");
+    str_builder_add_byte(sb, 0);
+    var msg = str_data(str_builder_build(sb));
+    sakshi_warn(msg, strlen(msg));
+    return 0;
+}
+
+fn _cron_log_catchup_cap(name, due): i64 {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "cron '");
+    str_builder_add_cstr(sb, name);
+    str_builder_add_cstr(sb, "': catch-up capped — fired ");
+    str_builder_add_int(sb, CRON_CATCHUP_CAP);
+    str_builder_add_cstr(sb, " of ");
+    str_builder_add_int(sb, due);
+    str_builder_add_cstr(sb, " due occurrence(s)");
+    str_builder_add_byte(sb, 0);
+    var msg = str_data(str_builder_build(sb));
+    sakshi_warn(msg, strlen(msg));
+    return 0;
+}
+
+# Occurrences older than the catch-up window were dropped — logged, not silent.
+fn _cron_log_clamp(name): i64 {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "cron '");
+    str_builder_add_cstr(sb, name);
+    str_builder_add_cstr(sb, "': last_fired predates the ~366-day catch-up window; older missed occurrences dropped");
+    str_builder_add_byte(sb, 0);
+    var msg = str_data(str_builder_build(sb));
+    sakshi_warn(msg, strlen(msg));
+    return 0;
+}
+
+# Deterministic check: which entries are due at `now_ns` (epoch-ns)? Fires
+# them per the missed-schedule policy, advances last_fired, and returns a vec
+# of freshly-created ScheduledTask pointers.
+fn cron_scheduler_check_due_at(c, now_ns): i64 {
+    var now_secs = now_ns / 1000000000;
     var tasks = vec_new();
     var entries = map_values(CronScheduler_entries(c));
     var n = vec_len(entries);
@@ -98,37 +196,39 @@ fn cron_scheduler_check_due(c): i64 {
     while (i < n) {
         var e = vec_get(entries, i);
         if (CronEntry_enabled(e) == 1) {
-            var should_fire = 0;
+            var expr = CronEntry_expr(e);
             var lf = CronEntry_last_fired(e);
-            if (lf != 0) {
-                var elapsed = (now - lf) / 1000000000;
-                if (elapsed < 0) { elapsed = 0; }
-                if (elapsed >= CronEntry_interval_seconds(e)) { should_fire = 1; }
+            if (lf == 0) {
+                # First evaluation: fire only if the current minute matches;
+                # anchor last_fired at now (no retroactive firing).
+                if (cron_expr_matches(expr, now_secs) == 1) { vec_push(tasks, _cron_fire(e)); }
+                CronEntry_set_last_fired(e, now_ns);
             } else {
-                should_fire = 1;
-            }
-
-            var time_matches = 1;
-            var sh = CronEntry_specific_hour(e);
-            var sm = CronEntry_specific_minute(e);
-            if (sh >= 0) { if (dt_hour(now) != sh) { time_matches = 0; } }
-            if (sm >= 0) { if (dt_minute(now) != sm) { time_matches = 0; } }
-
-            if (should_fire == 1) {
-                if (time_matches == 1) {
-                    var tmpl = CronEntry_task_template(e);
-                    var task = scheduled_task_new(
-                        _cron_task_name(CronTaskTemplate_name(tmpl)),
-                        CronTaskTemplate_description(tmpl),
-                        CronTaskTemplate_agent_id(tmpl),
-                        CronTaskTemplate_priority(tmpl),
-                        resource_req_clone(CronTaskTemplate_resource_requirements(tmpl)));
-                    vec_push(tasks, task);
-                    CronEntry_set_last_fired(e, now);
+                var clamped = 0;
+                var due = _cron_count_due(expr, lf / 1000000000, now_secs, &clamped);
+                if (clamped == 1) { _cron_log_clamp(CronEntry_name(e)); }
+                if (due > 0) {
+                    if (CronEntry_missed_policy(e) == CRON_SKIP) {
+                        vec_push(tasks, _cron_fire(e));
+                        if (due > 1) { _cron_log_skip(CronEntry_name(e), due - 1); }
+                    } else {
+                        var fire_n = due;
+                        var capped = 0;
+                        if (fire_n > CRON_CATCHUP_CAP) { fire_n = CRON_CATCHUP_CAP; capped = 1; }
+                        var k = 0;
+                        while (k < fire_n) { vec_push(tasks, _cron_fire(e)); k = k + 1; }
+                        if (capped == 1) { _cron_log_catchup_cap(CronEntry_name(e), due); }
+                    }
                 }
+                CronEntry_set_last_fired(e, now_ns);
             }
         }
         i = i + 1;
     }
     return tasks;
+}
+
+# check_due at the current wall-clock time.
+fn cron_scheduler_check_due(c): i64 {
+    return cron_scheduler_check_due_at(c, dt_now());
 }

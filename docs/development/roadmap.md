@@ -9,8 +9,8 @@
 - [x] Rust → Cyrius surface parity verified against `rust-old/` (v0.2.0)
 - [x] Test coverage mirrors the Rust suite (108/108 assertions)
 - [x] Benchmarks captured (`docs/benchmarks.md`)
-- [ ] Real cron-expression parsing + parse-time validation
-- [ ] Missed-schedule policy (catch-up vs skip), explicit + logged
+- [x] Real cron-expression parsing + parse-time validation (v0.3.0)
+- [x] Missed-schedule policy (catch-up vs skip), explicit + logged (v0.3.0)
 - [ ] Resource-aware placement wired through ai-hwaccel `requirement_satisfied()`/profiles
 - [ ] JSON `Serialize` + `Deserialize` with roundtrip tests for every public type
 - [ ] Determinism guarantees (same schedule + same time → same decisions), tested
@@ -27,10 +27,12 @@
 All Rust types/functions ported across `src/*.cyr`; 108/108 assertions;
 `dist/samay.cyr` bundle; lint/fmt clean; demo binary runs.
 
-### M2 — Cron correctness (v0.3.0)
-Replace the interval+hour/minute model with real cron expressions
-(`* * * * *` fields), validated at parse time (not execution). Missed-schedule
-catch-up vs skip policy, always logged (never silently skipped).
+### M2 — Cron correctness (v0.3.0) — ✅ 2026-07-18
+Real 5-field cron expressions (`src/cronexpr.cyr`) with parse-time validation,
+Vixie DOM/DOW rule, names + `@shortcuts`; missed-schedule catch-up/skip policy,
+always logged. Hardened via a 4-lens adversarial review (7 findings fixed).
+Follow-up perf item: alloc-free `cron_expr_matches` (currently ~298 ns/call via
+`epoch_to_date`).
 
 ### M3 — Resource-aware placement v2 (v0.4.0)
 Build ai-hwaccel profiles from `NodeCapacity` and place via

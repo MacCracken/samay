@@ -23,6 +23,7 @@ modules = [
     "src/uuid.cyr",
     "src/types.cyr",
     "src/scheduler.cyr",
+    "src/cronexpr.cyr",
     "src/cron.cyr",
     "src/training.cyr",
 ]

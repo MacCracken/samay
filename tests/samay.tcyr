@@ -4,6 +4,7 @@
 include "src/uuid.cyr"
 include "src/types.cyr"
 include "src/scheduler.cyr"
+include "src/cronexpr.cyr"
 include "src/cron.cyr"
 include "src/training.cyr"
 
@@ -21,8 +22,13 @@ fn make_task(name, priority) {
 fn make_template() {
     return cron_task_template_new("cron-job", "recurring", "agent-1", 5, make_req(f64_from(1), 128));
 }
-fn make_entry(name, interval, enabled, last_fired) {
-    return cron_entry_new(name, interval, 0 - 1, 0 - 1, make_template(), enabled, last_fired);
+fn at_ns(y, mo, d, h, mi) {
+    return _chrono_ymd_to_epoch_secs(y, mo, d, h, mi, 0) * 1000000000;
+}
+fn mk_cron(expr_str, policy) {
+    var c = cron_scheduler_new();
+    cron_scheduler_add(c, "job", expr_str, make_template(), 1, policy);
+    return c;
 }
 
 # --- uuid ---
@@ -409,25 +415,32 @@ fn test_tasks_for_node() {
     return 0;
 }
 
-# --- cron ---
+# --- cron (expression-based, deterministic via check_due_at) ---
 
-fn test_cron_add_entry() {
+fn test_cron_add_valid() {
     test_group("cron_add");
     var c = cron_scheduler_new();
-    assert_eq(is_ok(cron_scheduler_add_entry(c, make_entry("backup", 3600, 1, 0))), 1, "add ok");
+    assert_eq(is_ok(cron_scheduler_add(c, "backup", "0 2 * * *", make_template(), 1, CRON_SKIP)), 1, "add ok");
     assert_eq(vec_len(cron_scheduler_list_entries(c)), 1, "1 entry");
     return 0;
 }
 fn test_cron_add_empty_name() {
     test_group("cron_empty_name");
     var c = cron_scheduler_new();
-    assert_eq(is_err_result(cron_scheduler_add_entry(c, make_entry("", 60, 1, 0))), 1, "empty rejected");
+    assert_eq(is_err_result(cron_scheduler_add(c, "", "0 2 * * *", make_template(), 1, CRON_SKIP)), 1, "empty rejected");
+    return 0;
+}
+fn test_cron_add_invalid_expr() {
+    test_group("cron_bad_expr");
+    var c = cron_scheduler_new();
+    assert_eq(is_err_result(cron_scheduler_add(c, "j", "not a cron", make_template(), 1, CRON_SKIP)), 1, "garbage rejected");
+    assert_eq(is_err_result(cron_scheduler_add(c, "j", "99 * * * *", make_template(), 1, CRON_SKIP)), 1, "range rejected");
     return 0;
 }
 fn test_cron_remove() {
     test_group("cron_remove");
     var c = cron_scheduler_new();
-    cron_scheduler_add_entry(c, make_entry("backup", 3600, 1, 0));
+    cron_scheduler_add(c, "backup", "0 2 * * *", make_template(), 1, CRON_SKIP);
     assert_eq(is_ok(cron_scheduler_remove_entry(c, "backup")), 1, "remove ok");
     assert_eq(vec_len(cron_scheduler_list_entries(c)), 0, "empty");
     return 0;
@@ -437,34 +450,93 @@ fn test_cron_remove_nonexistent() {
     assert_eq(is_err_result(cron_scheduler_remove_entry(cron_scheduler_new(), "nope")), 1, "err");
     return 0;
 }
-fn test_cron_fires_first_time() {
-    test_group("cron_first_fire");
-    var c = cron_scheduler_new();
-    cron_scheduler_add_entry(c, make_entry("first-run", 60, 1, 0));
-    var tasks = cron_scheduler_check_due(c);
-    assert_eq(vec_len(tasks), 1, "1 task");
-    assert_eq(streq(ScheduledTask_name(vec_get(tasks, 0)), "cron-job (cron)"), 1, "task name");
-    return 0;
-}
-fn test_cron_respects_interval() {
-    test_group("cron_interval");
-    var c = cron_scheduler_new();
-    cron_scheduler_add_entry(c, make_entry("frequent", 3600, 1, dt_now()));
-    assert_eq(vec_len(cron_scheduler_check_due(c)), 0, "not due");
-    return 0;
-}
 fn test_cron_disabled() {
     test_group("cron_disabled");
     var c = cron_scheduler_new();
-    cron_scheduler_add_entry(c, make_entry("disabled", 1, 0, 0));
-    assert_eq(vec_len(cron_scheduler_check_due(c)), 0, "disabled skipped");
+    cron_scheduler_add(c, "d", "* * * * *", make_template(), 0, CRON_CATCHUP);
+    assert_eq(vec_len(cron_scheduler_check_due_at(c, at_ns(2026, 7, 18, 12, 0))), 0, "disabled skipped");
     return 0;
 }
-fn test_cron_fires_when_elapsed() {
-    test_group("cron_elapsed");
-    var c = cron_scheduler_new();
-    cron_scheduler_add_entry(c, make_entry("overdue", 10, 1, dt_sub(dt_now(), dur_seconds(60))));
-    assert_eq(vec_len(cron_scheduler_check_due(c)), 1, "fires");
+fn test_cron_first_eval_match() {
+    test_group("cron_first_match");
+    var c = mk_cron("* * * * *", CRON_SKIP);
+    var f = cron_scheduler_check_due_at(c, at_ns(2026, 7, 18, 12, 0));
+    assert_eq(vec_len(f), 1, "fires once at match");
+    assert_eq(streq(ScheduledTask_name(vec_get(f, 0)), "cron-job (cron)"), 1, "task name");
+    return 0;
+}
+fn test_cron_first_eval_nomatch() {
+    test_group("cron_first_nomatch");
+    var c = mk_cron("30 3 * * *", CRON_SKIP);
+    assert_eq(vec_len(cron_scheduler_check_due_at(c, at_ns(2026, 7, 18, 3, 0))), 0, "no fire at 3:00");
+    assert_eq(vec_len(cron_scheduler_check_due_at(c, at_ns(2026, 7, 18, 3, 30))), 1, "fire at 3:30");
+    assert_eq(vec_len(cron_scheduler_check_due_at(c, at_ns(2026, 7, 18, 3, 45))), 0, "no fire at 3:45");
+    return 0;
+}
+fn test_cron_catchup() {
+    test_group("cron_catchup");
+    var c = mk_cron("* * * * *", CRON_CATCHUP);
+    cron_scheduler_check_due_at(c, at_ns(2026, 7, 18, 12, 0));
+    var f = cron_scheduler_check_due_at(c, at_ns(2026, 7, 18, 12, 5));
+    assert_eq(vec_len(f), 5, "catch-up fires 5 missed");
+    return 0;
+}
+fn test_cron_skip() {
+    test_group("cron_skip");
+    var c = mk_cron("* * * * *", CRON_SKIP);
+    cron_scheduler_check_due_at(c, at_ns(2026, 7, 18, 12, 0));
+    var f = cron_scheduler_check_due_at(c, at_ns(2026, 7, 18, 12, 5));
+    assert_eq(vec_len(f), 1, "skip fires once");
+    return 0;
+}
+fn test_cron_step_expr() {
+    test_group("cron_step");
+    var c = mk_cron("*/15 * * * *", CRON_CATCHUP);
+    cron_scheduler_check_due_at(c, at_ns(2026, 7, 18, 12, 0));
+    var f = cron_scheduler_check_due_at(c, at_ns(2026, 7, 18, 13, 0));
+    assert_eq(vec_len(f), 4, "every-15 fires 4 in an hour");
+    return 0;
+}
+
+# --- cron: regression tests for review findings ---
+
+fn test_cron_star_list() {
+    test_group("cron_star_list");
+    # "15,*" in DOM begins with '1' -> NOT a star; neither DOM nor DOW is star
+    # -> OR rule; DOM covers all days -> fires every day, not only Mondays.
+    var e = result_unwrap(cron_expr_parse("0 0 15,* * 1"));
+    assert_eq(cron_expr_matches(e, at_ns(2026, 7, 21, 0, 0) / 1000000000), 1, "fires on a Tuesday");
+    return 0;
+}
+fn test_cron_step_star_dom() {
+    test_group("cron_step_star");
+    # "*/2" in DOM begins with '*' -> DOM starred -> DOW (Monday) governs (Vixie).
+    var e = result_unwrap(cron_expr_parse("0 0 */2 * 1"));
+    assert_eq(cron_expr_matches(e, at_ns(2026, 7, 20, 0, 0) / 1000000000), 1, "Monday (even day) fires");
+    assert_eq(cron_expr_matches(e, at_ns(2026, 7, 21, 0, 0) / 1000000000), 0, "Tuesday (odd day) no fire");
+    return 0;
+}
+fn test_cron_trailing_comma() {
+    test_group("cron_trailing_comma");
+    assert_eq(is_err_result(cron_expr_parse("0,30, 12 1 1 *")), 1, "trailing comma rejected");
+    return 0;
+}
+fn test_cron_overflow_field() {
+    test_group("cron_overflow");
+    assert_eq(is_err_result(cron_expr_parse("18446744073709551621 * * * *")), 1, "overflow field rejected");
+    return 0;
+}
+fn test_cron_negative_epoch() {
+    test_group("cron_neg_epoch");
+    assert_eq(cron_expr_matches(result_unwrap(cron_expr_parse("@hourly")), 0 - 3600), 0, "negative epoch no match");
+    return 0;
+}
+fn test_cron_catchup_cap() {
+    test_group("cron_catchup_cap");
+    var c = mk_cron("* * * * *", CRON_CATCHUP);
+    cron_scheduler_check_due_at(c, at_ns(2026, 7, 18, 0, 0));
+    var f = cron_scheduler_check_due_at(c, at_ns(2026, 7, 19, 1, 0));
+    assert_eq(vec_len(f), 1000, "catch-up capped at 1000");
     return 0;
 }
 
@@ -548,14 +620,23 @@ fn main() {
     test_schedule_no_nodes();
     test_all_nodes_full();
     test_tasks_for_node();
-    test_cron_add_entry();
+    test_cron_add_valid();
     test_cron_add_empty_name();
+    test_cron_add_invalid_expr();
     test_cron_remove();
     test_cron_remove_nonexistent();
-    test_cron_fires_first_time();
-    test_cron_respects_interval();
     test_cron_disabled();
-    test_cron_fires_when_elapsed();
+    test_cron_first_eval_match();
+    test_cron_first_eval_nomatch();
+    test_cron_catchup();
+    test_cron_skip();
+    test_cron_step_expr();
+    test_cron_star_list();
+    test_cron_step_star_dom();
+    test_cron_trailing_comma();
+    test_cron_overflow_field();
+    test_cron_negative_epoch();
+    test_cron_catchup_cap();
     test_training_method_name();
     test_training_high_priority();
     test_training_no_deadline_when_zero();
