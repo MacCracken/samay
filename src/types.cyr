@@ -1,0 +1,378 @@
+# types.cyr — core scheduler domain types.
+#
+# Cyrius port of the Rust structs/enums in rust-old/src/lib.rs. Instances
+# are heap pointers built by the `*_new` constructors; fields are read/
+# written through `#derive(accessors)` getters/setters. All fields are
+# 8-byte slots (i64, f64 bit-pattern, or Str pointer). `0` is the None
+# sentinel for optional Str / timestamp fields.
+#
+# Requires (auto-prepended from cyrius.cyml): str, alloc, chrono, fmt,
+# string, plus ai-hwaccel (REQ_* accelerator enum) and src/uuid.cyr.
+# f64 arithmetic/compare (f64_from/to/add/sub/mul/div/lt/gt/eq) are
+# compiler builtins; f64 min/max are local helpers (avoid a math.cyr dep).
+
+fn _f64_max(a, b): i64 { if (f64_gt(a, b) == 1) { return a; } return b; }
+fn _f64_min(a, b): i64 { if (f64_lt(a, b) == 1) { return a; } return b; }
+
+# ---------------------------------------------------------------------------
+# TaskPriority — ordered classification (Rust enum w/ derived Ord)
+# ---------------------------------------------------------------------------
+
+enum TaskPriority {
+    PRIO_NORMAL = 0;      # numeric 1-3
+    PRIO_HIGH = 1;        # numeric 4-6
+    PRIO_CRITICAL = 2;    # numeric 7-9
+    PRIO_EMERGENCY = 3;   # numeric 10
+}
+
+# Derive a TaskPriority from a numeric priority (1-10).
+fn task_priority_from_numeric(p): i64 {
+    if (p >= 1) { if (p <= 3) { return PRIO_NORMAL; } }
+    if (p >= 4) { if (p <= 6) { return PRIO_HIGH; } }
+    if (p >= 7) { if (p <= 9) { return PRIO_CRITICAL; } }
+    if (p == 10) { return PRIO_EMERGENCY; }
+    return PRIO_NORMAL;
+}
+
+# True (1) if `a` can preempt `b` — strictly higher priority class.
+fn task_priority_can_preempt(a, b): i64 {
+    if (a > b) { return 1; }
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# TaskStatus — state machine (Rust enum; Failed(String) → status + fail_reason)
+# ---------------------------------------------------------------------------
+
+enum TaskStatus {
+    TASK_QUEUED = 0;
+    TASK_SCHEDULED = 1;
+    TASK_RUNNING = 2;
+    TASK_COMPLETED = 3;
+    TASK_FAILED = 4;
+    TASK_CANCELLED = 5;
+    TASK_PREEMPTED = 6;
+}
+
+# True (1) if transitioning from `a` to `b` is valid. Mirrors the Rust
+# valid_transition matrix exactly.
+fn task_status_valid_transition(a, b): i64 {
+    if (a == TASK_QUEUED) {
+        if (b == TASK_SCHEDULED) { return 1; }
+        if (b == TASK_CANCELLED) { return 1; }
+        return 0;
+    }
+    if (a == TASK_SCHEDULED) {
+        if (b == TASK_RUNNING) { return 1; }
+        if (b == TASK_CANCELLED) { return 1; }
+        if (b == TASK_QUEUED) { return 1; }
+        return 0;
+    }
+    if (a == TASK_RUNNING) {
+        if (b == TASK_COMPLETED) { return 1; }
+        if (b == TASK_FAILED) { return 1; }
+        if (b == TASK_CANCELLED) { return 1; }
+        if (b == TASK_PREEMPTED) { return 1; }
+        return 0;
+    }
+    if (a == TASK_PREEMPTED) {
+        if (b == TASK_QUEUED) { return 1; }
+        return 0;
+    }
+    return 0;
+}
+
+fn task_status_name(s): i64 {
+    if (s == TASK_QUEUED) { return "queued"; }
+    if (s == TASK_SCHEDULED) { return "scheduled"; }
+    if (s == TASK_RUNNING) { return "running"; }
+    if (s == TASK_COMPLETED) { return "completed"; }
+    if (s == TASK_FAILED) { return "failed"; }
+    if (s == TASK_CANCELLED) { return "cancelled"; }
+    if (s == TASK_PREEMPTED) { return "preempted"; }
+    return "unknown";
+}
+
+# ---------------------------------------------------------------------------
+# ResourceReq
+# ---------------------------------------------------------------------------
+
+# Fields: cpu_cores (f64), memory_mb, accel_req (ai-hwaccel REQ_*),
+# accel_min_chips (for REQ_TPU; else 0), network (bool 0/1), disk_mb.
+# NOTE: no inline `#` comments on field lines — #derive(accessors) parses
+# them as field names.
+#derive(accessors)
+struct ResourceReq {
+    cpu_cores: f64;
+    memory_mb: i64;
+    accel_req: i64;
+    accel_min_chips: i64;
+    network: i64;
+    disk_mb: i64;
+}
+
+fn resource_req_new(cpu_cores, memory_mb, accel_req, accel_min_chips, network, disk_mb): i64 {
+    var p = alloc(48);
+    ResourceReq_set_cpu_cores(p, cpu_cores);
+    ResourceReq_set_memory_mb(p, memory_mb);
+    ResourceReq_set_accel_req(p, accel_req);
+    ResourceReq_set_accel_min_chips(p, accel_min_chips);
+    ResourceReq_set_network(p, network);
+    ResourceReq_set_disk_mb(p, disk_mb);
+    return p;
+}
+
+# Rust Default: 1.0 cpu, 256 MB, no accelerator, no network, 0 disk.
+fn resource_req_default(): i64 {
+    return resource_req_new(f64_from(1), 256, REQ_NONE, 0, 0, 0);
+}
+
+# Deep copy (Rust derives Clone; cron fires clone the template's req).
+fn resource_req_clone(req): i64 {
+    return resource_req_new(
+        ResourceReq_cpu_cores(req), ResourceReq_memory_mb(req),
+        ResourceReq_accel_req(req), ResourceReq_accel_min_chips(req),
+        ResourceReq_network(req), ResourceReq_disk_mb(req));
+}
+
+# ---------------------------------------------------------------------------
+# ScheduledTask
+# ---------------------------------------------------------------------------
+
+# Fields: task_id/name/description/agent_id (Str), priority (1-10),
+# resource_requirements (ResourceReq pointer), status (TaskStatus),
+# fail_reason (Str, 0=none — payload of Failed), created_at (epoch-ns),
+# scheduled_at/started_at/completed_at/deadline (epoch-ns, 0=None),
+# node_preference (Str, 0=None).
+#derive(accessors)
+struct ScheduledTask {
+    task_id: Str;
+    name: Str;
+    description: Str;
+    agent_id: Str;
+    priority: i64;
+    resource_requirements: i64;
+    status: i64;
+    fail_reason: Str;
+    created_at: i64;
+    scheduled_at: i64;
+    started_at: i64;
+    completed_at: i64;
+    deadline: i64;
+    node_preference: Str;
+}
+
+# Create a new task in Queued status. Priority is clamped to 1-10.
+fn scheduled_task_new(name, description, agent_id, priority, req): i64 {
+    var p = alloc(112);   # 14 fields * 8
+    var prio = priority;
+    if (prio < 1) { prio = 1; }
+    if (prio > 10) { prio = 10; }
+    ScheduledTask_set_task_id(p, uuid_v4());
+    ScheduledTask_set_name(p, name);
+    ScheduledTask_set_description(p, description);
+    ScheduledTask_set_agent_id(p, agent_id);
+    ScheduledTask_set_priority(p, prio);
+    ScheduledTask_set_resource_requirements(p, req);
+    ScheduledTask_set_status(p, TASK_QUEUED);
+    ScheduledTask_set_fail_reason(p, 0);
+    ScheduledTask_set_created_at(p, dt_now());
+    ScheduledTask_set_scheduled_at(p, 0);
+    ScheduledTask_set_started_at(p, 0);
+    ScheduledTask_set_completed_at(p, 0);
+    ScheduledTask_set_deadline(p, 0);
+    ScheduledTask_set_node_preference(p, 0);
+    return p;
+}
+
+# Derived priority classification.
+fn scheduled_task_priority_class(t): i64 {
+    return task_priority_from_numeric(ScheduledTask_priority(t));
+}
+
+# Transition to a new status. Returns Ok(0) on success, Err(1) on an
+# invalid transition (Rust returns Result<()> with a bail! message).
+fn scheduled_task_transition(t, to): i64 {
+    if (task_status_valid_transition(ScheduledTask_status(t), to) != 1) {
+        return Err(1);
+    }
+    ScheduledTask_set_status(t, to);
+    return Ok(0);
+}
+
+# ---------------------------------------------------------------------------
+# NodeCapacity
+# ---------------------------------------------------------------------------
+
+#derive(accessors)
+struct NodeCapacity {
+    node_id: Str;
+    total_cpu: f64;
+    available_cpu: f64;
+    total_memory_mb: i64;
+    available_memory_mb: i64;
+    total_disk_mb: i64;
+    available_disk_mb: i64;
+    gpu_available: i64;
+    tpu_available: i64;
+    tpu_chip_count: i64;
+    running_tasks: i64;
+}
+
+fn node_capacity_new(node_id, total_cpu, total_memory_mb, total_disk_mb, gpu_available): i64 {
+    var p = alloc(88);   # 11 fields * 8
+    NodeCapacity_set_node_id(p, node_id);
+    NodeCapacity_set_total_cpu(p, total_cpu);
+    NodeCapacity_set_available_cpu(p, total_cpu);
+    NodeCapacity_set_total_memory_mb(p, total_memory_mb);
+    NodeCapacity_set_available_memory_mb(p, total_memory_mb);
+    NodeCapacity_set_total_disk_mb(p, total_disk_mb);
+    NodeCapacity_set_available_disk_mb(p, total_disk_mb);
+    NodeCapacity_set_gpu_available(p, gpu_available);
+    NodeCapacity_set_tpu_available(p, 0);
+    NodeCapacity_set_tpu_chip_count(p, 0);
+    NodeCapacity_set_running_tasks(p, 0);
+    return p;
+}
+
+# Configure TPU availability (chainable in Rust; here mutate + return).
+fn node_capacity_with_tpu(node, chip_count): i64 {
+    if (chip_count > 0) { NodeCapacity_set_tpu_available(node, 1); }
+    else { NodeCapacity_set_tpu_available(node, 0); }
+    NodeCapacity_set_tpu_chip_count(node, chip_count);
+    return node;
+}
+
+# Accelerator match — mirrors the Rust `match &req.accelerator` arms,
+# using ai-hwaccel's REQ_* constants against samay's node fields.
+fn _accel_ok(req_ar, req_chips, node): i64 {
+    if (req_ar == REQ_NONE) { return 1; }
+    if (req_ar == REQ_GPU) { return NodeCapacity_gpu_available(node); }
+    if (req_ar == REQ_TPU) {
+        if (NodeCapacity_tpu_available(node) != 1) { return 0; }
+        if (NodeCapacity_tpu_chip_count(node) >= req_chips) { return 1; }
+        return 0;
+    }
+    if (req_ar == REQ_GPU_OR_TPU) {
+        if (NodeCapacity_gpu_available(node) == 1) { return 1; }
+        return NodeCapacity_tpu_available(node);
+    }
+    # Gaudi / AwsNeuron / AnyAccelerator — Rust's `_ => true`.
+    return 1;
+}
+
+# True (1) if this node can fit the given resource requirements.
+fn node_capacity_can_fit(node, req): i64 {
+    if (f64_lt(NodeCapacity_available_cpu(node), ResourceReq_cpu_cores(req)) == 1) { return 0; }
+    if (NodeCapacity_available_memory_mb(node) < ResourceReq_memory_mb(req)) { return 0; }
+    if (_accel_ok(ResourceReq_accel_req(req), ResourceReq_accel_min_chips(req), node) != 1) { return 0; }
+    if (NodeCapacity_available_disk_mb(node) < ResourceReq_disk_mb(req)) { return 0; }
+    return 1;
+}
+
+# Utilization ratio 0.0-1.0 (average of CPU and memory) as an f64.
+fn node_capacity_utilization(node): i64 {
+    var total_cpu = NodeCapacity_total_cpu(node);
+    var total_mem = NodeCapacity_total_memory_mb(node);
+    if (f64_eq(total_cpu, f64_from(0)) == 1) {
+        if (total_mem == 0) { return f64_from(0); }
+    }
+    var cpu_util = f64_from(0);
+    if (f64_gt(total_cpu, f64_from(0)) == 1) {
+        cpu_util = f64_sub(f64_from(1), f64_div(NodeCapacity_available_cpu(node), total_cpu));
+    }
+    var mem_util = f64_from(0);
+    if (total_mem > 0) {
+        mem_util = f64_sub(f64_from(1), f64_div(f64_from(NodeCapacity_available_memory_mb(node)), f64_from(total_mem)));
+    }
+    return f64_div(f64_add(cpu_util, mem_util), f64_from(2));
+}
+
+# Reserve resources for a task.
+fn node_capacity_reserve(node, req): i64 {
+    var used_cpu = f64_sub(NodeCapacity_available_cpu(node), ResourceReq_cpu_cores(req));
+    NodeCapacity_set_available_cpu(node, _f64_max(used_cpu, f64_from(0)));
+    var mem = NodeCapacity_available_memory_mb(node) - ResourceReq_memory_mb(req);
+    if (mem < 0) { mem = 0; }
+    NodeCapacity_set_available_memory_mb(node, mem);
+    var disk = NodeCapacity_available_disk_mb(node) - ResourceReq_disk_mb(req);
+    if (disk < 0) { disk = 0; }
+    NodeCapacity_set_available_disk_mb(node, disk);
+    NodeCapacity_set_running_tasks(node, NodeCapacity_running_tasks(node) + 1);
+    return 0;
+}
+
+# Release resources after a task completes.
+fn node_capacity_release(node, req): i64 {
+    var rel_cpu = f64_add(NodeCapacity_available_cpu(node), ResourceReq_cpu_cores(req));
+    NodeCapacity_set_available_cpu(node, _f64_min(rel_cpu, NodeCapacity_total_cpu(node)));
+    var mem = NodeCapacity_available_memory_mb(node) + ResourceReq_memory_mb(req);
+    if (mem > NodeCapacity_total_memory_mb(node)) { mem = NodeCapacity_total_memory_mb(node); }
+    NodeCapacity_set_available_memory_mb(node, mem);
+    var disk = NodeCapacity_available_disk_mb(node) + ResourceReq_disk_mb(req);
+    if (disk > NodeCapacity_total_disk_mb(node)) { disk = NodeCapacity_total_disk_mb(node); }
+    NodeCapacity_set_available_disk_mb(node, disk);
+    var rt = NodeCapacity_running_tasks(node) - 1;
+    if (rt < 0) { rt = 0; }
+    NodeCapacity_set_running_tasks(node, rt);
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# SchedulingDecision / PreemptionAction / SchedulerStats
+# ---------------------------------------------------------------------------
+
+#derive(accessors)
+struct SchedulingDecision {
+    task_id: Str;
+    assigned_node: Str;
+    reason: Str;
+    score: f64;
+}
+
+fn scheduling_decision_new(task_id, assigned_node, reason, score): i64 {
+    var p = alloc(32);
+    SchedulingDecision_set_task_id(p, task_id);
+    SchedulingDecision_set_assigned_node(p, assigned_node);
+    SchedulingDecision_set_reason(p, reason);
+    SchedulingDecision_set_score(p, score);
+    return p;
+}
+
+#derive(accessors)
+struct PreemptionAction {
+    preempted_task_id: Str;
+    preempting_task_id: Str;
+    reason: Str;
+}
+
+fn preemption_action_new(preempted_task_id, preempting_task_id, reason): i64 {
+    var p = alloc(24);
+    PreemptionAction_set_preempted_task_id(p, preempted_task_id);
+    PreemptionAction_set_preempting_task_id(p, preempting_task_id);
+    PreemptionAction_set_reason(p, reason);
+    return p;
+}
+
+#derive(accessors)
+struct SchedulerStats {
+    total_tasks: i64;
+    queued: i64;
+    running: i64;
+    completed: i64;
+    failed: i64;
+    average_wait_time_ms: i64;
+    average_run_time_ms: i64;
+}
+
+fn scheduler_stats_new(): i64 {
+    var p = alloc(56);
+    SchedulerStats_set_total_tasks(p, 0);
+    SchedulerStats_set_queued(p, 0);
+    SchedulerStats_set_running(p, 0);
+    SchedulerStats_set_completed(p, 0);
+    SchedulerStats_set_failed(p, 0);
+    SchedulerStats_set_average_wait_time_ms(p, 0);
+    SchedulerStats_set_average_run_time_ms(p, 0);
+    return p;
+}

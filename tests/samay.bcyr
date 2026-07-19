@@ -1,0 +1,48 @@
+# samay benchmarks — hot-path microbenchmarks.
+# Stdlib + project modules auto-included via cyrius.cyml / lib.cyr.
+
+include "src/lib.cyr"
+
+fn main(): i64 {
+    alloc_init();
+
+    var req = resource_req_new(f64_from(2), 4096, REQ_NONE, 0, 0, 0);
+    var node = node_capacity_new("n1", f64_from(8), 8192, 10240, 0);
+
+    # can_fit: pure, no allocation — the inner loop of best_fit_node.
+    var b1 = bench_new("node_can_fit");
+    bench_batch_start(b1);
+    var i = 0;
+    while (i < 1000000) { node_capacity_can_fit(node, req); i = i + 1; }
+    bench_batch_stop(b1, 1000000);
+    bench_report(b1);
+
+    # priority classification: pure.
+    var b2 = bench_new("priority_from_numeric");
+    bench_batch_start(b2);
+    i = 0;
+    while (i < 1000000) { task_priority_from_numeric(7); i = i + 1; }
+    bench_batch_stop(b2, 1000000);
+    bench_report(b2);
+
+    # uuid_v4: getrandom + hex format (allocating).
+    var b3 = bench_new("uuid_v4");
+    bench_batch_start(b3);
+    i = 0;
+    while (i < 100000) { uuid_v4(); i = i + 1; }
+    bench_batch_stop(b3, 100000);
+    bench_report(b3);
+
+    # scheduled_task_new: alloc + uuid + dt_now.
+    var b4 = bench_new("scheduled_task_new");
+    bench_batch_start(b4);
+    i = 0;
+    while (i < 50000) { scheduled_task_new("t", "d", "a", 5, req); i = i + 1; }
+    bench_batch_stop(b4, 50000);
+    bench_report(b4);
+
+    return 0;
+}
+
+var r = main();
+syscall(60, r);

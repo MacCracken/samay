@@ -1,0 +1,134 @@
+# cron.cyr — cron-like recurring task triggers (Rust CronScheduler).
+#
+# Optional fields use sentinels: specific_hour/specific_minute = -1 for
+# None (valid values 0-23 / 0-59); last_fired = 0 for None. Entries are a
+# cstr-keyed hashmap by name. Requires: hashmap, vec, str, string, chrono
+# + types.cyr.
+
+#derive(accessors)
+struct CronTaskTemplate {
+    name: Str;
+    description: Str;
+    agent_id: Str;
+    priority: i64;
+    resource_requirements: i64;
+}
+
+fn cron_task_template_new(name, description, agent_id, priority, req): i64 {
+    var p = alloc(40);
+    CronTaskTemplate_set_name(p, name);
+    CronTaskTemplate_set_description(p, description);
+    CronTaskTemplate_set_agent_id(p, agent_id);
+    CronTaskTemplate_set_priority(p, priority);
+    CronTaskTemplate_set_resource_requirements(p, req);
+    return p;
+}
+
+# specific_hour/specific_minute: -1 = None. last_fired: 0 = None (epoch-ns).
+#derive(accessors)
+struct CronEntry {
+    name: Str;
+    interval_seconds: i64;
+    specific_hour: i64;
+    specific_minute: i64;
+    task_template: i64;
+    enabled: i64;
+    last_fired: i64;
+}
+
+fn cron_entry_new(name, interval_seconds, specific_hour, specific_minute, task_template, enabled, last_fired): i64 {
+    var p = alloc(56);
+    CronEntry_set_name(p, name);
+    CronEntry_set_interval_seconds(p, interval_seconds);
+    CronEntry_set_specific_hour(p, specific_hour);
+    CronEntry_set_specific_minute(p, specific_minute);
+    CronEntry_set_task_template(p, task_template);
+    CronEntry_set_enabled(p, enabled);
+    CronEntry_set_last_fired(p, last_fired);
+    return p;
+}
+
+#derive(accessors)
+struct CronScheduler {
+    entries: i64;
+}
+
+fn cron_scheduler_new(): i64 {
+    var c = alloc(8);
+    CronScheduler_set_entries(c, map_new());
+    return c;
+}
+
+# Add an entry; Err(1) if the name is empty (Rust bail!).
+fn cron_scheduler_add_entry(c, entry): i64 {
+    if (strlen(CronEntry_name(entry)) == 0) { return Err(1); }
+    map_set(CronScheduler_entries(c), CronEntry_name(entry), entry);
+    return Ok(0);
+}
+
+# Remove an entry by name; Err(1) if not found.
+fn cron_scheduler_remove_entry(c, name): i64 {
+    if (map_has(CronScheduler_entries(c), name) == 0) { return Err(1); }
+    map_delete(CronScheduler_entries(c), name);
+    return Ok(0);
+}
+
+# All entries as a vec of pointers.
+fn cron_scheduler_list_entries(c): i64 {
+    return map_values(CronScheduler_entries(c));
+}
+
+# "<base> (cron)" as a fresh NUL-terminated cstr.
+fn _cron_task_name(base): i64 {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, base);
+    str_builder_add_cstr(sb, " (cron)");
+    str_builder_add_byte(sb, 0);
+    return str_data(str_builder_build(sb));
+}
+
+# Check which entries are due; fires them (updates last_fired) and returns
+# a vec of freshly-created ScheduledTask pointers.
+fn cron_scheduler_check_due(c): i64 {
+    var now = dt_now();
+    var tasks = vec_new();
+    var entries = map_values(CronScheduler_entries(c));
+    var n = vec_len(entries);
+    var i = 0;
+    while (i < n) {
+        var e = vec_get(entries, i);
+        if (CronEntry_enabled(e) == 1) {
+            var should_fire = 0;
+            var lf = CronEntry_last_fired(e);
+            if (lf != 0) {
+                var elapsed = (now - lf) / 1000000000;
+                if (elapsed < 0) { elapsed = 0; }
+                if (elapsed >= CronEntry_interval_seconds(e)) { should_fire = 1; }
+            } else {
+                should_fire = 1;
+            }
+
+            var time_matches = 1;
+            var sh = CronEntry_specific_hour(e);
+            var sm = CronEntry_specific_minute(e);
+            if (sh >= 0) { if (dt_hour(now) != sh) { time_matches = 0; } }
+            if (sm >= 0) { if (dt_minute(now) != sm) { time_matches = 0; } }
+
+            if (should_fire == 1) {
+                if (time_matches == 1) {
+                    var tmpl = CronEntry_task_template(e);
+                    var task = scheduled_task_new(
+                        _cron_task_name(CronTaskTemplate_name(tmpl)),
+                        CronTaskTemplate_description(tmpl),
+                        CronTaskTemplate_agent_id(tmpl),
+                        CronTaskTemplate_priority(tmpl),
+                        resource_req_clone(CronTaskTemplate_resource_requirements(tmpl)));
+                    vec_push(tasks, task);
+                    CronEntry_set_last_fired(e, now);
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return tasks;
+}

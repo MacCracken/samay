@@ -1,0 +1,567 @@
+# samay test suite
+# Stdlib auto-included via cyrius.cyml; project modules included explicitly.
+
+include "src/uuid.cyr"
+include "src/types.cyr"
+include "src/scheduler.cyr"
+include "src/cron.cyr"
+include "src/training.cyr"
+
+# --- helpers (mirror the Rust test helpers) ---
+
+fn make_req(cpu, mem) {
+    return resource_req_new(cpu, mem, REQ_NONE, 0, 0, 0);
+}
+fn make_node(id, cpu, mem) {
+    return node_capacity_new(id, cpu, mem, 10240, 0);
+}
+fn make_task(name, priority) {
+    return scheduled_task_new(name, "test task", "agent-1", priority, make_req(f64_from(1), 256));
+}
+fn make_template() {
+    return cron_task_template_new("cron-job", "recurring", "agent-1", 5, make_req(f64_from(1), 128));
+}
+fn make_entry(name, interval, enabled, last_fired) {
+    return cron_entry_new(name, interval, 0 - 1, 0 - 1, make_template(), enabled, last_fired);
+}
+
+# --- uuid ---
+
+fn test_uuid_format() {
+    test_group("uuid");
+    var u = uuid_v4();
+    assert_eq(strlen(u), 36, "uuid is 36 chars");
+    assert_eq(load8(u + 8), 45, "dash at index 8");
+    assert_eq(load8(u + 14), 52, "version nibble is '4'");
+    return 0;
+}
+fn test_uuid_unique() {
+    test_group("uuid_unique");
+    assert_eq(streq(uuid_v4(), uuid_v4()), 0, "two uuids differ");
+    return 0;
+}
+
+# --- priority ---
+
+fn test_priority_from_numeric() {
+    test_group("priority_from_numeric");
+    assert_eq(task_priority_from_numeric(1), PRIO_NORMAL, "1->normal");
+    assert_eq(task_priority_from_numeric(3), PRIO_NORMAL, "3->normal");
+    assert_eq(task_priority_from_numeric(4), PRIO_HIGH, "4->high");
+    assert_eq(task_priority_from_numeric(6), PRIO_HIGH, "6->high");
+    assert_eq(task_priority_from_numeric(7), PRIO_CRITICAL, "7->critical");
+    assert_eq(task_priority_from_numeric(10), PRIO_EMERGENCY, "10->emergency");
+    return 0;
+}
+fn test_priority_ordering() {
+    test_group("priority_ordering");
+    assert_eq(PRIO_EMERGENCY > PRIO_CRITICAL, 1, "emergency>critical");
+    assert_eq(PRIO_CRITICAL > PRIO_HIGH, 1, "critical>high");
+    assert_eq(PRIO_HIGH > PRIO_NORMAL, 1, "high>normal");
+    return 0;
+}
+fn test_can_preempt() {
+    test_group("can_preempt");
+    assert_eq(task_priority_can_preempt(PRIO_EMERGENCY, PRIO_NORMAL), 1, "emergency preempts normal");
+    assert_eq(task_priority_can_preempt(PRIO_CRITICAL, PRIO_HIGH), 1, "critical preempts high");
+    assert_eq(task_priority_can_preempt(PRIO_NORMAL, PRIO_NORMAL), 0, "normal !preempt normal");
+    assert_eq(task_priority_can_preempt(PRIO_HIGH, PRIO_CRITICAL), 0, "high !preempt critical");
+    return 0;
+}
+
+# --- status transitions ---
+
+fn test_valid_transitions() {
+    test_group("valid_transitions");
+    var t = make_task("t", 5);
+    assert_eq(is_ok(scheduled_task_transition(t, TASK_SCHEDULED)), 1, "queued->scheduled");
+    assert_eq(ScheduledTask_status(t), TASK_SCHEDULED, "status is scheduled");
+    assert_eq(is_ok(scheduled_task_transition(t, TASK_RUNNING)), 1, "scheduled->running");
+    assert_eq(is_ok(scheduled_task_transition(t, TASK_COMPLETED)), 1, "running->completed");
+    return 0;
+}
+fn test_invalid_transitions() {
+    test_group("invalid_transitions");
+    var t = make_task("t", 5);
+    assert_eq(is_err_result(scheduled_task_transition(t, TASK_COMPLETED)), 1, "queued->completed err");
+    var t2 = make_task("t2", 5);
+    scheduled_task_transition(t2, TASK_CANCELLED);
+    assert_eq(is_err_result(scheduled_task_transition(t2, TASK_QUEUED)), 1, "cancelled->queued err");
+    return 0;
+}
+fn test_running_to_failed() {
+    test_group("running_to_failed");
+    var t = make_task("t", 5);
+    scheduled_task_transition(t, TASK_SCHEDULED);
+    scheduled_task_transition(t, TASK_RUNNING);
+    assert_eq(is_ok(scheduled_task_transition(t, TASK_FAILED)), 1, "running->failed");
+    return 0;
+}
+fn test_invalid_completed_to_running() {
+    test_group("completed_to_running");
+    var t = make_task("t", 5);
+    scheduled_task_transition(t, TASK_SCHEDULED);
+    scheduled_task_transition(t, TASK_RUNNING);
+    scheduled_task_transition(t, TASK_COMPLETED);
+    assert_eq(is_err_result(scheduled_task_transition(t, TASK_RUNNING)), 1, "completed->running err");
+    return 0;
+}
+fn test_preempt_requeue() {
+    test_group("preempt_requeue");
+    var t = make_task("t", 5);
+    scheduled_task_transition(t, TASK_SCHEDULED);
+    scheduled_task_transition(t, TASK_RUNNING);
+    assert_eq(is_ok(scheduled_task_transition(t, TASK_PREEMPTED)), 1, "running->preempted");
+    assert_eq(is_ok(scheduled_task_transition(t, TASK_QUEUED)), 1, "preempted->queued");
+    return 0;
+}
+
+# --- node capacity ---
+
+fn test_node_can_fit() {
+    test_group("node_can_fit");
+    var n = make_node("n1", f64_from(4), 8192);
+    assert_eq(node_capacity_can_fit(n, make_req(f64_from(2), 4096)), 1, "fits");
+    assert_eq(node_capacity_can_fit(n, make_req(f64_from(5), 1024)), 0, "too much cpu");
+    assert_eq(node_capacity_can_fit(n, make_req(f64_from(1), 16384)), 0, "too much mem");
+    return 0;
+}
+fn test_node_can_fit_gpu() {
+    test_group("node_can_fit_gpu");
+    var req = resource_req_new(f64_from(1), 256, REQ_GPU, 0, 0, 0);
+    assert_eq(node_capacity_can_fit(node_capacity_new("n1", f64_from(4), 8192, 10240, 0), req), 0, "no gpu");
+    assert_eq(node_capacity_can_fit(node_capacity_new("n2", f64_from(4), 8192, 10240, 1), req), 1, "gpu");
+    return 0;
+}
+fn test_node_can_fit_tpu() {
+    test_group("node_can_fit_tpu");
+    var n = node_capacity_with_tpu(node_capacity_new("n1", f64_from(4), 8192, 10240, 0), 4);
+    var req = resource_req_new(f64_from(1), 256, REQ_TPU, 2, 0, 0);
+    assert_eq(node_capacity_can_fit(n, req), 1, "tpu 4 chips >= 2");
+    return 0;
+}
+fn test_node_gpu_or_tpu() {
+    test_group("gpu_or_tpu");
+    var n = node_capacity_with_tpu(node_capacity_new("n1", f64_from(4), 8192, 10240, 0), 2);
+    var req = resource_req_new(f64_from(1), 256, REQ_GPU_OR_TPU, 0, 0, 0);
+    assert_eq(node_capacity_can_fit(n, req), 1, "tpu satisfies gpu-or-tpu");
+    return 0;
+}
+fn test_node_utilization() {
+    test_group("utilization");
+    var n = make_node("n1", f64_from(4), 1000);
+    assert_eq(f64_to(node_capacity_utilization(n)), 0, "util 0 initially");
+    node_capacity_reserve(n, make_req(f64_from(2), 500));
+    assert_eq(f64_to(f64_mul(node_capacity_utilization(n), f64_from(100))), 50, "util ~0.5");
+    return 0;
+}
+fn test_node_reserve_release() {
+    test_group("reserve_release");
+    var n = make_node("n1", f64_from(4), 2048);
+    var req = make_req(f64_from(2), 1024);
+    node_capacity_reserve(n, req);
+    assert_eq(f64_to(NodeCapacity_available_cpu(n)), 2, "avail cpu 2");
+    assert_eq(NodeCapacity_available_memory_mb(n), 1024, "avail mem 1024");
+    assert_eq(NodeCapacity_running_tasks(n), 1, "running 1");
+    node_capacity_release(n, req);
+    assert_eq(f64_to(NodeCapacity_available_cpu(n)), 4, "avail cpu 4 after release");
+    assert_eq(NodeCapacity_available_memory_mb(n), 2048, "avail mem 2048 after release");
+    assert_eq(NodeCapacity_running_tasks(n), 0, "running 0 after release");
+    return 0;
+}
+fn test_node_utilization_empty() {
+    test_group("util_empty");
+    var n = node_capacity_new("empty", f64_from(0), 0, 0, 0);
+    assert_eq(f64_to(node_capacity_utilization(n)), 0, "zero-capacity util 0");
+    return 0;
+}
+fn test_deadline_field() {
+    test_group("deadline_field");
+    var t = make_task("deadline-task", 8);
+    ScheduledTask_set_deadline(t, dt_add(dt_now(), dur_seconds(3600)));
+    assert_eq(ScheduledTask_deadline(t) != 0, 1, "deadline set");
+    assert_eq(ScheduledTask_deadline(t) > dt_now(), 1, "deadline in future");
+    return 0;
+}
+fn test_priority_clamped() {
+    test_group("priority_clamped");
+    assert_eq(ScheduledTask_priority(scheduled_task_new("t", "d", "a", 15, resource_req_default())), 10, "clamp 15->10");
+    assert_eq(ScheduledTask_priority(scheduled_task_new("t", "d", "a", 0, resource_req_default())), 1, "clamp 0->1");
+    return 0;
+}
+
+# --- scheduler: submission ---
+
+fn test_submit_task() {
+    test_group("submit_task");
+    var s = task_scheduler_new();
+    var id = result_unwrap(task_scheduler_submit_task(s, make_task("t1", 5)));
+    assert_eq(task_scheduler_get_task(s, id) != 0, 1, "task present");
+    assert_eq(ScheduledTask_status(task_scheduler_get_task(s, id)), TASK_QUEUED, "initial queued");
+    return 0;
+}
+fn test_submit_multiple() {
+    test_group("submit_multiple");
+    var s = task_scheduler_new();
+    var id1 = result_unwrap(task_scheduler_submit_task(s, make_task("t1", 3)));
+    var id2 = result_unwrap(task_scheduler_submit_task(s, make_task("t2", 7)));
+    assert_eq(streq(id1, id2), 0, "ids differ");
+    assert_eq(SchedulerStats_total_tasks(task_scheduler_stats(s)), 2, "total 2");
+    return 0;
+}
+
+# --- scheduler: pending ordering ---
+
+fn test_pending_sorted_by_priority() {
+    test_group("pending_by_priority");
+    var s = task_scheduler_new();
+    var low = make_task("low", 2);
+    ScheduledTask_set_created_at(low, dt_sub(dt_now(), dur_seconds(10)));
+    var high = make_task("high", 8);
+    ScheduledTask_set_created_at(high, dt_sub(dt_now(), dur_seconds(5)));
+    task_scheduler_submit_task(s, low);
+    task_scheduler_submit_task(s, high);
+    var pending = task_scheduler_pending_tasks(s);
+    assert_eq(vec_len(pending), 2, "2 pending");
+    assert_eq(streq(ScheduledTask_name(vec_get(pending, 0)), "high"), 1, "high first");
+    assert_eq(streq(ScheduledTask_name(vec_get(pending, 1)), "low"), 1, "low second");
+    return 0;
+}
+fn test_pending_same_priority_by_created() {
+    test_group("pending_by_created");
+    var s = task_scheduler_new();
+    var older = make_task("older", 5);
+    ScheduledTask_set_created_at(older, dt_sub(dt_now(), dur_seconds(100)));
+    var newer = make_task("newer", 5);
+    ScheduledTask_set_created_at(newer, dt_now());
+    task_scheduler_submit_task(s, newer);
+    task_scheduler_submit_task(s, older);
+    var pending = task_scheduler_pending_tasks(s);
+    assert_eq(streq(ScheduledTask_name(vec_get(pending, 0)), "older"), 1, "older first");
+    assert_eq(streq(ScheduledTask_name(vec_get(pending, 1)), "newer"), 1, "newer second");
+    return 0;
+}
+
+# --- scheduler: preemption ---
+
+fn test_preempt_higher_over_lower() {
+    test_group("preempt_higher");
+    var s = task_scheduler_new();
+    var running = make_task("low", 2);
+    ScheduledTask_set_status(running, TASK_RUNNING);
+    task_scheduler_submit_task(s, running);
+    var emergency = make_task("emergency", 10);
+    var action = task_scheduler_preempt_if_needed(s, emergency);
+    assert_eq(action != 0, 1, "action produced");
+    assert_eq(streq(PreemptionAction_preempting_task_id(action), ScheduledTask_task_id(emergency)), 1, "emergency preempts");
+    return 0;
+}
+fn test_no_preempt_same_priority() {
+    test_group("no_preempt_same");
+    var s = task_scheduler_new();
+    var running = make_task("existing", 5);
+    ScheduledTask_set_status(running, TASK_RUNNING);
+    task_scheduler_submit_task(s, running);
+    assert_eq(task_scheduler_preempt_if_needed(s, make_task("same", 5)), 0, "no preempt");
+    return 0;
+}
+fn test_no_preempt_lower_priority() {
+    test_group("no_preempt_lower");
+    var s = task_scheduler_new();
+    var running = make_task("high", 8);
+    ScheduledTask_set_status(running, TASK_RUNNING);
+    task_scheduler_submit_task(s, running);
+    assert_eq(task_scheduler_preempt_if_needed(s, make_task("low", 2)), 0, "no preempt");
+    return 0;
+}
+
+# --- scheduler: scheduling decisions ---
+
+fn test_schedule_assigns_to_node() {
+    test_group("schedule_assigns");
+    var s = task_scheduler_new();
+    task_scheduler_register_node(s, make_node("n1", f64_from(4), 4096));
+    task_scheduler_submit_task(s, make_task("t1", 5));
+    var decisions = task_scheduler_schedule_pending(s);
+    assert_eq(vec_len(decisions), 1, "1 decision");
+    assert_eq(streq(SchedulingDecision_assigned_node(vec_get(decisions, 0)), "n1"), 1, "assigned n1");
+    return 0;
+}
+fn test_schedule_prefers_preference() {
+    test_group("schedule_pref");
+    var s = task_scheduler_new();
+    task_scheduler_register_node(s, make_node("n1", f64_from(8), 8192));
+    task_scheduler_register_node(s, make_node("n2", f64_from(8), 8192));
+    var task = make_task("t1", 5);
+    ScheduledTask_set_node_preference(task, "n2");
+    task_scheduler_submit_task(s, task);
+    var d = vec_get(task_scheduler_schedule_pending(s), 0);
+    assert_eq(streq(SchedulingDecision_assigned_node(d), "n2"), 1, "assigned n2");
+    assert_eq(streq(SchedulingDecision_reason(d), "preferred node"), 1, "reason preferred");
+    return 0;
+}
+fn test_schedule_fallback_when_full() {
+    test_group("schedule_fallback");
+    var s = task_scheduler_new();
+    var n1 = make_node("n1", f64_from(1), 128);
+    NodeCapacity_set_available_cpu(n1, f64_from(0));
+    NodeCapacity_set_available_memory_mb(n1, 0);
+    task_scheduler_register_node(s, n1);
+    task_scheduler_register_node(s, make_node("n2", f64_from(4), 4096));
+    var task = make_task("t1", 5);
+    ScheduledTask_set_node_preference(task, "n1");
+    task_scheduler_submit_task(s, task);
+    var d = vec_get(task_scheduler_schedule_pending(s), 0);
+    assert_eq(streq(SchedulingDecision_assigned_node(d), "n2"), 1, "fallback n2");
+    assert_eq(streq(SchedulingDecision_reason(d), "best-fit selection"), 1, "reason best-fit");
+    return 0;
+}
+fn test_schedule_transitions() {
+    test_group("schedule_transitions");
+    var s = task_scheduler_new();
+    task_scheduler_register_node(s, make_node("n1", f64_from(4), 4096));
+    var id = result_unwrap(task_scheduler_submit_task(s, make_task("t1", 5)));
+    task_scheduler_schedule_pending(s);
+    assert_eq(ScheduledTask_status(task_scheduler_get_task(s, id)), TASK_SCHEDULED, "scheduled");
+    return 0;
+}
+
+# --- scheduler: cancel ---
+
+fn test_cancel_queued() {
+    test_group("cancel_queued");
+    var s = task_scheduler_new();
+    var id = result_unwrap(task_scheduler_submit_task(s, make_task("t1", 5)));
+    assert_eq(is_ok(task_scheduler_cancel_task(s, id)), 1, "cancel ok");
+    assert_eq(ScheduledTask_status(task_scheduler_get_task(s, id)), TASK_CANCELLED, "cancelled");
+    return 0;
+}
+fn test_cancel_nonexistent() {
+    test_group("cancel_nonexistent");
+    var s = task_scheduler_new();
+    assert_eq(is_err_result(task_scheduler_cancel_task(s, "nonexistent")), 1, "err");
+    return 0;
+}
+
+# --- scheduler: stats + edge cases ---
+
+fn test_stats_empty() {
+    test_group("stats_empty");
+    var st = task_scheduler_stats(task_scheduler_new());
+    assert_eq(SchedulerStats_total_tasks(st), 0, "total 0");
+    assert_eq(SchedulerStats_queued(st), 0, "queued 0");
+    assert_eq(SchedulerStats_running(st), 0, "running 0");
+    return 0;
+}
+fn test_stats_counts() {
+    test_group("stats_counts");
+    var s = task_scheduler_new();
+    task_scheduler_submit_task(s, make_task("q1", 3));
+    task_scheduler_submit_task(s, make_task("q2", 5));
+    var r = make_task("r1", 7);
+    ScheduledTask_set_status(r, TASK_RUNNING);
+    task_scheduler_submit_task(s, r);
+    var st = task_scheduler_stats(s);
+    assert_eq(SchedulerStats_total_tasks(st), 3, "total 3");
+    assert_eq(SchedulerStats_queued(st), 2, "queued 2");
+    assert_eq(SchedulerStats_running(st), 1, "running 1");
+    return 0;
+}
+fn test_empty_pending() {
+    test_group("empty_pending");
+    assert_eq(vec_len(task_scheduler_pending_tasks(task_scheduler_new())), 0, "no pending");
+    return 0;
+}
+fn test_schedule_no_nodes() {
+    test_group("schedule_no_nodes");
+    var s = task_scheduler_new();
+    task_scheduler_submit_task(s, make_task("t1", 5));
+    assert_eq(vec_len(task_scheduler_schedule_pending(s)), 0, "no decisions");
+    assert_eq(vec_len(task_scheduler_pending_tasks(s)), 1, "still queued");
+    return 0;
+}
+fn test_all_nodes_full() {
+    test_group("all_nodes_full");
+    var s = task_scheduler_new();
+    var n = make_node("n1", f64_from(1), 128);
+    NodeCapacity_set_available_cpu(n, f64_from(0));
+    NodeCapacity_set_available_memory_mb(n, 0);
+    task_scheduler_register_node(s, n);
+    task_scheduler_submit_task(s, make_task("t1", 5));
+    assert_eq(vec_len(task_scheduler_schedule_pending(s)), 0, "no decisions");
+    return 0;
+}
+fn test_tasks_for_node() {
+    test_group("tasks_for_node");
+    var s = task_scheduler_new();
+    task_scheduler_register_node(s, make_node("n1", f64_from(8), 8192));
+    task_scheduler_register_node(s, make_node("n2", f64_from(8), 8192));
+    var t1 = make_task("t1", 5);
+    ScheduledTask_set_node_preference(t1, "n1");
+    var t2 = make_task("t2", 5);
+    ScheduledTask_set_node_preference(t2, "n2");
+    task_scheduler_submit_task(s, t1);
+    task_scheduler_submit_task(s, t2);
+    task_scheduler_schedule_pending(s);
+    assert_eq(vec_len(task_scheduler_tasks_for_node(s, "n1")), 1, "n1 has 1");
+    assert_eq(vec_len(task_scheduler_tasks_for_node(s, "n2")), 1, "n2 has 1");
+    assert_eq(vec_len(task_scheduler_tasks_for_node(s, "n3")), 0, "n3 has 0");
+    return 0;
+}
+
+# --- cron ---
+
+fn test_cron_add_entry() {
+    test_group("cron_add");
+    var c = cron_scheduler_new();
+    assert_eq(is_ok(cron_scheduler_add_entry(c, make_entry("backup", 3600, 1, 0))), 1, "add ok");
+    assert_eq(vec_len(cron_scheduler_list_entries(c)), 1, "1 entry");
+    return 0;
+}
+fn test_cron_add_empty_name() {
+    test_group("cron_empty_name");
+    var c = cron_scheduler_new();
+    assert_eq(is_err_result(cron_scheduler_add_entry(c, make_entry("", 60, 1, 0))), 1, "empty rejected");
+    return 0;
+}
+fn test_cron_remove() {
+    test_group("cron_remove");
+    var c = cron_scheduler_new();
+    cron_scheduler_add_entry(c, make_entry("backup", 3600, 1, 0));
+    assert_eq(is_ok(cron_scheduler_remove_entry(c, "backup")), 1, "remove ok");
+    assert_eq(vec_len(cron_scheduler_list_entries(c)), 0, "empty");
+    return 0;
+}
+fn test_cron_remove_nonexistent() {
+    test_group("cron_remove_none");
+    assert_eq(is_err_result(cron_scheduler_remove_entry(cron_scheduler_new(), "nope")), 1, "err");
+    return 0;
+}
+fn test_cron_fires_first_time() {
+    test_group("cron_first_fire");
+    var c = cron_scheduler_new();
+    cron_scheduler_add_entry(c, make_entry("first-run", 60, 1, 0));
+    var tasks = cron_scheduler_check_due(c);
+    assert_eq(vec_len(tasks), 1, "1 task");
+    assert_eq(streq(ScheduledTask_name(vec_get(tasks, 0)), "cron-job (cron)"), 1, "task name");
+    return 0;
+}
+fn test_cron_respects_interval() {
+    test_group("cron_interval");
+    var c = cron_scheduler_new();
+    cron_scheduler_add_entry(c, make_entry("frequent", 3600, 1, dt_now()));
+    assert_eq(vec_len(cron_scheduler_check_due(c)), 0, "not due");
+    return 0;
+}
+fn test_cron_disabled() {
+    test_group("cron_disabled");
+    var c = cron_scheduler_new();
+    cron_scheduler_add_entry(c, make_entry("disabled", 1, 0, 0));
+    assert_eq(vec_len(cron_scheduler_check_due(c)), 0, "disabled skipped");
+    return 0;
+}
+fn test_cron_fires_when_elapsed() {
+    test_group("cron_elapsed");
+    var c = cron_scheduler_new();
+    cron_scheduler_add_entry(c, make_entry("overdue", 10, 1, dt_sub(dt_now(), dur_seconds(60))));
+    assert_eq(vec_len(cron_scheduler_check_due(c)), 1, "fires");
+    return 0;
+}
+
+# --- training ---
+
+fn test_training_method_name() {
+    test_group("training_name");
+    assert_eq(streq(samay_training_method_name(TM_LORA), "lora"), 1, "lora");
+    assert_eq(streq(samay_training_method_name(TM_QLORA), "qlora"), 1, "qlora");
+    assert_eq(streq(samay_training_method_name(TM_FULL), "full"), 1, "full");
+    assert_eq(streq(samay_training_method_name(TM_DPO), "dpo"), 1, "dpo");
+    assert_eq(streq(samay_training_method_name(TM_RLHF), "rlhf"), 1, "rlhf");
+    assert_eq(streq(samay_training_method_name(TM_DISTILL), "distillation"), 1, "distillation");
+    return 0;
+}
+fn test_training_high_priority() {
+    test_group("training_high_prio");
+    var job = training_job_template_new("meta-llama/Llama-2-7b", TM_LORA, "/data/training.jsonl", 0, 3600, 300);
+    var task = training_job_to_scheduled_task(job, "agent-123");
+    assert_eq(streq(ScheduledTask_name(task), "train-lora-meta-llama/Llama-2-7b"), 1, "name");
+    assert_eq(ScheduledTask_priority(task), 6, "priority 6");
+    assert_eq(ResourceReq_accel_req(ScheduledTask_resource_requirements(task)) != REQ_NONE, 1, "has accel");
+    assert_eq(ScheduledTask_deadline(task) != 0, 1, "has deadline");
+    return 0;
+}
+fn test_training_no_deadline_when_zero() {
+    test_group("training_no_deadline");
+    var job = training_job_template_new("model", TM_QLORA, "data", "gpu-node-1", 0, 600);
+    var task = training_job_to_scheduled_task(job, "agent-456");
+    assert_eq(ScheduledTask_deadline(task), 0, "no deadline");
+    assert_eq(streq(ScheduledTask_node_preference(task), "gpu-node-1"), 1, "node pref");
+    return 0;
+}
+fn test_training_requires_accel() {
+    test_group("training_accel");
+    var job = training_job_template_new("m", TM_FULL, "d", 0, 0, 0);
+    var task = training_job_to_scheduled_task(job, "a");
+    var req = ScheduledTask_resource_requirements(task);
+    assert_eq(ResourceReq_accel_req(req), REQ_GPU_OR_TPU, "gpu-or-tpu");
+    assert_eq(ResourceReq_memory_mb(req) >= 4096, 1, "mem >= 4096");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_uuid_format();
+    test_uuid_unique();
+    test_priority_from_numeric();
+    test_priority_ordering();
+    test_can_preempt();
+    test_valid_transitions();
+    test_invalid_transitions();
+    test_running_to_failed();
+    test_invalid_completed_to_running();
+    test_preempt_requeue();
+    test_node_can_fit();
+    test_node_can_fit_gpu();
+    test_node_can_fit_tpu();
+    test_node_gpu_or_tpu();
+    test_node_utilization();
+    test_node_reserve_release();
+    test_node_utilization_empty();
+    test_deadline_field();
+    test_priority_clamped();
+    test_submit_task();
+    test_submit_multiple();
+    test_pending_sorted_by_priority();
+    test_pending_same_priority_by_created();
+    test_preempt_higher_over_lower();
+    test_no_preempt_same_priority();
+    test_no_preempt_lower_priority();
+    test_schedule_assigns_to_node();
+    test_schedule_prefers_preference();
+    test_schedule_fallback_when_full();
+    test_schedule_transitions();
+    test_cancel_queued();
+    test_cancel_nonexistent();
+    test_stats_empty();
+    test_stats_counts();
+    test_empty_pending();
+    test_schedule_no_nodes();
+    test_all_nodes_full();
+    test_tasks_for_node();
+    test_cron_add_entry();
+    test_cron_add_empty_name();
+    test_cron_remove();
+    test_cron_remove_nonexistent();
+    test_cron_fires_first_time();
+    test_cron_respects_interval();
+    test_cron_disabled();
+    test_cron_fires_when_elapsed();
+    test_training_method_name();
+    test_training_high_priority();
+    test_training_no_deadline_when_zero();
+    test_training_requires_accel();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

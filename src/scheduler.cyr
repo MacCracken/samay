@@ -1,0 +1,285 @@
+# scheduler.cyr — the core distributed task scheduler (Rust TaskScheduler).
+#
+# tasks/nodes are cstr-keyed hashmaps (map_new) of heap struct pointers.
+# Iteration uses map_values (→ vec). Pending tasks are sorted by priority
+# desc, then created_at asc (stable insertion sort), matching Rust's
+# sort_by. Requires: hashmap, vec, str, string, chrono, result + types.cyr.
+
+#derive(accessors)
+struct TaskScheduler {
+    tasks: i64;
+    nodes: i64;
+}
+
+fn task_scheduler_new(): i64 {
+    var s = alloc(16);
+    TaskScheduler_set_tasks(s, map_new());
+    TaskScheduler_set_nodes(s, map_new());
+    return s;
+}
+
+# --- ordering ---
+
+# True (1) if task `a` should be scheduled before `b`: higher priority
+# first, ties broken by earlier created_at (Rust sort_by).
+fn _task_before(a, b): i64 {
+    var pa = ScheduledTask_priority(a);
+    var pb = ScheduledTask_priority(b);
+    if (pa > pb) { return 1; }
+    if (pa < pb) { return 0; }
+    if (ScheduledTask_created_at(a) < ScheduledTask_created_at(b)) { return 1; }
+    return 0;
+}
+
+# Stable insertion sort of a vec of task pointers by `_task_before`.
+fn _sort_tasks(v): i64 {
+    var n = vec_len(v);
+    var i = 1;
+    while (i < n) {
+        var key = vec_get(v, i);
+        var j = i - 1;
+        while (j >= 0) {
+            var cur = vec_get(v, j);
+            if (_task_before(key, cur) == 0) { break; }
+            vec_set(v, j + 1, cur);
+            j = j - 1;
+        }
+        vec_set(v, j + 1, key);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# --- registration / submission / lookup ---
+
+fn task_scheduler_register_node(s, node): i64 {
+    map_set(TaskScheduler_nodes(s), NodeCapacity_node_id(node), node);
+    return 0;
+}
+
+# Submit a task; returns Ok(task_id).
+fn task_scheduler_submit_task(s, task): i64 {
+    var id = ScheduledTask_task_id(task);
+    map_set(TaskScheduler_tasks(s), id, task);
+    return Ok(id);
+}
+
+# Get a task pointer by id, or 0 if absent.
+fn task_scheduler_get_task(s, id): i64 {
+    return map_get(TaskScheduler_tasks(s), id);
+}
+
+# Release the node resources a task was holding, if any.
+fn _release_task_node(s, task): i64 {
+    var np = ScheduledTask_node_preference(task);
+    if (np != 0) {
+        var node = map_get(TaskScheduler_nodes(s), np);
+        if (node != 0) {
+            node_capacity_release(node, ScheduledTask_resource_requirements(task));
+        }
+    }
+    return 0;
+}
+
+# Cancel a task. Ok(0) on success, Err(1) if not found or bad transition.
+fn task_scheduler_cancel_task(s, id): i64 {
+    var task = map_get(TaskScheduler_tasks(s), id);
+    if (task == 0) { return Err(1); }
+    var st = ScheduledTask_status(task);
+    if (st == TASK_RUNNING) { _release_task_node(s, task); }
+    elif (st == TASK_SCHEDULED) { _release_task_node(s, task); }
+    var r = scheduled_task_transition(task, TASK_CANCELLED);
+    if (is_err_result(r) == 1) { return r; }
+    ScheduledTask_set_completed_at(task, dt_now());
+    return Ok(0);
+}
+
+# --- queries ---
+
+# Pending (Queued) tasks, sorted by priority desc then created_at asc.
+fn task_scheduler_pending_tasks(s): i64 {
+    var all = map_values(TaskScheduler_tasks(s));
+    var out = vec_new();
+    var n = vec_len(all);
+    var i = 0;
+    while (i < n) {
+        var t = vec_get(all, i);
+        if (ScheduledTask_status(t) == TASK_QUEUED) { vec_push(out, t); }
+        i = i + 1;
+    }
+    _sort_tasks(out);
+    return out;
+}
+
+# Tasks assigned to a node (Scheduled|Running with matching node_preference).
+fn task_scheduler_tasks_for_node(s, node_id): i64 {
+    var all = map_values(TaskScheduler_tasks(s));
+    var out = vec_new();
+    var n = vec_len(all);
+    var i = 0;
+    while (i < n) {
+        var t = vec_get(all, i);
+        var np = ScheduledTask_node_preference(t);
+        if (np != 0) {
+            if (streq(np, node_id) == 1) {
+                var st = ScheduledTask_status(t);
+                if (st == TASK_SCHEDULED) { vec_push(out, t); }
+                elif (st == TASK_RUNNING) { vec_push(out, t); }
+            }
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+# Node with the most available capacity (lowest utilization) that fits req;
+# returns its node_id cstr, or 0 if none fits.
+fn _best_fit_node(s, req): i64 {
+    var nodes = map_values(TaskScheduler_nodes(s));
+    var n = vec_len(nodes);
+    var best = 0;
+    var best_util = f64_from(0);
+    var i = 0;
+    while (i < n) {
+        var node = vec_get(nodes, i);
+        if (node_capacity_can_fit(node, req) == 1) {
+            var u = node_capacity_utilization(node);
+            if (best == 0) { best = node; best_util = u; }
+            elif (f64_lt(u, best_util) == 1) { best = node; best_util = u; }
+        }
+        i = i + 1;
+    }
+    if (best == 0) { return 0; }
+    return NodeCapacity_node_id(best);
+}
+
+# --- scheduling ---
+
+# Schedule all pending tasks onto available nodes; returns a vec of
+# SchedulingDecision pointers.
+fn task_scheduler_schedule_pending(s): i64 {
+    var decisions = vec_new();
+    var pending = task_scheduler_pending_tasks(s);
+    var n = vec_len(pending);
+    var i = 0;
+    while (i < n) {
+        var task = vec_get(pending, i);
+        var req = ScheduledTask_resource_requirements(task);
+        var pref = ScheduledTask_node_preference(task);
+
+        var chosen = 0;
+        if (pref != 0) {
+            var pnode = map_get(TaskScheduler_nodes(s), pref);
+            if (pnode != 0) {
+                if (node_capacity_can_fit(pnode, req) == 1) { chosen = pref; }
+            }
+        }
+        if (chosen == 0) { chosen = _best_fit_node(s, req); }
+
+        if (chosen != 0) {
+            var node = map_get(TaskScheduler_nodes(s), chosen);
+            var score = f64_sub(f64_from(1), node_capacity_utilization(node));
+            node_capacity_reserve(node, req);
+            scheduled_task_transition(task, TASK_SCHEDULED);
+            ScheduledTask_set_scheduled_at(task, dt_now());
+            var reason = "best-fit selection";
+            if (pref != 0) { if (streq(pref, chosen) == 1) { reason = "preferred node"; } }
+            ScheduledTask_set_node_preference(task, chosen);
+            vec_push(decisions, scheduling_decision_new(ScheduledTask_task_id(task), chosen, reason, score));
+        }
+        i = i + 1;
+    }
+    return decisions;
+}
+
+# --- preemption ---
+
+fn _preempt_reason(hi, lo): i64 {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "priority ");
+    str_builder_add_int(sb, hi);
+    str_builder_add_cstr(sb, " preempts priority ");
+    str_builder_add_int(sb, lo);
+    str_builder_add_cstr(sb, " task");
+    str_builder_add_byte(sb, 0);
+    return str_data(str_builder_build(sb));
+}
+
+# If `task` should preempt a running task, return a PreemptionAction; else 0.
+# Picks the lowest-priority running task the new task can preempt; ties go
+# to the newest (later created_at). Mirrors the Rust candidate selection.
+fn task_scheduler_preempt_if_needed(s, task): i64 {
+    var new_prio = scheduled_task_priority_class(task);
+    var all = map_values(TaskScheduler_tasks(s));
+    var n = vec_len(all);
+    var cand = 0;
+    var i = 0;
+    while (i < n) {
+        var t = vec_get(all, i);
+        if (ScheduledTask_status(t) == TASK_RUNNING) {
+            if (task_priority_can_preempt(new_prio, scheduled_task_priority_class(t)) == 1) {
+                if (cand == 0) { cand = t; }
+                elif (ScheduledTask_priority(t) < ScheduledTask_priority(cand)) { cand = t; }
+                elif (ScheduledTask_priority(t) == ScheduledTask_priority(cand)) {
+                    if (ScheduledTask_created_at(t) > ScheduledTask_created_at(cand)) { cand = t; }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    if (cand == 0) { return 0; }
+    var reason = _preempt_reason(ScheduledTask_priority(task), ScheduledTask_priority(cand));
+    return preemption_action_new(ScheduledTask_task_id(cand), ScheduledTask_task_id(task), reason);
+}
+
+# --- stats ---
+
+fn task_scheduler_stats(s): i64 {
+    var st = scheduler_stats_new();
+    var all = map_values(TaskScheduler_tasks(s));
+    var n = vec_len(all);
+    SchedulerStats_set_total_tasks(st, n);
+
+    var wait_sum = 0;
+    var wait_cnt = 0;
+    var run_sum = 0;
+    var run_cnt = 0;
+
+    var i = 0;
+    while (i < n) {
+        var t = vec_get(all, i);
+        var status = ScheduledTask_status(t);
+        if (status == TASK_QUEUED) { SchedulerStats_set_queued(st, SchedulerStats_queued(st) + 1); }
+        elif (status == TASK_SCHEDULED) { SchedulerStats_set_queued(st, SchedulerStats_queued(st) + 1); }
+        elif (status == TASK_RUNNING) { SchedulerStats_set_running(st, SchedulerStats_running(st) + 1); }
+        elif (status == TASK_COMPLETED) {
+            SchedulerStats_set_completed(st, SchedulerStats_completed(st) + 1);
+            var started = ScheduledTask_started_at(t);
+            var completed = ScheduledTask_completed_at(t);
+            if (started != 0) {
+                if (completed != 0) {
+                    var ms = (completed - started) / 1000000;
+                    if (ms < 0) { ms = 0; }
+                    run_sum = run_sum + ms;
+                    run_cnt = run_cnt + 1;
+                }
+            }
+        }
+        elif (status == TASK_FAILED) { SchedulerStats_set_failed(st, SchedulerStats_failed(st) + 1); }
+        elif (status == TASK_CANCELLED) { SchedulerStats_set_completed(st, SchedulerStats_completed(st) + 1); }
+        elif (status == TASK_PREEMPTED) { SchedulerStats_set_queued(st, SchedulerStats_queued(st) + 1); }
+
+        var started2 = ScheduledTask_started_at(t);
+        if (started2 != 0) {
+            var wms = (started2 - ScheduledTask_created_at(t)) / 1000000;
+            if (wms < 0) { wms = 0; }
+            wait_sum = wait_sum + wms;
+            wait_cnt = wait_cnt + 1;
+        }
+        i = i + 1;
+    }
+
+    if (wait_cnt > 0) { SchedulerStats_set_average_wait_time_ms(st, wait_sum / wait_cnt); }
+    if (run_cnt > 0) { SchedulerStats_set_average_run_time_ms(st, run_sum / run_cnt); }
+    return st;
+}

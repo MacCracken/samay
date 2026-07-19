@@ -1,0 +1,40 @@
+# uuid.cyr — RFC-4122 version-4 UUID generation.
+#
+# Cyrius port of the Rust `uuid::new_v4().to_string()` used for task ids.
+# 122 random bits from the kernel CSPRNG (`random_bytes` → getrandom(2)),
+# with the 4-bit version field set to 0100b and the 2-bit variant field
+# set to 10b, rendered as the canonical 8-4-4-4-12 lowercase hex form.
+#
+# Requires (auto-prepended from cyrius.cyml [deps].stdlib): random, str,
+# alloc, syscalls.
+
+var _UUID_HEX = "0123456789abcdef";
+
+# Generate a random v4 UUID and return it as a heap NUL-terminated cstr
+# ("xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx", y in {8,9,a,b}). samay stores
+# all strings as cstr (null-terminated char*) for uniform map_new keys.
+fn uuid_v4(): i64 {
+    var b[16];
+    random_bytes(&b, 16);
+    # version 4: high nibble of byte 6 = 0100b
+    store8(&b + 6, (load8(&b + 6) & 0x0F) | 0x40);
+    # variant RFC-4122: high bits of byte 8 = 10b
+    store8(&b + 8, (load8(&b + 8) & 0x3F) | 0x80);
+
+    var out = alloc(37);
+    var op = 0;
+    var i = 0;
+    while (i < 16) {
+        if (i == 4) { store8(out + op, 45); op = op + 1; }   # '-'
+        if (i == 6) { store8(out + op, 45); op = op + 1; }
+        if (i == 8) { store8(out + op, 45); op = op + 1; }
+        if (i == 10) { store8(out + op, 45); op = op + 1; }
+        var byte = load8(&b + i);
+        store8(out + op, load8(_UUID_HEX + (byte >> 4)));
+        store8(out + op + 1, load8(_UUID_HEX + (byte & 0x0F)));
+        op = op + 2;
+        i = i + 1;
+    }
+    store8(out + op, 0);
+    return out;
+}
