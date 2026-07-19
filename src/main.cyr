@@ -20,6 +20,10 @@ fn main(): i64 {
     var s = task_scheduler_new();
     task_scheduler_register_node(s, node_capacity_new("gpu-node-1", f64_from(8), 16384, 102400, 1));
     task_scheduler_register_node(s, node_capacity_new("cpu-node-1", f64_from(16), 32768, 204800, 0));
+    # M3: a node with a real ai-hwaccel accelerator profile (8-chip TPU v5p).
+    task_scheduler_register_node(s, node_capacity_add_accel(
+        node_capacity_new("tpu-node-1", f64_from(8), 16384, 102400, 0),
+        profile_tpu(0, 8, TPU_V5P)));
 
     # a normal task and a GPU training job
     task_scheduler_submit_task(s, scheduled_task_new(

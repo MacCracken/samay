@@ -27,8 +27,9 @@ must match Rust behavior and its test suite (`rust-old/` is the oracle).
 5. **Errors / logging** — `anyhow::Result` → `lib/result` (`Ok`/`Err`/`?`);
    `tracing` → `lib/sakshi`.
 6. **AcceleratorRequirement** — consumed from ai-hwaccel's `REQ_*` enum. `can_fit`
-   replicates Rust's self-contained match on node fields; using ai-hwaccel's
-   `requirement_satisfied()` / profiles for placement is a v1.0 item.
+   replicates Rust's self-contained match on node fields. *(Superseded in v0.4.0
+   by [ADR 0002](0002-ai-hwaccel-profile-placement.md): placement now delegates
+   to ai-hwaccel's `requirement_satisfied()` over real device profiles.)*
 7. **UUID** — RFC-4122 v4 synthesized from `random_bytes` (getrandom).
 
 ## Consequences

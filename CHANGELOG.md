@@ -4,6 +4,36 @@ All notable changes to Samay are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] — 2026-07-18
+
+**M3 — resource-aware placement via ai-hwaccel.** Node accelerator availability
+is now a list of real ai-hwaccel device profiles; placement delegates to
+ai-hwaccel's `requirement_satisfied()`. See [ADR-0002](docs/adr/0002-ai-hwaccel-profile-placement.md).
+
+### Added
+- `NodeCapacity.accel_profiles` — a vec of ai-hwaccel accelerator profiles.
+  `node_capacity_add_accel(node, profile)` attaches `profile_cuda` / `profile_rocm`
+  / `profile_tpu` / `profile_gaudi` / `profile_neuron` (chainable).
+- 5 placement tests (gaudi/neuron/any-accelerator require a real profile;
+  `add_accel` wiring; TPU insufficient-chips). **130/130 assertions pass.**
+- Demo registers a real 8-chip TPU-v5p node via `add_accel`.
+
+### Changed — breaking (pre-1.0)
+- `node_capacity_can_fit`'s accelerator check delegates to ai-hwaccel
+  `find_satisfying_profile()` / `requirement_satisfied()`; the flat
+  `gpu_available` / `tpu_available` / `tpu_chip_count` fields are removed. Parity
+  constructors kept: `node_capacity_new(…, gpu=1)` → a CUDA profile,
+  `node_capacity_with_tpu(node, chips)` → a TPU profile.
+
+### Fixed — intended divergence from the Rust oracle (ADR-0002)
+- `REQ_GAUDI` / `REQ_AWS_NEURON` / `REQ_ANY_ACCELERATOR` now require an **actual
+  matching accelerator profile** on the node. The Rust port's `_ => true` stub
+  fit them on any node — including accelerator-less ones — violating the
+  "never schedule an accelerator task without checking availability" rule.
+
+### Reviewed
+- Focused 2-lens adversarial review (placement correctness + integration/lifetime): 0 findings.
+
 ## [0.3.0] — 2026-07-18
 
 **M2 — cron correctness.** Replaces the interval+hour/minute trigger model with

@@ -153,6 +153,51 @@ fn test_node_gpu_or_tpu() {
     assert_eq(node_capacity_can_fit(n, req), 1, "tpu satisfies gpu-or-tpu");
     return 0;
 }
+
+# --- M3: real availability checking via ai-hwaccel profiles (ADR-0002) ---
+
+fn test_node_gaudi_requires_profile() {
+    test_group("node_gaudi");
+    var req = resource_req_new(f64_from(1), 256, REQ_GAUDI, 0, 0, 0);
+    # No accelerator profile -> does NOT fit (Rust port's stub returned true here).
+    assert_eq(node_capacity_can_fit(node_capacity_new("n1", f64_from(4), 8192, 10240, 0), req), 0, "no accel -> no gaudi");
+    # A real Gaudi profile satisfies it.
+    var g = node_capacity_add_accel(node_capacity_new("n2", f64_from(4), 8192, 10240, 0), profile_gaudi(0, GAUDI2));
+    assert_eq(node_capacity_can_fit(g, req), 1, "gaudi profile fits");
+    # A GPU node does NOT satisfy REQ_GAUDI (specificity).
+    assert_eq(node_capacity_can_fit(node_capacity_new("n3", f64_from(4), 8192, 10240, 1), req), 0, "gpu != gaudi");
+    return 0;
+}
+fn test_node_neuron_requires_profile() {
+    test_group("node_neuron");
+    var req = resource_req_new(f64_from(1), 256, REQ_AWS_NEURON, 0, 0, 0);
+    assert_eq(node_capacity_can_fit(node_capacity_new("n1", f64_from(4), 8192, 10240, 0), req), 0, "no accel -> no neuron");
+    var n = node_capacity_add_accel(node_capacity_new("n2", f64_from(4), 8192, 10240, 0), profile_neuron(0, 0, 2));
+    assert_eq(node_capacity_can_fit(n, req), 1, "neuron profile fits");
+    return 0;
+}
+fn test_node_any_accelerator() {
+    test_group("node_any_accel");
+    var req = resource_req_new(f64_from(1), 256, REQ_ANY_ACCELERATOR, 0, 0, 0);
+    assert_eq(node_capacity_can_fit(node_capacity_new("cpu", f64_from(4), 8192, 10240, 0), req), 0, "cpu-only -> no");
+    assert_eq(node_capacity_can_fit(node_capacity_new("gpu", f64_from(4), 8192, 10240, 1), req), 1, "gpu -> any-accel");
+    return 0;
+}
+fn test_node_add_accel_gpu() {
+    test_group("node_add_accel");
+    var req = resource_req_new(f64_from(1), 256, REQ_GPU, 0, 0, 0);
+    var n = node_capacity_add_accel(node_capacity_new("n", f64_from(4), 8192, 10240, 0), profile_cuda(0, 0));
+    assert_eq(node_capacity_can_fit(n, req), 1, "added cuda satisfies gpu");
+    return 0;
+}
+fn test_node_tpu_insufficient_chips() {
+    test_group("node_tpu_chips");
+    # TPU with 1 chip does not satisfy a 2-chip requirement.
+    var n = node_capacity_with_tpu(node_capacity_new("n1", f64_from(4), 8192, 10240, 0), 1);
+    var req = resource_req_new(f64_from(1), 256, REQ_TPU, 2, 0, 0);
+    assert_eq(node_capacity_can_fit(n, req), 0, "1 chip < 2 required");
+    return 0;
+}
 fn test_node_utilization() {
     test_group("utilization");
     var n = make_node("n1", f64_from(4), 1000);
@@ -596,6 +641,11 @@ fn main() {
     test_node_can_fit_gpu();
     test_node_can_fit_tpu();
     test_node_gpu_or_tpu();
+    test_node_gaudi_requires_profile();
+    test_node_neuron_requires_profile();
+    test_node_any_accelerator();
+    test_node_add_accel_gpu();
+    test_node_tpu_insufficient_chips();
     test_node_utilization();
     test_node_reserve_release();
     test_node_utilization_empty();

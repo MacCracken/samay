@@ -11,7 +11,7 @@
 - [x] Benchmarks captured (`docs/benchmarks.md`)
 - [x] Real cron-expression parsing + parse-time validation (v0.3.0)
 - [x] Missed-schedule policy (catch-up vs skip), explicit + logged (v0.3.0)
-- [ ] Resource-aware placement wired through ai-hwaccel `requirement_satisfied()`/profiles
+- [x] Resource-aware placement wired through ai-hwaccel `requirement_satisfied()`/profiles (v0.4.0)
 - [ ] JSON `Serialize` + `Deserialize` with roundtrip tests for every public type
 - [ ] Determinism guarantees (same schedule + same time → same decisions), tested
 - [ ] At least one downstream consumer (daimon or kavach) green against `dist/samay.cyr`
@@ -34,10 +34,12 @@ always logged. Hardened via a 4-lens adversarial review (7 findings fixed).
 Follow-up perf item: alloc-free `cron_expr_matches` (currently ~298 ns/call via
 `epoch_to_date`).
 
-### M3 — Resource-aware placement v2 (v0.4.0)
-Build ai-hwaccel profiles from `NodeCapacity` and place via
-`requirement_satisfied()`; never schedule an accelerator task without an
-availability check. Utilization/scoring refinements.
+### M3 — Resource-aware placement v2 (v0.4.0) — ✅ 2026-07-18
+`NodeCapacity` holds real ai-hwaccel accelerator profiles; `can_fit` places via
+`find_satisfying_profile()`/`requirement_satisfied()` — an accelerator task never
+fits a node without a matching profile (fixes the Rust port's `_ => true` stub;
+[ADR-0002](../adr/0002-ai-hwaccel-profile-placement.md)). Focused adversarial
+review: 0 findings. Utilization/scoring refinements deferred.
 
 ### M4 — Serialization + persistence (v0.5.0)
 Full JSON `Serialize`/`Deserialize` for every public type with roundtrip tests;

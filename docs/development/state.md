@@ -5,9 +5,10 @@
 
 ## Version
 
-**0.3.0** — cron correctness (M2). Real cron expressions + missed-schedule
-policy, hardened via adversarial review. Built on the 0.2.0 Rust→Cyrius parity
-port (Rust reference frozen at `rust-old/`).
+**0.4.0** — resource-aware placement (M3). `NodeCapacity` holds real ai-hwaccel
+accelerator profiles; `can_fit` delegates to `requirement_satisfied()` (ADR-0002).
+Built on M2 cron correctness (0.3.0) and the 0.2.0 Rust→Cyrius parity port (Rust
+reference frozen at `rust-old/`).
 
 ## Toolchain
 
@@ -22,8 +23,8 @@ port (Rust reference frozen at `rust-old/`).
 
 ## Tests
 
-- `tests/samay.tcyr` — **121/121 assertions passing** (`cyrius test`). Includes
-  6 regression tests from the v0.3.0 cron adversarial review.
+- `tests/samay.tcyr` — **130/130 assertions passing** (`cyrius test`). Includes
+  6 cron regression tests (v0.3.0) + 5 accelerator-placement tests (v0.4.0).
 - `tests/samay.bcyr` — benchmarks (see `docs/benchmarks.md`).
 - Gates: `cyrius fmt --check` clean, `cyrius lint` 0 warnings.
 
@@ -41,6 +42,7 @@ port (Rust reference frozen at `rust-old/`).
 
 ## Next
 
-See [`roadmap.md`](roadmap.md). M2 (cron) done; next is M3 — resource-aware
-placement wired through ai-hwaccel `requirement_satisfied()`/profiles. Also
-queued: alloc-free cron matching (perf), JSON `Deserialize` + roundtrip tests.
+See [`roadmap.md`](roadmap.md). M0–M3 done; next is **M4 (v0.5.0)** — full JSON
+`Serialize`/`Deserialize` for every public type with roundtrip tests (+ optional
+snapshot/restore). Also queued: alloc-free cron matching (perf), determinism
+guarantees (M5), consumer integration (daimon/kavach).
