@@ -4,6 +4,31 @@ All notable changes to Samay are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+**M4 groundwork — string representation migrated to `Str`.** Prerequisite for JSON
+`Serialize`/`Deserialize`: `#derive(Serialize)` core dumps on a cstr held in a
+`Str`-typed field. See [ADR-0003](docs/adr/0003-str-string-representation.md).
+
+### Changed — breaking (pre-1.0)
+- Every samay string is now a real `Str` (ptr+len) instead of a cstr. `uuid_v4()`
+  returns `Str`; task/node hashmaps are `map_new_str()` (content-hashed keys);
+  `cron_expr_parse` takes a `Str`. Callers passing string literals into samay
+  constructors now need `str_from("…")`.
+- `task_status_name` / `samay_training_method_name` still return static cstr
+  literals — display helpers, not stored state.
+
+### Added
+- `bayan` (JSON/YAML/TOML) and `math` (`f64_parse`) declared in `[deps].stdlib`.
+
+### Notes
+- 130/130 assertions pass unchanged; demo output and benchmarks are unaffected —
+  the migration is behavior-preserving against the `rust-old/` oracle.
+- M4 remains blocked on an upstream float fix: the JSON emit path
+  (`fmt_float_buf(v, buf, 6)` in stdlib `lib/fmt.cyr`) is capped at 6 decimals, so
+  `1/3` loses ~9 mantissa bits and any `|x| < 5e-7` flushes to `0`. Two divergent
+  float parsers (bayan `_jp_atof`, math `f64_parse`) disagree by 1 ULP.
+
 ## [0.4.0] — 2026-07-18
 
 **M3 — resource-aware placement via ai-hwaccel.** Node accelerator availability

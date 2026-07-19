@@ -29,10 +29,15 @@ modules = [
 ]
 
 # ── Dependencies ─────────────────────────────────────────────────
-# Cyrius stdlib modules vendored into lib/ by `cyrius deps` (lib/ is
-# gitignored). The set is the union of what samay's own src needs
-# (chrono/random/result/hashmap/…) and what the ai-hwaccel dist bundle
-# forward-references (sakshi/thread/process/fs/… — its own [deps].stdlib).
+# Cyrius stdlib modules vendored into lib/ by `cyrius lib sync` (NOT
+# `cyrius deps` — that resolves [deps.NAME] git deps only). lib/ is
+# committed, not gitignored. The set is the union of what samay's own src
+# needs (chrono/random/result/hashmap/bayan/math/…) and what the ai-hwaccel
+# dist bundle forward-references (sakshi/thread/process/fs/… — its own
+# [deps].stdlib).
+#   bayan — JSON/YAML/TOML/cyml/CSV/base64/u128. JSON lives here; there is
+#           no module named "json".
+#   math  — f64_parse, needed by #derive(Serialize)'s f64 deserialize path.
 [deps]
 stdlib = [
     "syscalls",
@@ -47,6 +52,8 @@ stdlib = [
     "chrono",
     "random",
     "result",
+    "bayan",
+    "math",
     "tagged",
     "fnptr",
     "freelist",

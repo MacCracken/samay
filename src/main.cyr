@@ -18,19 +18,21 @@ fn main(): i64 {
     println("samay: resource-aware task scheduler (Cyrius port)");
 
     var s = task_scheduler_new();
-    task_scheduler_register_node(s, node_capacity_new("gpu-node-1", f64_from(8), 16384, 102400, 1));
-    task_scheduler_register_node(s, node_capacity_new("cpu-node-1", f64_from(16), 32768, 204800, 0));
+    task_scheduler_register_node(s, node_capacity_new(str_from("gpu-node-1"), f64_from(8), 16384, 102400, 1));
+    task_scheduler_register_node(s, node_capacity_new(str_from("cpu-node-1"), f64_from(16), 32768, 204800, 0));
     # M3: a node with a real ai-hwaccel accelerator profile (8-chip TPU v5p).
     task_scheduler_register_node(s, node_capacity_add_accel(
-        node_capacity_new("tpu-node-1", f64_from(8), 16384, 102400, 0),
+        node_capacity_new(str_from("tpu-node-1"), f64_from(8), 16384, 102400, 0),
         profile_tpu(0, 8, TPU_V5P)));
 
     # a normal task and a GPU training job
     task_scheduler_submit_task(s, scheduled_task_new(
-        "nightly-index", "rebuild search index", "agent-idx", 4,
+        str_from("nightly-index"), str_from("rebuild search index"),
+        str_from("agent-idx"), 4,
         resource_req_new(f64_from(2), 2048, REQ_NONE, 0, 0, 1024)));
-    var job = training_job_template_new("meta-llama/Llama-3-8b", TM_LORA, "/data/sft.jsonl", 0, 3600, 300);
-    task_scheduler_submit_task(s, training_job_to_scheduled_task(job, "agent-train"));
+    var job = training_job_template_new(str_from("meta-llama/Llama-3-8b"), TM_LORA,
+        str_from("/data/sft.jsonl"), 0, 3600, 300);
+    task_scheduler_submit_task(s, training_job_to_scheduled_task(job, str_from("agent-train")));
 
     var decisions = task_scheduler_schedule_pending(s);
     _print_kv("  scheduled tasks: ", vec_len(decisions));
@@ -40,7 +42,7 @@ fn main(): i64 {
         var d = vec_get(decisions, i);
         var node = SchedulingDecision_assigned_node(d);
         syscall(1, 1, "    -> ", 7);
-        syscall(1, 1, node, strlen(node));
+        syscall(1, 1, str_data(node), str_len(node));
         syscall(1, 1, "\n", 1);
         i = i + 1;
     }

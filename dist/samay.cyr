@@ -17,10 +17,12 @@
 
 var _UUID_HEX = "0123456789abcdef";
 
-# Generate a random v4 UUID and return it as a heap NUL-terminated cstr
+# Generate a random v4 UUID and return it as a heap `Str`
 # ("xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx", y in {8,9,a,b}). samay stores
-# all strings as cstr (null-terminated char*) for uniform map_new keys.
-fn uuid_v4(): i64 {
+# all strings as `Str` (ptr+len) so `#derive(Serialize)` can codec them and
+# `map_new_str` can key on content; the backing buffer stays NUL-terminated
+# so `str_cstr`/syscall-write paths still work.
+fn uuid_v4(): Str {
     var b[16];
     random_bytes(&b, 16);
     # version 4: high nibble of byte 6 = 0100b
@@ -43,7 +45,7 @@ fn uuid_v4(): i64 {
         i = i + 1;
     }
     store8(out + op, 0);
-    return out;
+    return str_new(out, 36);
 }
 
 # --- types.cyr ---
@@ -437,7 +439,9 @@ fn scheduler_stats_new(): i64 {
 
 # scheduler.cyr — the core distributed task scheduler (Rust TaskScheduler).
 #
-# tasks/nodes are cstr-keyed hashmaps (map_new) of heap struct pointers.
+# tasks/nodes are Str-keyed hashmaps (map_new_str) of heap struct pointers.
+# Str keys hash by content (hash_str_v) and compare via str_eq, so a lookup
+# by an equal-but-distinct Str works.
 # Iteration uses map_values (→ vec). Pending tasks are sorted by priority
 # desc, then created_at asc (stable insertion sort), matching Rust's
 # sort_by. Requires: hashmap, vec, str, string, chrono, result + types.cyr.
@@ -450,8 +454,8 @@ struct TaskScheduler {
 
 fn task_scheduler_new(): i64 {
     var s = alloc(16);
-    TaskScheduler_set_tasks(s, map_new());
-    TaskScheduler_set_nodes(s, map_new());
+    TaskScheduler_set_tasks(s, map_new_str());
+    TaskScheduler_set_nodes(s, map_new_str());
     return s;
 }
 
@@ -558,7 +562,7 @@ fn task_scheduler_tasks_for_node(s, node_id): i64 {
         var t = vec_get(all, i);
         var np = ScheduledTask_node_preference(t);
         if (np != 0) {
-            if (streq(np, node_id) == 1) {
+            if (str_eq(np, node_id) == 1) {
                 var st = ScheduledTask_status(t);
                 if (st == TASK_SCHEDULED) { vec_push(out, t); }
                 elif (st == TASK_RUNNING) { vec_push(out, t); }
@@ -570,7 +574,7 @@ fn task_scheduler_tasks_for_node(s, node_id): i64 {
 }
 
 # Node with the most available capacity (lowest utilization) that fits req;
-# returns its node_id cstr, or 0 if none fits.
+# returns its node_id Str, or 0 if none fits.
 fn _best_fit_node(s, req): i64 {
     var nodes = map_values(TaskScheduler_nodes(s));
     var n = vec_len(nodes);
@@ -619,8 +623,8 @@ fn task_scheduler_schedule_pending(s): i64 {
             node_capacity_reserve(node, req);
             scheduled_task_transition(task, TASK_SCHEDULED);
             ScheduledTask_set_scheduled_at(task, dt_now());
-            var reason = "best-fit selection";
-            if (pref != 0) { if (streq(pref, chosen) == 1) { reason = "preferred node"; } }
+            var reason = str_from("best-fit selection");
+            if (pref != 0) { if (str_eq(pref, chosen) == 1) { reason = str_from("preferred node"); } }
             ScheduledTask_set_node_preference(task, chosen);
             vec_push(decisions, scheduling_decision_new(ScheduledTask_task_id(task), chosen, reason, score));
         }
@@ -631,15 +635,14 @@ fn task_scheduler_schedule_pending(s): i64 {
 
 # --- preemption ---
 
-fn _preempt_reason(hi, lo): i64 {
+fn _preempt_reason(hi, lo): Str {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "priority ");
     str_builder_add_int(sb, hi);
     str_builder_add_cstr(sb, " preempts priority ");
     str_builder_add_int(sb, lo);
     str_builder_add_cstr(sb, " task");
-    str_builder_add_byte(sb, 0);
-    return str_data(str_builder_build(sb));
+    return str_builder_build(sb);
 }
 
 # If `task` should preempt a running task, return a PreemptionAction; else 0.
@@ -887,19 +890,23 @@ fn _cron_parse_field(buf, start, end, lo, hi, names, star_out): i64 {
 # Parse a cron expression string → Ok(CronExpr*) or Err(1). @shortcuts and
 # 5-field forms accepted.
 fn cron_expr_parse(s): i64 {
-    var expr_str = s;
-    if (load8(s) == 64) {
-        if (streq(s, "@yearly") == 1) { expr_str = "0 0 1 1 *"; }
-        elif (streq(s, "@annually") == 1) { expr_str = "0 0 1 1 *"; }
-        elif (streq(s, "@monthly") == 1) { expr_str = "0 0 1 * *"; }
-        elif (streq(s, "@weekly") == 1) { expr_str = "0 0 * * 0"; }
-        elif (streq(s, "@daily") == 1) { expr_str = "0 0 * * *"; }
-        elif (streq(s, "@midnight") == 1) { expr_str = "0 0 * * *"; }
-        elif (streq(s, "@hourly") == 1) { expr_str = "0 * * * *"; }
-        else { return Err(1); }
+    # `s` is a Str; work over its raw bytes. @shortcuts rebind the working
+    # buffer to a 5-field literal (every expansion is exactly 9 bytes).
+    var expr_str = str_data(s);
+    var len = str_len(s);
+    if (len > 0) {
+        if (load8(expr_str) == 64) {
+            if (str_eq_cstr(s, "@yearly") == 1) { expr_str = "0 0 1 1 *"; len = 9; }
+            elif (str_eq_cstr(s, "@annually") == 1) { expr_str = "0 0 1 1 *"; len = 9; }
+            elif (str_eq_cstr(s, "@monthly") == 1) { expr_str = "0 0 1 * *"; len = 9; }
+            elif (str_eq_cstr(s, "@weekly") == 1) { expr_str = "0 0 * * 0"; len = 9; }
+            elif (str_eq_cstr(s, "@daily") == 1) { expr_str = "0 0 * * *"; len = 9; }
+            elif (str_eq_cstr(s, "@midnight") == 1) { expr_str = "0 0 * * *"; len = 9; }
+            elif (str_eq_cstr(s, "@hourly") == 1) { expr_str = "0 * * * *"; len = 9; }
+            else { return Err(1); }
+        }
     }
 
-    var len = strlen(expr_str);
     var fstart: i64[5];
     var fend: i64[5];
     var nf = 0;
@@ -1084,7 +1091,7 @@ struct CronScheduler {
 
 fn cron_scheduler_new(): i64 {
     var c = alloc(8);
-    CronScheduler_set_entries(c, map_new());
+    CronScheduler_set_entries(c, map_new_str());
     return c;
 }
 
@@ -1092,7 +1099,7 @@ fn cron_scheduler_new(): i64 {
 # success; Err(1) if the name is empty or the expression is malformed
 # (validation happens here, at add time — not at execution).
 fn cron_scheduler_add(c, name, expr_str, task_template, enabled, missed_policy): i64 {
-    if (strlen(name) == 0) { return Err(1); }
+    if (str_len(name) == 0) { return Err(1); }
     var r = cron_expr_parse(expr_str);
     if (is_err_result(r) == 1) { return Err(1); }
     var entry = cron_entry_new(name, result_unwrap(r), task_template, enabled, missed_policy);
@@ -1102,7 +1109,7 @@ fn cron_scheduler_add(c, name, expr_str, task_template, enabled, missed_policy):
 
 # Register a pre-built entry. Err(1) if the name is empty.
 fn cron_scheduler_add_entry(c, entry): i64 {
-    if (strlen(CronEntry_name(entry)) == 0) { return Err(1); }
+    if (str_len(CronEntry_name(entry)) == 0) { return Err(1); }
     map_set(CronScheduler_entries(c), CronEntry_name(entry), entry);
     return Ok(0);
 }
@@ -1118,13 +1125,12 @@ fn cron_scheduler_list_entries(c): i64 {
     return map_values(CronScheduler_entries(c));
 }
 
-# "<base> (cron)" as a fresh NUL-terminated cstr.
-fn _cron_task_name(base): i64 {
+# "<base> (cron)" as a fresh Str.
+fn _cron_task_name(base): Str {
     var sb = str_builder_new();
-    str_builder_add_cstr(sb, base);
+    str_builder_add(sb, base);
     str_builder_add_cstr(sb, " (cron)");
-    str_builder_add_byte(sb, 0);
-    return str_data(str_builder_build(sb));
+    return str_builder_build(sb);
 }
 
 # Build a fresh ScheduledTask from an entry's template.
@@ -1168,28 +1174,26 @@ fn _cron_count_due(expr, lf_secs, now_secs, clamped_out): i64 {
 fn _cron_log_skip(name, skipped): i64 {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "cron '");
-    str_builder_add_cstr(sb, name);
+    str_builder_add(sb, name);
     str_builder_add_cstr(sb, "': skip policy dropped ");
     str_builder_add_int(sb, skipped);
     str_builder_add_cstr(sb, " missed occurrence(s)");
-    str_builder_add_byte(sb, 0);
-    var msg = str_data(str_builder_build(sb));
-    sakshi_warn(msg, strlen(msg));
+    var msg = str_builder_build(sb);
+    sakshi_warn(str_data(msg), str_len(msg));
     return 0;
 }
 
 fn _cron_log_catchup_cap(name, due): i64 {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "cron '");
-    str_builder_add_cstr(sb, name);
+    str_builder_add(sb, name);
     str_builder_add_cstr(sb, "': catch-up capped — fired ");
     str_builder_add_int(sb, CRON_CATCHUP_CAP);
     str_builder_add_cstr(sb, " of ");
     str_builder_add_int(sb, due);
     str_builder_add_cstr(sb, " due occurrence(s)");
-    str_builder_add_byte(sb, 0);
-    var msg = str_data(str_builder_build(sb));
-    sakshi_warn(msg, strlen(msg));
+    var msg = str_builder_build(sb);
+    sakshi_warn(str_data(msg), str_len(msg));
     return 0;
 }
 
@@ -1197,11 +1201,10 @@ fn _cron_log_catchup_cap(name, due): i64 {
 fn _cron_log_clamp(name): i64 {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "cron '");
-    str_builder_add_cstr(sb, name);
+    str_builder_add(sb, name);
     str_builder_add_cstr(sb, "': last_fired predates the ~366-day catch-up window; older missed occurrences dropped");
-    str_builder_add_byte(sb, 0);
-    var msg = str_data(str_builder_build(sb));
-    sakshi_warn(msg, strlen(msg));
+    var msg = str_builder_build(sb);
+    sakshi_warn(str_data(msg), str_len(msg));
     return 0;
 }
 
@@ -1288,7 +1291,7 @@ fn training_method_preferred_accel(m): i64 {
     return REQ_GPU_OR_TPU;
 }
 
-# target_node: cstr, or 0 for None.
+# target_node: Str, or 0 for None.
 #derive(accessors)
 struct TrainingJobTemplate {
     model_id: Str;
@@ -1311,25 +1314,23 @@ fn training_job_template_new(model_id, method, dataset, target_node, max_duratio
 }
 
 # "train-<method>-<model_id>"
-fn _train_name(method, model): i64 {
+fn _train_name(method, model): Str {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "train-");
     str_builder_add_cstr(sb, samay_training_method_name(method));
     str_builder_add_cstr(sb, "-");
-    str_builder_add_cstr(sb, model);
-    str_builder_add_byte(sb, 0);
-    return str_data(str_builder_build(sb));
+    str_builder_add(sb, model);
+    return str_builder_build(sb);
 }
 
 # "Training job: <method> on <model_id>"
-fn _train_desc(method, model): i64 {
+fn _train_desc(method, model): Str {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "Training job: ");
     str_builder_add_cstr(sb, samay_training_method_name(method));
     str_builder_add_cstr(sb, " on ");
-    str_builder_add_cstr(sb, model);
-    str_builder_add_byte(sb, 0);
-    return str_data(str_builder_build(sb));
+    str_builder_add(sb, model);
+    return str_builder_build(sb);
 }
 
 # Build a High-priority (6) ScheduledTask from this template.

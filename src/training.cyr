@@ -30,7 +30,7 @@ fn training_method_preferred_accel(m): i64 {
     return REQ_GPU_OR_TPU;
 }
 
-# target_node: cstr, or 0 for None.
+# target_node: Str, or 0 for None.
 #derive(accessors)
 struct TrainingJobTemplate {
     model_id: Str;
@@ -53,25 +53,23 @@ fn training_job_template_new(model_id, method, dataset, target_node, max_duratio
 }
 
 # "train-<method>-<model_id>"
-fn _train_name(method, model): i64 {
+fn _train_name(method, model): Str {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "train-");
     str_builder_add_cstr(sb, samay_training_method_name(method));
     str_builder_add_cstr(sb, "-");
-    str_builder_add_cstr(sb, model);
-    str_builder_add_byte(sb, 0);
-    return str_data(str_builder_build(sb));
+    str_builder_add(sb, model);
+    return str_builder_build(sb);
 }
 
 # "Training job: <method> on <model_id>"
-fn _train_desc(method, model): i64 {
+fn _train_desc(method, model): Str {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "Training job: ");
     str_builder_add_cstr(sb, samay_training_method_name(method));
     str_builder_add_cstr(sb, " on ");
-    str_builder_add_cstr(sb, model);
-    str_builder_add_byte(sb, 0);
-    return str_data(str_builder_build(sb));
+    str_builder_add(sb, model);
+    return str_builder_build(sb);
 }
 
 # Build a High-priority (6) ScheduledTask from this template.

@@ -24,6 +24,9 @@ must match Rust behavior and its test suite (`rust-old/` is the oracle).
    required extending `lib/chrono` — proposal filed and landed in cyrius 6.4.67.
 4. **Strings** — cstr (null-terminated) throughout, so a single `map_new`
    (cstr-keyed hashmap) serves all lookups; `uuid_v4` returns a cstr.
+   *(Superseded in v0.5.0 by [ADR 0003](0003-str-string-representation.md): strings are
+   now real `Str` (ptr+len) so `#derive(Serialize)` can codec them — a cstr in a
+   `Str`-typed field core dumps the derive.)*
 5. **Errors / logging** — `anyhow::Result` → `lib/result` (`Ok`/`Err`/`?`);
    `tracing` → `lib/sakshi`.
 6. **AcceleratorRequirement** — consumed from ai-hwaccel's `REQ_*` enum. `can_fit`

@@ -63,7 +63,7 @@ struct CronScheduler {
 
 fn cron_scheduler_new(): i64 {
     var c = alloc(8);
-    CronScheduler_set_entries(c, map_new());
+    CronScheduler_set_entries(c, map_new_str());
     return c;
 }
 
@@ -71,7 +71,7 @@ fn cron_scheduler_new(): i64 {
 # success; Err(1) if the name is empty or the expression is malformed
 # (validation happens here, at add time — not at execution).
 fn cron_scheduler_add(c, name, expr_str, task_template, enabled, missed_policy): i64 {
-    if (strlen(name) == 0) { return Err(1); }
+    if (str_len(name) == 0) { return Err(1); }
     var r = cron_expr_parse(expr_str);
     if (is_err_result(r) == 1) { return Err(1); }
     var entry = cron_entry_new(name, result_unwrap(r), task_template, enabled, missed_policy);
@@ -81,7 +81,7 @@ fn cron_scheduler_add(c, name, expr_str, task_template, enabled, missed_policy):
 
 # Register a pre-built entry. Err(1) if the name is empty.
 fn cron_scheduler_add_entry(c, entry): i64 {
-    if (strlen(CronEntry_name(entry)) == 0) { return Err(1); }
+    if (str_len(CronEntry_name(entry)) == 0) { return Err(1); }
     map_set(CronScheduler_entries(c), CronEntry_name(entry), entry);
     return Ok(0);
 }
@@ -97,13 +97,12 @@ fn cron_scheduler_list_entries(c): i64 {
     return map_values(CronScheduler_entries(c));
 }
 
-# "<base> (cron)" as a fresh NUL-terminated cstr.
-fn _cron_task_name(base): i64 {
+# "<base> (cron)" as a fresh Str.
+fn _cron_task_name(base): Str {
     var sb = str_builder_new();
-    str_builder_add_cstr(sb, base);
+    str_builder_add(sb, base);
     str_builder_add_cstr(sb, " (cron)");
-    str_builder_add_byte(sb, 0);
-    return str_data(str_builder_build(sb));
+    return str_builder_build(sb);
 }
 
 # Build a fresh ScheduledTask from an entry's template.
@@ -147,28 +146,26 @@ fn _cron_count_due(expr, lf_secs, now_secs, clamped_out): i64 {
 fn _cron_log_skip(name, skipped): i64 {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "cron '");
-    str_builder_add_cstr(sb, name);
+    str_builder_add(sb, name);
     str_builder_add_cstr(sb, "': skip policy dropped ");
     str_builder_add_int(sb, skipped);
     str_builder_add_cstr(sb, " missed occurrence(s)");
-    str_builder_add_byte(sb, 0);
-    var msg = str_data(str_builder_build(sb));
-    sakshi_warn(msg, strlen(msg));
+    var msg = str_builder_build(sb);
+    sakshi_warn(str_data(msg), str_len(msg));
     return 0;
 }
 
 fn _cron_log_catchup_cap(name, due): i64 {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "cron '");
-    str_builder_add_cstr(sb, name);
+    str_builder_add(sb, name);
     str_builder_add_cstr(sb, "': catch-up capped — fired ");
     str_builder_add_int(sb, CRON_CATCHUP_CAP);
     str_builder_add_cstr(sb, " of ");
     str_builder_add_int(sb, due);
     str_builder_add_cstr(sb, " due occurrence(s)");
-    str_builder_add_byte(sb, 0);
-    var msg = str_data(str_builder_build(sb));
-    sakshi_warn(msg, strlen(msg));
+    var msg = str_builder_build(sb);
+    sakshi_warn(str_data(msg), str_len(msg));
     return 0;
 }
 
@@ -176,11 +173,10 @@ fn _cron_log_catchup_cap(name, due): i64 {
 fn _cron_log_clamp(name): i64 {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "cron '");
-    str_builder_add_cstr(sb, name);
+    str_builder_add(sb, name);
     str_builder_add_cstr(sb, "': last_fired predates the ~366-day catch-up window; older missed occurrences dropped");
-    str_builder_add_byte(sb, 0);
-    var msg = str_data(str_builder_build(sb));
-    sakshi_warn(msg, strlen(msg));
+    var msg = str_builder_build(sb);
+    sakshi_warn(str_data(msg), str_len(msg));
     return 0;
 }
 

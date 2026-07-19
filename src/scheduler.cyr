@@ -1,6 +1,8 @@
 # scheduler.cyr — the core distributed task scheduler (Rust TaskScheduler).
 #
-# tasks/nodes are cstr-keyed hashmaps (map_new) of heap struct pointers.
+# tasks/nodes are Str-keyed hashmaps (map_new_str) of heap struct pointers.
+# Str keys hash by content (hash_str_v) and compare via str_eq, so a lookup
+# by an equal-but-distinct Str works.
 # Iteration uses map_values (→ vec). Pending tasks are sorted by priority
 # desc, then created_at asc (stable insertion sort), matching Rust's
 # sort_by. Requires: hashmap, vec, str, string, chrono, result + types.cyr.
@@ -13,8 +15,8 @@ struct TaskScheduler {
 
 fn task_scheduler_new(): i64 {
     var s = alloc(16);
-    TaskScheduler_set_tasks(s, map_new());
-    TaskScheduler_set_nodes(s, map_new());
+    TaskScheduler_set_tasks(s, map_new_str());
+    TaskScheduler_set_nodes(s, map_new_str());
     return s;
 }
 
@@ -121,7 +123,7 @@ fn task_scheduler_tasks_for_node(s, node_id): i64 {
         var t = vec_get(all, i);
         var np = ScheduledTask_node_preference(t);
         if (np != 0) {
-            if (streq(np, node_id) == 1) {
+            if (str_eq(np, node_id) == 1) {
                 var st = ScheduledTask_status(t);
                 if (st == TASK_SCHEDULED) { vec_push(out, t); }
                 elif (st == TASK_RUNNING) { vec_push(out, t); }
@@ -133,7 +135,7 @@ fn task_scheduler_tasks_for_node(s, node_id): i64 {
 }
 
 # Node with the most available capacity (lowest utilization) that fits req;
-# returns its node_id cstr, or 0 if none fits.
+# returns its node_id Str, or 0 if none fits.
 fn _best_fit_node(s, req): i64 {
     var nodes = map_values(TaskScheduler_nodes(s));
     var n = vec_len(nodes);
@@ -182,8 +184,8 @@ fn task_scheduler_schedule_pending(s): i64 {
             node_capacity_reserve(node, req);
             scheduled_task_transition(task, TASK_SCHEDULED);
             ScheduledTask_set_scheduled_at(task, dt_now());
-            var reason = "best-fit selection";
-            if (pref != 0) { if (streq(pref, chosen) == 1) { reason = "preferred node"; } }
+            var reason = str_from("best-fit selection");
+            if (pref != 0) { if (str_eq(pref, chosen) == 1) { reason = str_from("preferred node"); } }
             ScheduledTask_set_node_preference(task, chosen);
             vec_push(decisions, scheduling_decision_new(ScheduledTask_task_id(task), chosen, reason, score));
         }
@@ -194,15 +196,14 @@ fn task_scheduler_schedule_pending(s): i64 {
 
 # --- preemption ---
 
-fn _preempt_reason(hi, lo): i64 {
+fn _preempt_reason(hi, lo): Str {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "priority ");
     str_builder_add_int(sb, hi);
     str_builder_add_cstr(sb, " preempts priority ");
     str_builder_add_int(sb, lo);
     str_builder_add_cstr(sb, " task");
-    str_builder_add_byte(sb, 0);
-    return str_data(str_builder_build(sb));
+    return str_builder_build(sb);
 }
 
 # If `task` should preempt a running task, return a PreemptionAction; else 0.

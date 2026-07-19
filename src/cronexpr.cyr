@@ -162,19 +162,23 @@ fn _cron_parse_field(buf, start, end, lo, hi, names, star_out): i64 {
 # Parse a cron expression string → Ok(CronExpr*) or Err(1). @shortcuts and
 # 5-field forms accepted.
 fn cron_expr_parse(s): i64 {
-    var expr_str = s;
-    if (load8(s) == 64) {
-        if (streq(s, "@yearly") == 1) { expr_str = "0 0 1 1 *"; }
-        elif (streq(s, "@annually") == 1) { expr_str = "0 0 1 1 *"; }
-        elif (streq(s, "@monthly") == 1) { expr_str = "0 0 1 * *"; }
-        elif (streq(s, "@weekly") == 1) { expr_str = "0 0 * * 0"; }
-        elif (streq(s, "@daily") == 1) { expr_str = "0 0 * * *"; }
-        elif (streq(s, "@midnight") == 1) { expr_str = "0 0 * * *"; }
-        elif (streq(s, "@hourly") == 1) { expr_str = "0 * * * *"; }
-        else { return Err(1); }
+    # `s` is a Str; work over its raw bytes. @shortcuts rebind the working
+    # buffer to a 5-field literal (every expansion is exactly 9 bytes).
+    var expr_str = str_data(s);
+    var len = str_len(s);
+    if (len > 0) {
+        if (load8(expr_str) == 64) {
+            if (str_eq_cstr(s, "@yearly") == 1) { expr_str = "0 0 1 1 *"; len = 9; }
+            elif (str_eq_cstr(s, "@annually") == 1) { expr_str = "0 0 1 1 *"; len = 9; }
+            elif (str_eq_cstr(s, "@monthly") == 1) { expr_str = "0 0 1 * *"; len = 9; }
+            elif (str_eq_cstr(s, "@weekly") == 1) { expr_str = "0 0 * * 0"; len = 9; }
+            elif (str_eq_cstr(s, "@daily") == 1) { expr_str = "0 0 * * *"; len = 9; }
+            elif (str_eq_cstr(s, "@midnight") == 1) { expr_str = "0 0 * * *"; len = 9; }
+            elif (str_eq_cstr(s, "@hourly") == 1) { expr_str = "0 * * * *"; len = 9; }
+            else { return Err(1); }
+        }
     }
 
-    var len = strlen(expr_str);
     var fstart: i64[5];
     var fend: i64[5];
     var nf = 0;

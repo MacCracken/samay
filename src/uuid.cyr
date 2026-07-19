@@ -10,10 +10,12 @@
 
 var _UUID_HEX = "0123456789abcdef";
 
-# Generate a random v4 UUID and return it as a heap NUL-terminated cstr
+# Generate a random v4 UUID and return it as a heap `Str`
 # ("xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx", y in {8,9,a,b}). samay stores
-# all strings as cstr (null-terminated char*) for uniform map_new keys.
-fn uuid_v4(): i64 {
+# all strings as `Str` (ptr+len) so `#derive(Serialize)` can codec them and
+# `map_new_str` can key on content; the backing buffer stays NUL-terminated
+# so `str_cstr`/syscall-write paths still work.
+fn uuid_v4(): Str {
     var b[16];
     random_bytes(&b, 16);
     # version 4: high nibble of byte 6 = 0100b
@@ -36,5 +38,5 @@ fn uuid_v4(): i64 {
         i = i + 1;
     }
     store8(out + op, 0);
-    return out;
+    return str_new(out, 36);
 }

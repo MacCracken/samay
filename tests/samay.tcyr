@@ -14,20 +14,22 @@ fn make_req(cpu, mem) {
     return resource_req_new(cpu, mem, REQ_NONE, 0, 0, 0);
 }
 fn make_node(id, cpu, mem) {
-    return node_capacity_new(id, cpu, mem, 10240, 0);
+    return node_capacity_new(str_from(id), cpu, mem, 10240, 0);
 }
 fn make_task(name, priority) {
-    return scheduled_task_new(name, "test task", "agent-1", priority, make_req(f64_from(1), 256));
+    return scheduled_task_new(str_from(name), str_from("test task"),
+        str_from("agent-1"), priority, make_req(f64_from(1), 256));
 }
 fn make_template() {
-    return cron_task_template_new("cron-job", "recurring", "agent-1", 5, make_req(f64_from(1), 128));
+    return cron_task_template_new(str_from("cron-job"), str_from("recurring"),
+        str_from("agent-1"), 5, make_req(f64_from(1), 128));
 }
 fn at_ns(y, mo, d, h, mi) {
     return _chrono_ymd_to_epoch_secs(y, mo, d, h, mi, 0) * 1000000000;
 }
 fn mk_cron(expr_str, policy) {
     var c = cron_scheduler_new();
-    cron_scheduler_add(c, "job", expr_str, make_template(), 1, policy);
+    cron_scheduler_add(c, str_from("job"), str_from(expr_str), make_template(), 1, policy);
     return c;
 }
 
@@ -36,14 +38,14 @@ fn mk_cron(expr_str, policy) {
 fn test_uuid_format() {
     test_group("uuid");
     var u = uuid_v4();
-    assert_eq(strlen(u), 36, "uuid is 36 chars");
-    assert_eq(load8(u + 8), 45, "dash at index 8");
-    assert_eq(load8(u + 14), 52, "version nibble is '4'");
+    assert_eq(str_len(u), 36, "uuid is 36 chars");
+    assert_eq(load8(str_data(u) + 8), 45, "dash at index 8");
+    assert_eq(load8(str_data(u) + 14), 52, "version nibble is '4'");
     return 0;
 }
 fn test_uuid_unique() {
     test_group("uuid_unique");
-    assert_eq(streq(uuid_v4(), uuid_v4()), 0, "two uuids differ");
+    assert_eq(str_eq_cstr(uuid_v4(), uuid_v4()), 0, "two uuids differ");
     return 0;
 }
 
@@ -135,20 +137,20 @@ fn test_node_can_fit() {
 fn test_node_can_fit_gpu() {
     test_group("node_can_fit_gpu");
     var req = resource_req_new(f64_from(1), 256, REQ_GPU, 0, 0, 0);
-    assert_eq(node_capacity_can_fit(node_capacity_new("n1", f64_from(4), 8192, 10240, 0), req), 0, "no gpu");
-    assert_eq(node_capacity_can_fit(node_capacity_new("n2", f64_from(4), 8192, 10240, 1), req), 1, "gpu");
+    assert_eq(node_capacity_can_fit(node_capacity_new(str_from("n1"), f64_from(4), 8192, 10240, 0), req), 0, "no gpu");
+    assert_eq(node_capacity_can_fit(node_capacity_new(str_from("n2"), f64_from(4), 8192, 10240, 1), req), 1, "gpu");
     return 0;
 }
 fn test_node_can_fit_tpu() {
     test_group("node_can_fit_tpu");
-    var n = node_capacity_with_tpu(node_capacity_new("n1", f64_from(4), 8192, 10240, 0), 4);
+    var n = node_capacity_with_tpu(node_capacity_new(str_from("n1"), f64_from(4), 8192, 10240, 0), 4);
     var req = resource_req_new(f64_from(1), 256, REQ_TPU, 2, 0, 0);
     assert_eq(node_capacity_can_fit(n, req), 1, "tpu 4 chips >= 2");
     return 0;
 }
 fn test_node_gpu_or_tpu() {
     test_group("gpu_or_tpu");
-    var n = node_capacity_with_tpu(node_capacity_new("n1", f64_from(4), 8192, 10240, 0), 2);
+    var n = node_capacity_with_tpu(node_capacity_new(str_from("n1"), f64_from(4), 8192, 10240, 0), 2);
     var req = resource_req_new(f64_from(1), 256, REQ_GPU_OR_TPU, 0, 0, 0);
     assert_eq(node_capacity_can_fit(n, req), 1, "tpu satisfies gpu-or-tpu");
     return 0;
@@ -160,40 +162,40 @@ fn test_node_gaudi_requires_profile() {
     test_group("node_gaudi");
     var req = resource_req_new(f64_from(1), 256, REQ_GAUDI, 0, 0, 0);
     # No accelerator profile -> does NOT fit (Rust port's stub returned true here).
-    assert_eq(node_capacity_can_fit(node_capacity_new("n1", f64_from(4), 8192, 10240, 0), req), 0, "no accel -> no gaudi");
+    assert_eq(node_capacity_can_fit(node_capacity_new(str_from("n1"), f64_from(4), 8192, 10240, 0), req), 0, "no accel -> no gaudi");
     # A real Gaudi profile satisfies it.
-    var g = node_capacity_add_accel(node_capacity_new("n2", f64_from(4), 8192, 10240, 0), profile_gaudi(0, GAUDI2));
+    var g = node_capacity_add_accel(node_capacity_new(str_from("n2"), f64_from(4), 8192, 10240, 0), profile_gaudi(0, GAUDI2));
     assert_eq(node_capacity_can_fit(g, req), 1, "gaudi profile fits");
     # A GPU node does NOT satisfy REQ_GAUDI (specificity).
-    assert_eq(node_capacity_can_fit(node_capacity_new("n3", f64_from(4), 8192, 10240, 1), req), 0, "gpu != gaudi");
+    assert_eq(node_capacity_can_fit(node_capacity_new(str_from("n3"), f64_from(4), 8192, 10240, 1), req), 0, "gpu != gaudi");
     return 0;
 }
 fn test_node_neuron_requires_profile() {
     test_group("node_neuron");
     var req = resource_req_new(f64_from(1), 256, REQ_AWS_NEURON, 0, 0, 0);
-    assert_eq(node_capacity_can_fit(node_capacity_new("n1", f64_from(4), 8192, 10240, 0), req), 0, "no accel -> no neuron");
-    var n = node_capacity_add_accel(node_capacity_new("n2", f64_from(4), 8192, 10240, 0), profile_neuron(0, 0, 2));
+    assert_eq(node_capacity_can_fit(node_capacity_new(str_from("n1"), f64_from(4), 8192, 10240, 0), req), 0, "no accel -> no neuron");
+    var n = node_capacity_add_accel(node_capacity_new(str_from("n2"), f64_from(4), 8192, 10240, 0), profile_neuron(0, 0, 2));
     assert_eq(node_capacity_can_fit(n, req), 1, "neuron profile fits");
     return 0;
 }
 fn test_node_any_accelerator() {
     test_group("node_any_accel");
     var req = resource_req_new(f64_from(1), 256, REQ_ANY_ACCELERATOR, 0, 0, 0);
-    assert_eq(node_capacity_can_fit(node_capacity_new("cpu", f64_from(4), 8192, 10240, 0), req), 0, "cpu-only -> no");
-    assert_eq(node_capacity_can_fit(node_capacity_new("gpu", f64_from(4), 8192, 10240, 1), req), 1, "gpu -> any-accel");
+    assert_eq(node_capacity_can_fit(node_capacity_new(str_from("cpu"), f64_from(4), 8192, 10240, 0), req), 0, "cpu-only -> no");
+    assert_eq(node_capacity_can_fit(node_capacity_new(str_from("gpu"), f64_from(4), 8192, 10240, 1), req), 1, "gpu -> any-accel");
     return 0;
 }
 fn test_node_add_accel_gpu() {
     test_group("node_add_accel");
     var req = resource_req_new(f64_from(1), 256, REQ_GPU, 0, 0, 0);
-    var n = node_capacity_add_accel(node_capacity_new("n", f64_from(4), 8192, 10240, 0), profile_cuda(0, 0));
+    var n = node_capacity_add_accel(node_capacity_new(str_from("n"), f64_from(4), 8192, 10240, 0), profile_cuda(0, 0));
     assert_eq(node_capacity_can_fit(n, req), 1, "added cuda satisfies gpu");
     return 0;
 }
 fn test_node_tpu_insufficient_chips() {
     test_group("node_tpu_chips");
     # TPU with 1 chip does not satisfy a 2-chip requirement.
-    var n = node_capacity_with_tpu(node_capacity_new("n1", f64_from(4), 8192, 10240, 0), 1);
+    var n = node_capacity_with_tpu(node_capacity_new(str_from("n1"), f64_from(4), 8192, 10240, 0), 1);
     var req = resource_req_new(f64_from(1), 256, REQ_TPU, 2, 0, 0);
     assert_eq(node_capacity_can_fit(n, req), 0, "1 chip < 2 required");
     return 0;
@@ -222,7 +224,7 @@ fn test_node_reserve_release() {
 }
 fn test_node_utilization_empty() {
     test_group("util_empty");
-    var n = node_capacity_new("empty", f64_from(0), 0, 0, 0);
+    var n = node_capacity_new(str_from("empty"), f64_from(0), 0, 0, 0);
     assert_eq(f64_to(node_capacity_utilization(n)), 0, "zero-capacity util 0");
     return 0;
 }
@@ -236,8 +238,8 @@ fn test_deadline_field() {
 }
 fn test_priority_clamped() {
     test_group("priority_clamped");
-    assert_eq(ScheduledTask_priority(scheduled_task_new("t", "d", "a", 15, resource_req_default())), 10, "clamp 15->10");
-    assert_eq(ScheduledTask_priority(scheduled_task_new("t", "d", "a", 0, resource_req_default())), 1, "clamp 0->1");
+    assert_eq(ScheduledTask_priority(scheduled_task_new(str_from("t"), str_from("d"), str_from("a"), 15, resource_req_default())), 10, "clamp 15->10");
+    assert_eq(ScheduledTask_priority(scheduled_task_new(str_from("t"), str_from("d"), str_from("a"), 0, resource_req_default())), 1, "clamp 0->1");
     return 0;
 }
 
@@ -256,7 +258,7 @@ fn test_submit_multiple() {
     var s = task_scheduler_new();
     var id1 = result_unwrap(task_scheduler_submit_task(s, make_task("t1", 3)));
     var id2 = result_unwrap(task_scheduler_submit_task(s, make_task("t2", 7)));
-    assert_eq(streq(id1, id2), 0, "ids differ");
+    assert_eq(str_eq_cstr(id1, id2), 0, "ids differ");
     assert_eq(SchedulerStats_total_tasks(task_scheduler_stats(s)), 2, "total 2");
     return 0;
 }
@@ -274,8 +276,8 @@ fn test_pending_sorted_by_priority() {
     task_scheduler_submit_task(s, high);
     var pending = task_scheduler_pending_tasks(s);
     assert_eq(vec_len(pending), 2, "2 pending");
-    assert_eq(streq(ScheduledTask_name(vec_get(pending, 0)), "high"), 1, "high first");
-    assert_eq(streq(ScheduledTask_name(vec_get(pending, 1)), "low"), 1, "low second");
+    assert_eq(str_eq_cstr(ScheduledTask_name(vec_get(pending, 0)), "high"), 1, "high first");
+    assert_eq(str_eq_cstr(ScheduledTask_name(vec_get(pending, 1)), "low"), 1, "low second");
     return 0;
 }
 fn test_pending_same_priority_by_created() {
@@ -288,8 +290,8 @@ fn test_pending_same_priority_by_created() {
     task_scheduler_submit_task(s, newer);
     task_scheduler_submit_task(s, older);
     var pending = task_scheduler_pending_tasks(s);
-    assert_eq(streq(ScheduledTask_name(vec_get(pending, 0)), "older"), 1, "older first");
-    assert_eq(streq(ScheduledTask_name(vec_get(pending, 1)), "newer"), 1, "newer second");
+    assert_eq(str_eq_cstr(ScheduledTask_name(vec_get(pending, 0)), "older"), 1, "older first");
+    assert_eq(str_eq_cstr(ScheduledTask_name(vec_get(pending, 1)), "newer"), 1, "newer second");
     return 0;
 }
 
@@ -304,7 +306,7 @@ fn test_preempt_higher_over_lower() {
     var emergency = make_task("emergency", 10);
     var action = task_scheduler_preempt_if_needed(s, emergency);
     assert_eq(action != 0, 1, "action produced");
-    assert_eq(streq(PreemptionAction_preempting_task_id(action), ScheduledTask_task_id(emergency)), 1, "emergency preempts");
+    assert_eq(str_eq(PreemptionAction_preempting_task_id(action), ScheduledTask_task_id(emergency)), 1, "emergency preempts");
     return 0;
 }
 fn test_no_preempt_same_priority() {
@@ -335,7 +337,7 @@ fn test_schedule_assigns_to_node() {
     task_scheduler_submit_task(s, make_task("t1", 5));
     var decisions = task_scheduler_schedule_pending(s);
     assert_eq(vec_len(decisions), 1, "1 decision");
-    assert_eq(streq(SchedulingDecision_assigned_node(vec_get(decisions, 0)), "n1"), 1, "assigned n1");
+    assert_eq(str_eq_cstr(SchedulingDecision_assigned_node(vec_get(decisions, 0)), "n1"), 1, "assigned n1");
     return 0;
 }
 fn test_schedule_prefers_preference() {
@@ -344,11 +346,11 @@ fn test_schedule_prefers_preference() {
     task_scheduler_register_node(s, make_node("n1", f64_from(8), 8192));
     task_scheduler_register_node(s, make_node("n2", f64_from(8), 8192));
     var task = make_task("t1", 5);
-    ScheduledTask_set_node_preference(task, "n2");
+    ScheduledTask_set_node_preference(task, str_from("n2"));
     task_scheduler_submit_task(s, task);
     var d = vec_get(task_scheduler_schedule_pending(s), 0);
-    assert_eq(streq(SchedulingDecision_assigned_node(d), "n2"), 1, "assigned n2");
-    assert_eq(streq(SchedulingDecision_reason(d), "preferred node"), 1, "reason preferred");
+    assert_eq(str_eq_cstr(SchedulingDecision_assigned_node(d), "n2"), 1, "assigned n2");
+    assert_eq(str_eq_cstr(SchedulingDecision_reason(d), "preferred node"), 1, "reason preferred");
     return 0;
 }
 fn test_schedule_fallback_when_full() {
@@ -360,11 +362,11 @@ fn test_schedule_fallback_when_full() {
     task_scheduler_register_node(s, n1);
     task_scheduler_register_node(s, make_node("n2", f64_from(4), 4096));
     var task = make_task("t1", 5);
-    ScheduledTask_set_node_preference(task, "n1");
+    ScheduledTask_set_node_preference(task, str_from("n1"));
     task_scheduler_submit_task(s, task);
     var d = vec_get(task_scheduler_schedule_pending(s), 0);
-    assert_eq(streq(SchedulingDecision_assigned_node(d), "n2"), 1, "fallback n2");
-    assert_eq(streq(SchedulingDecision_reason(d), "best-fit selection"), 1, "reason best-fit");
+    assert_eq(str_eq_cstr(SchedulingDecision_assigned_node(d), "n2"), 1, "fallback n2");
+    assert_eq(str_eq_cstr(SchedulingDecision_reason(d), "best-fit selection"), 1, "reason best-fit");
     return 0;
 }
 fn test_schedule_transitions() {
@@ -390,7 +392,7 @@ fn test_cancel_queued() {
 fn test_cancel_nonexistent() {
     test_group("cancel_nonexistent");
     var s = task_scheduler_new();
-    assert_eq(is_err_result(task_scheduler_cancel_task(s, "nonexistent")), 1, "err");
+    assert_eq(is_err_result(task_scheduler_cancel_task(s, str_from("nonexistent"))), 1, "err");
     return 0;
 }
 
@@ -448,15 +450,15 @@ fn test_tasks_for_node() {
     task_scheduler_register_node(s, make_node("n1", f64_from(8), 8192));
     task_scheduler_register_node(s, make_node("n2", f64_from(8), 8192));
     var t1 = make_task("t1", 5);
-    ScheduledTask_set_node_preference(t1, "n1");
+    ScheduledTask_set_node_preference(t1, str_from("n1"));
     var t2 = make_task("t2", 5);
-    ScheduledTask_set_node_preference(t2, "n2");
+    ScheduledTask_set_node_preference(t2, str_from("n2"));
     task_scheduler_submit_task(s, t1);
     task_scheduler_submit_task(s, t2);
     task_scheduler_schedule_pending(s);
-    assert_eq(vec_len(task_scheduler_tasks_for_node(s, "n1")), 1, "n1 has 1");
-    assert_eq(vec_len(task_scheduler_tasks_for_node(s, "n2")), 1, "n2 has 1");
-    assert_eq(vec_len(task_scheduler_tasks_for_node(s, "n3")), 0, "n3 has 0");
+    assert_eq(vec_len(task_scheduler_tasks_for_node(s, str_from("n1"))), 1, "n1 has 1");
+    assert_eq(vec_len(task_scheduler_tasks_for_node(s, str_from("n2"))), 1, "n2 has 1");
+    assert_eq(vec_len(task_scheduler_tasks_for_node(s, str_from("n3"))), 0, "n3 has 0");
     return 0;
 }
 
@@ -465,40 +467,40 @@ fn test_tasks_for_node() {
 fn test_cron_add_valid() {
     test_group("cron_add");
     var c = cron_scheduler_new();
-    assert_eq(is_ok(cron_scheduler_add(c, "backup", "0 2 * * *", make_template(), 1, CRON_SKIP)), 1, "add ok");
+    assert_eq(is_ok(cron_scheduler_add(c, str_from("backup"), str_from("0 2 * * *"), make_template(), 1, CRON_SKIP)), 1, "add ok");
     assert_eq(vec_len(cron_scheduler_list_entries(c)), 1, "1 entry");
     return 0;
 }
 fn test_cron_add_empty_name() {
     test_group("cron_empty_name");
     var c = cron_scheduler_new();
-    assert_eq(is_err_result(cron_scheduler_add(c, "", "0 2 * * *", make_template(), 1, CRON_SKIP)), 1, "empty rejected");
+    assert_eq(is_err_result(cron_scheduler_add(c, str_from(""), str_from("0 2 * * *"), make_template(), 1, CRON_SKIP)), 1, "empty rejected");
     return 0;
 }
 fn test_cron_add_invalid_expr() {
     test_group("cron_bad_expr");
     var c = cron_scheduler_new();
-    assert_eq(is_err_result(cron_scheduler_add(c, "j", "not a cron", make_template(), 1, CRON_SKIP)), 1, "garbage rejected");
-    assert_eq(is_err_result(cron_scheduler_add(c, "j", "99 * * * *", make_template(), 1, CRON_SKIP)), 1, "range rejected");
+    assert_eq(is_err_result(cron_scheduler_add(c, str_from("j"), str_from("not a cron"), make_template(), 1, CRON_SKIP)), 1, "garbage rejected");
+    assert_eq(is_err_result(cron_scheduler_add(c, str_from("j"), str_from("99 * * * *"), make_template(), 1, CRON_SKIP)), 1, "range rejected");
     return 0;
 }
 fn test_cron_remove() {
     test_group("cron_remove");
     var c = cron_scheduler_new();
-    cron_scheduler_add(c, "backup", "0 2 * * *", make_template(), 1, CRON_SKIP);
-    assert_eq(is_ok(cron_scheduler_remove_entry(c, "backup")), 1, "remove ok");
+    cron_scheduler_add(c, str_from("backup"), str_from("0 2 * * *"), make_template(), 1, CRON_SKIP);
+    assert_eq(is_ok(cron_scheduler_remove_entry(c, str_from("backup"))), 1, "remove ok");
     assert_eq(vec_len(cron_scheduler_list_entries(c)), 0, "empty");
     return 0;
 }
 fn test_cron_remove_nonexistent() {
     test_group("cron_remove_none");
-    assert_eq(is_err_result(cron_scheduler_remove_entry(cron_scheduler_new(), "nope")), 1, "err");
+    assert_eq(is_err_result(cron_scheduler_remove_entry(cron_scheduler_new(), str_from("nope"))), 1, "err");
     return 0;
 }
 fn test_cron_disabled() {
     test_group("cron_disabled");
     var c = cron_scheduler_new();
-    cron_scheduler_add(c, "d", "* * * * *", make_template(), 0, CRON_CATCHUP);
+    cron_scheduler_add(c, str_from("d"), str_from("* * * * *"), make_template(), 0, CRON_CATCHUP);
     assert_eq(vec_len(cron_scheduler_check_due_at(c, at_ns(2026, 7, 18, 12, 0))), 0, "disabled skipped");
     return 0;
 }
@@ -507,7 +509,7 @@ fn test_cron_first_eval_match() {
     var c = mk_cron("* * * * *", CRON_SKIP);
     var f = cron_scheduler_check_due_at(c, at_ns(2026, 7, 18, 12, 0));
     assert_eq(vec_len(f), 1, "fires once at match");
-    assert_eq(streq(ScheduledTask_name(vec_get(f, 0)), "cron-job (cron)"), 1, "task name");
+    assert_eq(str_eq_cstr(ScheduledTask_name(vec_get(f, 0)), "cron-job (cron)"), 1, "task name");
     return 0;
 }
 fn test_cron_first_eval_nomatch() {
@@ -549,31 +551,31 @@ fn test_cron_star_list() {
     test_group("cron_star_list");
     # "15,*" in DOM begins with '1' -> NOT a star; neither DOM nor DOW is star
     # -> OR rule; DOM covers all days -> fires every day, not only Mondays.
-    var e = result_unwrap(cron_expr_parse("0 0 15,* * 1"));
+    var e = result_unwrap(cron_expr_parse(str_from("0 0 15,* * 1")));
     assert_eq(cron_expr_matches(e, at_ns(2026, 7, 21, 0, 0) / 1000000000), 1, "fires on a Tuesday");
     return 0;
 }
 fn test_cron_step_star_dom() {
     test_group("cron_step_star");
     # "*/2" in DOM begins with '*' -> DOM starred -> DOW (Monday) governs (Vixie).
-    var e = result_unwrap(cron_expr_parse("0 0 */2 * 1"));
+    var e = result_unwrap(cron_expr_parse(str_from("0 0 */2 * 1")));
     assert_eq(cron_expr_matches(e, at_ns(2026, 7, 20, 0, 0) / 1000000000), 1, "Monday (even day) fires");
     assert_eq(cron_expr_matches(e, at_ns(2026, 7, 21, 0, 0) / 1000000000), 0, "Tuesday (odd day) no fire");
     return 0;
 }
 fn test_cron_trailing_comma() {
     test_group("cron_trailing_comma");
-    assert_eq(is_err_result(cron_expr_parse("0,30, 12 1 1 *")), 1, "trailing comma rejected");
+    assert_eq(is_err_result(cron_expr_parse(str_from("0,30, 12 1 1 *"))), 1, "trailing comma rejected");
     return 0;
 }
 fn test_cron_overflow_field() {
     test_group("cron_overflow");
-    assert_eq(is_err_result(cron_expr_parse("18446744073709551621 * * * *")), 1, "overflow field rejected");
+    assert_eq(is_err_result(cron_expr_parse(str_from("18446744073709551621 * * * *"))), 1, "overflow field rejected");
     return 0;
 }
 fn test_cron_negative_epoch() {
     test_group("cron_neg_epoch");
-    assert_eq(cron_expr_matches(result_unwrap(cron_expr_parse("@hourly")), 0 - 3600), 0, "negative epoch no match");
+    assert_eq(cron_expr_matches(result_unwrap(cron_expr_parse(str_from("@hourly"))), 0 - 3600), 0, "negative epoch no match");
     return 0;
 }
 fn test_cron_catchup_cap() {
@@ -599,9 +601,9 @@ fn test_training_method_name() {
 }
 fn test_training_high_priority() {
     test_group("training_high_prio");
-    var job = training_job_template_new("meta-llama/Llama-2-7b", TM_LORA, "/data/training.jsonl", 0, 3600, 300);
-    var task = training_job_to_scheduled_task(job, "agent-123");
-    assert_eq(streq(ScheduledTask_name(task), "train-lora-meta-llama/Llama-2-7b"), 1, "name");
+    var job = training_job_template_new(str_from("meta-llama/Llama-2-7b"), TM_LORA, str_from("/data/training.jsonl"), 0, 3600, 300);
+    var task = training_job_to_scheduled_task(job, str_from("agent-123"));
+    assert_eq(str_eq_cstr(ScheduledTask_name(task), "train-lora-meta-llama/Llama-2-7b"), 1, "name");
     assert_eq(ScheduledTask_priority(task), 6, "priority 6");
     assert_eq(ResourceReq_accel_req(ScheduledTask_resource_requirements(task)) != REQ_NONE, 1, "has accel");
     assert_eq(ScheduledTask_deadline(task) != 0, 1, "has deadline");
@@ -609,16 +611,16 @@ fn test_training_high_priority() {
 }
 fn test_training_no_deadline_when_zero() {
     test_group("training_no_deadline");
-    var job = training_job_template_new("model", TM_QLORA, "data", "gpu-node-1", 0, 600);
-    var task = training_job_to_scheduled_task(job, "agent-456");
+    var job = training_job_template_new(str_from("model"), TM_QLORA, str_from("data"), str_from("gpu-node-1"), 0, 600);
+    var task = training_job_to_scheduled_task(job, str_from("agent-456"));
     assert_eq(ScheduledTask_deadline(task), 0, "no deadline");
-    assert_eq(streq(ScheduledTask_node_preference(task), "gpu-node-1"), 1, "node pref");
+    assert_eq(str_eq_cstr(ScheduledTask_node_preference(task), "gpu-node-1"), 1, "node pref");
     return 0;
 }
 fn test_training_requires_accel() {
     test_group("training_accel");
-    var job = training_job_template_new("m", TM_FULL, "d", 0, 0, 0);
-    var task = training_job_to_scheduled_task(job, "a");
+    var job = training_job_template_new(str_from("m"), TM_FULL, str_from("d"), 0, 0, 0);
+    var task = training_job_to_scheduled_task(job, str_from("a"));
     var req = ScheduledTask_resource_requirements(task);
     assert_eq(ResourceReq_accel_req(req), REQ_GPU_OR_TPU, "gpu-or-tpu");
     assert_eq(ResourceReq_memory_mb(req) >= 4096, 1, "mem >= 4096");
