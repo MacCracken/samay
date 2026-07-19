@@ -7,7 +7,7 @@
 ## v1.0 criteria
 
 - [x] Rust → Cyrius surface parity verified against `rust-old/` (v0.2.0)
-- [x] Test coverage mirrors the Rust suite (108/108 assertions)
+- [x] Test coverage mirrors the Rust suite + feature tests (130/130 assertions)
 - [x] Benchmarks captured (`docs/benchmarks.md`)
 - [x] Real cron-expression parsing + parse-time validation (v0.3.0)
 - [x] Missed-schedule policy (catch-up vs skip), explicit + logged (v0.3.0)
@@ -41,9 +41,10 @@ fits a node without a matching profile (fixes the Rust port's `_ => true` stub;
 [ADR-0002](../adr/0002-ai-hwaccel-profile-placement.md)). Focused adversarial
 review: 0 findings. Utilization/scoring refinements deferred.
 
-### M4 — Serialization + persistence (v0.5.0)
-Full JSON `Serialize`/`Deserialize` for every public type with roundtrip tests;
-optional snapshot/restore of scheduler + cron state.
+### M4 — Serialization + persistence (v0.5.0) — ← next
+Full JSON `Serialize`/`Deserialize` for every public type with roundtrip tests
+(closes the `Deserialize` gap deferred in ADR-0001); optional snapshot/restore of
+scheduler + cron state.
 
 ### M5 — Determinism + hardening (v0.6.0 → v1.0)
 Deterministic scheduling order (stable tie-breaks independent of hashmap

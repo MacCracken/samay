@@ -36,9 +36,11 @@ preempt_if_needed ►  lowest-priority running task a new task outranks ─► P
 ## Representation notes
 
 All structs are heap pointers (`#derive(accessors)`); strings are cstr;
-timestamps are i64 epoch-ns; optional fields use `0`/empty sentinels;
-accelerator requirements are ai-hwaccel `REQ_*` constants. See
-[ADR 0001](../adr/0001-port-representation.md).
+timestamps are i64 epoch-ns; optional fields use `0`/empty sentinels. A task's
+accelerator requirement is an ai-hwaccel `REQ_*` constant; a node's accelerator
+*availability* is a list of ai-hwaccel device profiles, matched via
+`requirement_satisfied()`. See [ADR 0001](../adr/0001-port-representation.md)
+and [ADR 0002](../adr/0002-ai-hwaccel-profile-placement.md).
 
 ## Consumers
 
