@@ -102,6 +102,7 @@ fn task_status_name(s): i64 {
 # NOTE: no inline `#` comments on field lines — #derive(accessors) parses
 # them as field names.
 #derive(accessors)
+#derive(Serialize)
 struct ResourceReq {
     cpu_cores: f64;
     memory_mb: i64;
@@ -329,6 +330,7 @@ fn node_capacity_release(node, req): i64 {
 # ---------------------------------------------------------------------------
 
 #derive(accessors)
+#derive(Serialize)
 struct SchedulingDecision {
     task_id: Str;
     assigned_node: Str;
@@ -346,6 +348,7 @@ fn scheduling_decision_new(task_id, assigned_node, reason, score): i64 {
 }
 
 #derive(accessors)
+#derive(Serialize)
 struct PreemptionAction {
     preempted_task_id: Str;
     preempting_task_id: Str;
@@ -361,6 +364,7 @@ fn preemption_action_new(preempted_task_id, preempting_task_id, reason): i64 {
 }
 
 #derive(accessors)
+#derive(Serialize)
 struct SchedulerStats {
     total_tasks: i64;
     queued: i64;

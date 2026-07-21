@@ -627,6 +627,129 @@ fn test_training_requires_accel() {
     return 0;
 }
 
+# --- M4: JSON Serialize/Deserialize roundtrip (leaf types via #derive) ---
+#
+# Each derive emits Type_to_json(ptr, sb) + Type_from_json(bayan_json_parse(js)).
+# samay structs are heap pointers, so the *_to_json first arg is the pointer
+# directly (not its address). f64 fields must round-trip BIT-EXACT (guaranteed
+# by the 6.4.69 Grisu2 codec) — compared as raw i64 slots.
+
+fn test_json_resource_req() {
+    test_group("json_resource_req");
+    var r = resource_req_new(f64_div(f64_from(1), f64_from(3)), 4096, REQ_GPU, 4, 1, 10000);
+    var sb = str_builder_new();
+    ResourceReq_to_json(r, sb);
+    var r2 = ResourceReq_from_json(bayan_json_parse(str_builder_build(sb)));
+    assert_eq(r2 != 0, 1, "rr parsed");
+    assert_eq(ResourceReq_cpu_cores(r2) == ResourceReq_cpu_cores(r), 1, "rr cpu_cores bit-exact");
+    assert_eq(ResourceReq_memory_mb(r2), 4096, "rr memory_mb");
+    assert_eq(ResourceReq_accel_req(r2), REQ_GPU, "rr accel_req");
+    assert_eq(ResourceReq_accel_min_chips(r2), 4, "rr accel_min_chips");
+    assert_eq(ResourceReq_network(r2), 1, "rr network");
+    assert_eq(ResourceReq_disk_mb(r2), 10000, "rr disk_mb");
+    return 0;
+}
+
+fn test_json_resource_req_default() {
+    test_group("json_rr_default");
+    var r = resource_req_default();
+    var sb = str_builder_new();
+    ResourceReq_to_json(r, sb);
+    var r2 = ResourceReq_from_json(bayan_json_parse(str_builder_build(sb)));
+    assert_eq(ResourceReq_cpu_cores(r2) == ResourceReq_cpu_cores(r), 1, "default cpu (1.0) bit-exact");
+    assert_eq(ResourceReq_memory_mb(r2), 256, "default mem 256");
+    assert_eq(ResourceReq_accel_req(r2), REQ_NONE, "default accel none");
+    return 0;
+}
+
+fn test_json_scheduling_decision() {
+    test_group("json_sched_decision");
+    var d = scheduling_decision_new(str_from("task-abc"), str_from("node-1"),
+        str_from("best-fit selection"), f64_div(f64_from(2), f64_from(3)));
+    var sb = str_builder_new();
+    SchedulingDecision_to_json(d, sb);
+    var d2 = SchedulingDecision_from_json(bayan_json_parse(str_builder_build(sb)));
+    assert_eq(d2 != 0, 1, "decision parsed");
+    assert_eq(str_eq(SchedulingDecision_task_id(d2), SchedulingDecision_task_id(d)), 1, "sd task_id");
+    assert_eq(str_eq(SchedulingDecision_assigned_node(d2), SchedulingDecision_assigned_node(d)), 1, "sd assigned_node");
+    assert_eq(str_eq(SchedulingDecision_reason(d2), SchedulingDecision_reason(d)), 1, "sd reason");
+    assert_eq(SchedulingDecision_score(d2) == SchedulingDecision_score(d), 1, "sd score bit-exact");
+    return 0;
+}
+
+fn test_json_preemption_action() {
+    test_group("json_preemption");
+    var a = preemption_action_new(str_from("victim"), str_from("aggressor"),
+        str_from("priority 10 preempts priority 2 task"));
+    var sb = str_builder_new();
+    PreemptionAction_to_json(a, sb);
+    var a2 = PreemptionAction_from_json(bayan_json_parse(str_builder_build(sb)));
+    assert_eq(a2 != 0, 1, "action parsed");
+    assert_eq(str_eq(PreemptionAction_preempted_task_id(a2), PreemptionAction_preempted_task_id(a)), 1, "pa preempted");
+    assert_eq(str_eq(PreemptionAction_preempting_task_id(a2), PreemptionAction_preempting_task_id(a)), 1, "pa preempting");
+    assert_eq(str_eq(PreemptionAction_reason(a2), PreemptionAction_reason(a)), 1, "pa reason");
+    return 0;
+}
+
+fn test_json_scheduler_stats() {
+    test_group("json_scheduler_stats");
+    var s = scheduler_stats_new();
+    SchedulerStats_set_total_tasks(s, 42);
+    SchedulerStats_set_queued(s, 5);
+    SchedulerStats_set_running(s, 3);
+    SchedulerStats_set_completed(s, 30);
+    SchedulerStats_set_failed(s, 4);
+    SchedulerStats_set_average_wait_time_ms(s, 1250);
+    SchedulerStats_set_average_run_time_ms(s, 8900);
+    var sb = str_builder_new();
+    SchedulerStats_to_json(s, sb);
+    var s2 = SchedulerStats_from_json(bayan_json_parse(str_builder_build(sb)));
+    assert_eq(s2 != 0, 1, "stats parsed");
+    assert_eq(SchedulerStats_total_tasks(s2), 42, "ss total");
+    assert_eq(SchedulerStats_queued(s2), 5, "ss queued");
+    assert_eq(SchedulerStats_running(s2), 3, "ss running");
+    assert_eq(SchedulerStats_completed(s2), 30, "ss completed");
+    assert_eq(SchedulerStats_failed(s2), 4, "ss failed");
+    assert_eq(SchedulerStats_average_wait_time_ms(s2), 1250, "ss wait");
+    assert_eq(SchedulerStats_average_run_time_ms(s2), 8900, "ss run");
+    return 0;
+}
+
+fn test_json_cron_expr() {
+    test_group("json_cron_expr");
+    var r = cron_expr_parse(str_from("*/15 9 * * 1"));
+    assert_eq(is_err_result(r), 0, "expr parsed");
+    var e = result_unwrap(r);
+    var sb = str_builder_new();
+    CronExpr_to_json(e, sb);
+    var e2 = CronExpr_from_json(bayan_json_parse(str_builder_build(sb)));
+    assert_eq(e2 != 0, 1, "cronexpr json parsed");
+    assert_eq(CronExpr_minute_mask(e2), CronExpr_minute_mask(e), "ce minute_mask");
+    assert_eq(CronExpr_hour_mask(e2), CronExpr_hour_mask(e), "ce hour_mask");
+    assert_eq(CronExpr_dom_mask(e2), CronExpr_dom_mask(e), "ce dom_mask");
+    assert_eq(CronExpr_month_mask(e2), CronExpr_month_mask(e), "ce month_mask");
+    assert_eq(CronExpr_dow_mask(e2), CronExpr_dow_mask(e), "ce dow_mask");
+    assert_eq(CronExpr_dom_star(e2), CronExpr_dom_star(e), "ce dom_star");
+    assert_eq(CronExpr_dow_star(e2), CronExpr_dow_star(e), "ce dow_star");
+    return 0;
+}
+
+# A deserialized CronExpr must still match the same instants as the original.
+fn test_json_cron_expr_semantic() {
+    test_group("json_cron_semantic");
+    var e = result_unwrap(cron_expr_parse(str_from("*/15 9 * * 1")));
+    var sb = str_builder_new();
+    CronExpr_to_json(e, sb);
+    var e2 = CronExpr_from_json(bayan_json_parse(str_builder_build(sb)));
+    # 2026-01-05 is a Monday; 09:15 matches, 09:16 does not.
+    var t_match = _chrono_ymd_to_epoch_secs(2026, 1, 5, 9, 15, 0);
+    var t_miss = _chrono_ymd_to_epoch_secs(2026, 1, 5, 9, 16, 0);
+    assert_eq(cron_expr_matches(e2, t_match), cron_expr_matches(e, t_match), "match parity 09:15");
+    assert_eq(cron_expr_matches(e2, t_miss), cron_expr_matches(e, t_miss), "miss parity 09:16");
+    assert_eq(cron_expr_matches(e2, t_match), 1, "09:15 matches");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_uuid_format();
@@ -693,6 +816,13 @@ fn main() {
     test_training_high_priority();
     test_training_no_deadline_when_zero();
     test_training_requires_accel();
+    test_json_resource_req();
+    test_json_resource_req_default();
+    test_json_scheduling_decision();
+    test_json_preemption_action();
+    test_json_scheduler_stats();
+    test_json_cron_expr();
+    test_json_cron_expr_semantic();
     return assert_summary();
 }
 

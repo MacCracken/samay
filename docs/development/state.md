@@ -54,9 +54,18 @@ See [`roadmap.md`](roadmap.md). M0–M3 done. **M4 (v0.5.0)** is in progress:
   130/130 still green.
 - ✅ Established that `#derive(Serialize)` (`Type_to_json(&v, sb)` /
   `Type_from_json(bayan_json_parse(js))`) is the mechanism — no hand-written codec needed.
-- ⛔ **Blocked** on an upstream float-roundtrip fix — filed as
+- ✅ **Leaf-type JSON derives done** (6.4.69): `ResourceReq`, `SchedulingDecision`,
+  `PreemptionAction`, `SchedulerStats`, `CronExpr` carry `#derive(Serialize)`; f64
+  bit-exact; 169/169 assertions. The upstream float fix that was blocking this landed
+  in 6.4.69 (Grisu2 codec) — see the resolved issue below.
+- ⏭ **Container types next — library-based, not hand-rolled.** `ScheduledTask`,
+  `NodeCapacity` (delegates accel profiles to ai-hwaccel ≥2.3.15 `profile_*_json`),
+  cron containers, `TaskScheduler`, and `TrainingJobTemplate` (nullable `target_node`)
+  compose over bayan's `json_v` value-tree API. Service boundary carries them over
+  `sandhi`.
+- ~~⛔ **Blocked** on an upstream float-roundtrip fix — filed as
   [`issues/2026-07-19-cyrius-f64-json-roundtrip.md`](issues/2026-07-19-cyrius-f64-json-roundtrip.md)
-  (upstream: `cyrius/docs/development/issues/2026-07-19-f64-json-roundtrip-6-decimal-cap.md`). The JSON emit path
+  (upstream: `cyrius/docs/development/issues/2026-07-19-f64-json-roundtrip-6-decimal-cap.md`). — RESOLVED in 6.4.69.~~ The JSON emit path
   `fmt_float_buf(v, buf, 6)` (stdlib `lib/fmt.cyr`, shared by both `#derive(Serialize)`
   and bayan) is capped at 6 decimals: `1/3` → `0.333333` loses ~9 mantissa bits, and
   any `|x| < 5e-7` → `0.000000` is annihilated. Two divergent parsers (bayan

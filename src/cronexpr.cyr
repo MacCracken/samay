@@ -23,6 +23,7 @@ enum CronMissedPolicy {
 }
 
 #derive(accessors)
+#derive(Serialize)
 struct CronExpr {
     minute_mask: i64;
     hour_mask: i64;

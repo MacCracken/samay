@@ -18,16 +18,33 @@ All notable changes to Samay are documented here. Format follows
 - `task_status_name` / `samay_training_method_name` still return static cstr
   literals — display helpers, not stored state.
 
+**M4 — JSON `Serialize` for leaf types (via `#derive`).** On toolchain 6.4.69 (which
+landed the Grisu2 round-trip-correct f64 JSON codec), the all-scalar/all-`Str` types
+now derive their JSON codec.
+
 ### Added
-- `bayan` (JSON/YAML/TOML) and `math` (`f64_parse`) declared in `[deps].stdlib`.
+- `#derive(Serialize)` on `ResourceReq`, `SchedulingDecision`, `PreemptionAction`,
+  `SchedulerStats`, `CronExpr` — emits `Type_to_json(ptr, sb)` /
+  `Type_from_json(bayan_json_parse(js))`. f64 fields (`cpu_cores`, `score`)
+  round-trip **bit-exact**; verified including a semantic check that a deserialized
+  `CronExpr` matches the same instants as the original. 39 new roundtrip assertions
+  (**130 → 169**, all green).
+- `bayan` (JSON/YAML/TOML) and `math` (`f64_parse`) declared in `[deps].stdlib`;
+  toolchain pin `6.4.67 → 6.4.69`.
 
 ### Notes
-- 130/130 assertions pass unchanged; demo output and benchmarks are unaffected —
-  the migration is behavior-preserving against the `rust-old/` oracle.
-- M4 remains blocked on an upstream float fix: the JSON emit path
-  (`fmt_float_buf(v, buf, 6)` in stdlib `lib/fmt.cyr`) is capped at 6 decimals, so
-  `1/3` loses ~9 mantissa bits and any `|x| < 5e-7` flushes to `0`. Two divergent
-  float parsers (bayan `_jp_atof`, math `f64_parse`) disagree by 1 ULP.
+- The migration to `Str` is behavior-preserving against the `rust-old/` oracle; the
+  demo and benchmarks are unaffected.
+- **Container types are next, via the library — not hand-rolled.** `ScheduledTask`,
+  `NodeCapacity`, `CronEntry`/`CronScheduler`, `TaskScheduler` and
+  `TrainingJobTemplate` (nullable `target_node`) hold pointer/vec/map fields or a
+  nullable `Str`, which the derive can't handle (it inlines nested structs and its
+  flat-parser `from_json` doesn't unescape). These compose over bayan's `json_v`
+  value-tree API (`json_v_obj_set`/`json_v_arr_push` → `json_v_build`; read via
+  `json_v_parse`/`json_v_obj_get`), which handles escaping, nesting and arrays
+  natively. `NodeCapacity` delegates each accel profile to ai-hwaccel ≥2.3.15's
+  `profile_to_json`/`profile_from_json`. The eventual service boundary
+  (daimon/kavach) carries these bodies over `sandhi`.
 
 ## [0.4.0] — 2026-07-18
 
