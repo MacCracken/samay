@@ -4,7 +4,12 @@ All notable changes to Samay are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.4.1] — 2026-07-20
+
+Toolchain `6.4.67 → 6.4.69` (Grisu2 round-trip-correct f64 JSON), the `Str`
+representation migration that JSON serialization requires, and the first slice of
+M4 — `#derive(Serialize)` on the leaf types. Container types (pointer/vec/map
+fields) remain for a later release; **v0.5.0 (full M4)** is not yet complete.
 
 **M4 groundwork — string representation migrated to `Str`.** Prerequisite for JSON
 `Serialize`/`Deserialize`: `#derive(Serialize)` core dumps on a cstr held in a

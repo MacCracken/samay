@@ -5,7 +5,7 @@
 
 ## Version
 
-**0.4.0** (+ unreleased M4 groundwork) — resource-aware placement (M3). `NodeCapacity` holds real ai-hwaccel
+**0.4.1** — leaf-type JSON serialization + `Str` migration on toolchain 6.4.69, atop M3 resource-aware placement. `NodeCapacity` holds real ai-hwaccel
 accelerator profiles; `can_fit` delegates to `requirement_satisfied()` (ADR-0002).
 Built on M2 cron correctness (0.3.0) and the 0.2.0 Rust→Cyrius parity port (Rust
 reference frozen at `rust-old/`).
