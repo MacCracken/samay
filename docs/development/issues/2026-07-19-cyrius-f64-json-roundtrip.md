@@ -1,7 +1,14 @@
 # f64 JSON roundtrip is lossy — M4 blocker (upstream: cyrius)
 
 **Status:** OPEN — filed upstream, samay M4 blocked on the fix.
-**Upstream issue:** `cyrius/docs/development/issues/2026-07-19-f64-json-roundtrip-6-decimal-cap.md`
+**Upstream issues:**
+- `cyrius/docs/development/issues/2026-07-19-f64-json-roundtrip-6-decimal-cap.md` — the
+  formatter/parser defect (library side).
+- `cyrius/docs/development/issues/2026-07-19-derive-serialize-f64-second-implementation.md`
+  — `#derive(Serialize)` inlines its own copy of the formatter and uses a *different*
+  parser. **This is the one that gates samay**, because samay's M4 plan is built on
+  `#derive(Serialize)`, and a library-only fix would not reach it.
+
 **Affects:** cycc 6.4.67, bayan 1.2.0.
 
 ## Why samay cares
@@ -38,8 +45,14 @@ M5 determinism guarantee.
 
 Upstream item (1) — stop emitting invalid JSON for non-finite / `>= 2^63` — plus item (2)
 — enough emitted precision to roundtrip (17 significant digits is sufficient for a
-double). Once `lib/fmt.cyr` + `src/frontend/lex_pp.cyr` land those, samay re-syncs its
-vendored stdlib (`cyrius lib sync`) and M4 proceeds with no samay-side design change.
+double), **landed on the `#derive(Serialize)` path**, not only in bayan.
+
+Note the rebuild requirement: the derive inlines its formatter into generated code, so a
+new toolchain is not enough on its own — samay must re-run `cyrius lib sync`, rebuild, and
+regenerate `dist/samay.cyr`. No samay-side *design* change is needed either way.
+
+A library-only fix would be a **regression** for samay's purposes: bayan-built and
+derive-built JSON would then disagree on float format within the same document set.
 
 ## Related
 

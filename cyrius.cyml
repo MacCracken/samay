@@ -5,7 +5,7 @@ description = "Samay — task scheduler for AGNOS (cron, resource-aware scheduli
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/samay"
 language = "cyrius"
-cyrius = "6.4.67"
+cyrius = "6.4.69"
 
 [build]
 entry = "src/main.cyr"
