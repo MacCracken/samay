@@ -5,7 +5,7 @@
 
 ## Version
 
-**0.4.1** — leaf-type JSON serialization + `Str` migration on toolchain 6.4.69, atop M3 resource-aware placement. `NodeCapacity` holds real ai-hwaccel
+**0.5.0** — full JSON `Serialize`/`Deserialize` for every public type (snapshot/restore) on toolchain 6.4.69, atop the `Str` migration and M3 resource-aware placement. `NodeCapacity` holds real ai-hwaccel
 accelerator profiles; `can_fit` delegates to `requirement_satisfied()` (ADR-0002).
 Built on M2 cron correctness (0.3.0) and the 0.2.0 Rust→Cyrius parity port (Rust
 reference frozen at `rust-old/`).
@@ -58,11 +58,14 @@ See [`roadmap.md`](roadmap.md). M0–M3 done. **M4 (v0.5.0)** is in progress:
   `PreemptionAction`, `SchedulerStats`, `CronExpr` carry `#derive(Serialize)`; f64
   bit-exact; 169/169 assertions. The upstream float fix that was blocking this landed
   in 6.4.69 (Grisu2 codec) — see the resolved issue below.
-- ⏭ **Container types next — library-based, not hand-rolled.** `ScheduledTask`,
-  `NodeCapacity` (delegates accel profiles to ai-hwaccel ≥2.3.15 `profile_*_json`),
-  cron containers, `TaskScheduler`, and `TrainingJobTemplate` (nullable `target_node`)
-  compose over bayan's `json_v` value-tree API. Service boundary carries them over
-  `sandhi`.
+- ✅ **Container types done** (`src/json.cyr`): `ScheduledTask`, `NodeCapacity`
+  (delegates accel profiles to ai-hwaccel 2.3.15 `profile_*_json`), `CronTaskTemplate`,
+  `CronEntry`, `CronScheduler`, `TaskScheduler` (top-level snapshot), `TrainingJobTemplate`
+  — composed over bayan's `json_v` value-tree API. Maps serialize as key-sorted arrays
+  (deterministic). Full scheduler snapshot→restore→re-serialize is byte-identical, and a
+  restored TPU node still satisfies its placement requirement. 216/216 assertions. This
+  closes JSON Serialize/Deserialize for every public type (the v0.5.0 milestone). Service
+  boundary (daimon/kavach) will carry these bodies over `sandhi`.
 - ~~⛔ **Blocked** on an upstream float-roundtrip fix — filed as
   [`issues/2026-07-19-cyrius-f64-json-roundtrip.md`](issues/2026-07-19-cyrius-f64-json-roundtrip.md)
   (upstream: `cyrius/docs/development/issues/2026-07-19-f64-json-roundtrip-6-decimal-cap.md`). — RESOLVED in 6.4.69.~~ The JSON emit path

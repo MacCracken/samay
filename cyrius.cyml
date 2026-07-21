@@ -26,6 +26,7 @@ modules = [
     "src/cronexpr.cyr",
     "src/cron.cyr",
     "src/training.cyr",
+    "src/json.cyr",
 ]
 
 # ── Dependencies ─────────────────────────────────────────────────
@@ -71,5 +72,5 @@ stdlib = [
 # port consumes the same type from ai-hwaccel's committed dist bundle.
 [deps.ai-hwaccel]
 git = "https://github.com/MacCracken/ai-hwaccel.git"
-tag = "2.3.14"
+tag = "2.3.15"
 modules = ["dist/ai-hwaccel.cyr"]

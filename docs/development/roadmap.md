@@ -7,12 +7,12 @@
 ## v1.0 criteria
 
 - [x] Rust → Cyrius surface parity verified against `rust-old/` (v0.2.0)
-- [x] Test coverage mirrors the Rust suite + feature tests (130/130 assertions)
+- [x] Test coverage mirrors the Rust suite + feature tests (237/237 assertions)
 - [x] Benchmarks captured (`docs/benchmarks.md`)
 - [x] Real cron-expression parsing + parse-time validation (v0.3.0)
 - [x] Missed-schedule policy (catch-up vs skip), explicit + logged (v0.3.0)
 - [x] Resource-aware placement wired through ai-hwaccel `requirement_satisfied()`/profiles (v0.4.0)
-- [ ] JSON `Serialize` + `Deserialize` with roundtrip tests for every public type
+- [x] JSON `Serialize` + `Deserialize` with roundtrip tests for every public type (leaf types via `#derive(Serialize)`; container types via bayan `json_v` in `src/json.cyr`; 6.4.69 Grisu2 f64 is bit-exact)
 - [ ] Determinism guarantees (same schedule + same time → same decisions), tested
 - [ ] At least one downstream consumer (daimon or kavach) green against `dist/samay.cyr`
 - [ ] CHANGELOG complete from v0.2.0 onward
@@ -41,10 +41,17 @@ fits a node without a matching profile (fixes the Rust port's `_ => true` stub;
 [ADR-0002](../adr/0002-ai-hwaccel-profile-placement.md)). Focused adversarial
 review: 0 findings. Utilization/scoring refinements deferred.
 
-### M4 — Serialization + persistence (v0.5.0) — ← next
+### M4 — Serialization + persistence (v0.5.0) — ✅ 2026-07-21
 Full JSON `Serialize`/`Deserialize` for every public type with roundtrip tests
-(closes the `Deserialize` gap deferred in ADR-0001); optional snapshot/restore of
-scheduler + cron state.
+(closes the `Deserialize` gap deferred in ADR-0001). Leaf types (all-scalar/all-`Str`)
+via `#derive(Serialize)`; container types (pointer/vec/map fields) via bayan's `json_v`
+value-tree API in `src/json.cyr`. `TaskScheduler_to_json_str`/`_from_json_str` is the
+scheduler+cron snapshot/restore: `snapshot → restore → re-serialize` is byte-identical,
+maps serialize as key-sorted arrays (deterministic), and a restored node still satisfies
+the same ai-hwaccel placement (2.3.15 lossless profile codec). Hardened by a 6-lens
+adversarial verification pass (escaping, determinism-under-reorder, empty collections,
+malformed input, behavior parity, boundaries): 0 codec bugs, 5 regression guards added.
+Bit-exact f64 depends on toolchain ≥6.4.69 (Grisu2 JSON codec).
 
 ### M5 — Determinism + hardening (v0.6.0 → v1.0)
 Deterministic scheduling order (stable tie-breaks independent of hashmap

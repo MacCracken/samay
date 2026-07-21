@@ -4,6 +4,35 @@ All notable changes to Samay are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.5.0] — 2026-07-21
+
+**M4 complete — JSON `Serialize`/`Deserialize` for every public type.** Leaf types
+via `#derive(Serialize)` (0.4.1); container types (pointer/vec/map fields) via bayan's
+`json_v` value-tree API in the new `src/json.cyr`. `TaskScheduler_to_json_str` /
+`_from_json_str` is the full scheduler+cron snapshot/restore. Hardened by a 6-lens
+adversarial verification pass (0 codec bugs). 237/237 assertions.
+
+### Added
+- `src/json.cyr`: `to_jsonv`/`from_jsonv` (node) + `to_json_str`/`from_json_str` (Str)
+  for `TrainingJobTemplate`, `CronTaskTemplate`, `ScheduledTask`, `NodeCapacity`,
+  `CronEntry`, `CronScheduler`, and `TaskScheduler` (the top-level scheduler snapshot).
+- ai-hwaccel dep bumped `2.3.14 → 2.3.15`; `NodeCapacity.accel_profiles` delegates each
+  profile to ai-hwaccel's `profile_to_json`/`profile_from_json` (lossless, incl. TPU
+  chip counts). A `NodeCapacity` round-trips and the rebuilt node still satisfies the
+  same `requirement_satisfied` placement (M3 property preserved).
+- 68 new roundtrip assertions (**169 → 237**): container roundtrips, a full scheduler
+  snapshot→restore→re-serialize identity check, TPU-placement parity, plus 5 regression
+  guards from the verification pass (string/UTF-8 fidelity, determinism-under-reorder,
+  empty collections, malformed-input robustness, numeric boundaries).
+
+### Notes
+- **Determinism:** maps (cron entries, scheduler tasks/nodes) serialize as arrays
+  sorted by key `Str`, so output is byte-identical regardless of hashmap iteration
+  order — samay's determinism principle, now covered on the wire.
+- Nested leaf structs (`ResourceReq`, `CronExpr`) bridge through their `#derive` codec
+  (exact, since leaves have no `Str` fields); container `Str` fields go through the
+  bayan DOM, which escapes/unescapes correctly.
+
 ## [0.4.1] — 2026-07-20
 
 Toolchain `6.4.67 → 6.4.69` (Grisu2 round-trip-correct f64 JSON), the `Str`

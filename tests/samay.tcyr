@@ -7,6 +7,7 @@ include "src/scheduler.cyr"
 include "src/cronexpr.cyr"
 include "src/cron.cyr"
 include "src/training.cyr"
+include "src/json.cyr"
 
 # --- helpers (mirror the Rust test helpers) ---
 
@@ -750,6 +751,269 @@ fn test_json_cron_expr_semantic() {
     return 0;
 }
 
+# --- M4: JSON codec for container types (pointer/vec/map fields, via json_v) ---
+
+fn test_json_training_template() {
+    test_group("json_training_tmpl");
+    # target_node set
+    var j = training_job_template_new(str_from("meta/llama"), TM_QLORA, str_from("/d.jsonl"),
+        str_from("gpu-7"), 3600, 300);
+    var j2 = training_job_template_from_json_str(training_job_template_to_json_str(j));
+    assert_eq(str_eq(TrainingJobTemplate_model_id(j2), str_from("meta/llama")), 1, "tjt model");
+    assert_eq(TrainingJobTemplate_method(j2), TM_QLORA, "tjt method");
+    assert_eq(str_eq(TrainingJobTemplate_target_node(j2), str_from("gpu-7")), 1, "tjt target set");
+    assert_eq(TrainingJobTemplate_max_duration_secs(j2), 3600, "tjt max_dur");
+    # target_node null (0)
+    var jn = training_job_template_new(str_from("m"), TM_FULL, str_from("d"), 0, 0, 0);
+    var jn2 = training_job_template_from_json_str(training_job_template_to_json_str(jn));
+    assert_eq(TrainingJobTemplate_target_node(jn2), 0, "tjt target null->0");
+    return 0;
+}
+
+fn test_json_cron_task_template() {
+    test_group("json_cron_tmpl");
+    var req = resource_req_new(f64_div(f64_from(3), f64_from(2)), 128, REQ_GPU_OR_TPU, 0, 1, 512);
+    var t = cron_task_template_new(str_from("backup"), str_from("nightly backup"), str_from("agent-b"), 8, req);
+    var t2 = cron_task_template_from_json_str(cron_task_template_to_json_str(t));
+    assert_eq(str_eq(CronTaskTemplate_name(t2), str_from("backup")), 1, "ctt name");
+    assert_eq(CronTaskTemplate_priority(t2), 8, "ctt priority");
+    var r2 = CronTaskTemplate_resource_requirements(t2);
+    assert_eq(ResourceReq_cpu_cores(r2) == ResourceReq_cpu_cores(req), 1, "ctt nested cpu bit-exact");
+    assert_eq(ResourceReq_accel_req(r2), REQ_GPU_OR_TPU, "ctt nested accel");
+    assert_eq(ResourceReq_disk_mb(r2), 512, "ctt nested disk");
+    return 0;
+}
+
+fn test_json_scheduled_task() {
+    test_group("json_scheduled_task");
+    var req = resource_req_new(f64_div(f64_from(1), f64_from(3)), 4096, REQ_GPU, 4, 1, 10000);
+    var t = scheduled_task_new(str_from("nightly"), str_from("desc"), str_from("agent-x"), 7, req);
+    ScheduledTask_set_node_preference(t, str_from("gpu-1"));
+    ScheduledTask_set_status(t, TASK_SCHEDULED);
+    ScheduledTask_set_scheduled_at(t, 1234567890);
+    ScheduledTask_set_fail_reason(t, str_from("prior OOM"));
+    var t2 = scheduled_task_from_json_str(scheduled_task_to_json_str(t));
+    assert_eq(str_eq(ScheduledTask_task_id(t2), ScheduledTask_task_id(t)), 1, "st task_id");
+    assert_eq(str_eq(ScheduledTask_name(t2), str_from("nightly")), 1, "st name");
+    assert_eq(ScheduledTask_priority(t2), 7, "st priority");
+    assert_eq(ScheduledTask_status(t2), TASK_SCHEDULED, "st status");
+    assert_eq(ScheduledTask_scheduled_at(t2), 1234567890, "st scheduled_at");
+    assert_eq(str_eq(ScheduledTask_node_preference(t2), str_from("gpu-1")), 1, "st node_pref");
+    assert_eq(str_eq(ScheduledTask_fail_reason(t2), str_from("prior OOM")), 1, "st fail_reason");
+    assert_eq(ScheduledTask_created_at(t2), ScheduledTask_created_at(t), "st created_at preserved");
+    var r2 = ScheduledTask_resource_requirements(t2);
+    assert_eq(ResourceReq_cpu_cores(r2) == ResourceReq_cpu_cores(req), 1, "st nested cpu bit-exact");
+    assert_eq(ResourceReq_accel_min_chips(r2), 4, "st nested min_chips");
+    return 0;
+}
+
+fn test_json_scheduled_task_null_fields() {
+    test_group("json_st_nulls");
+    var t = scheduled_task_new(str_from("t"), str_from("d"), str_from("a"), 3, resource_req_default());
+    # fail_reason and node_preference default to 0 (None)
+    var t2 = scheduled_task_from_json_str(scheduled_task_to_json_str(t));
+    assert_eq(ScheduledTask_fail_reason(t2), 0, "st fail_reason null->0");
+    assert_eq(ScheduledTask_node_preference(t2), 0, "st node_pref null->0");
+    assert_eq(ScheduledTask_deadline(t2), 0, "st deadline 0");
+    return 0;
+}
+
+fn test_json_node_capacity() {
+    test_group("json_node_capacity");
+    var node = node_capacity_add_accel(
+        node_capacity_new(str_from("tpu-node"), f64_from(8), 16384, 102400, 0),
+        profile_tpu(0, 8, TPU_V5P));
+    node_capacity_reserve(node, resource_req_new(f64_from(2), 2048, REQ_NONE, 0, 0, 1024));
+    var n2 = node_capacity_from_json_str(node_capacity_to_json_str(node));
+    assert_eq(str_eq(NodeCapacity_node_id(n2), str_from("tpu-node")), 1, "nc node_id");
+    assert_eq(NodeCapacity_total_cpu(n2) == NodeCapacity_total_cpu(node), 1, "nc total_cpu bit-exact");
+    assert_eq(NodeCapacity_available_cpu(n2) == NodeCapacity_available_cpu(node), 1, "nc avail_cpu bit-exact");
+    assert_eq(NodeCapacity_available_memory_mb(n2), NodeCapacity_available_memory_mb(node), "nc avail_mem");
+    assert_eq(NodeCapacity_running_tasks(n2), 1, "nc running_tasks");
+    assert_eq(vec_len(NodeCapacity_accel_profiles(n2)), 1, "nc 1 profile");
+    # The M3 placement property must survive the round-trip.
+    var tpu_req = resource_req_new(f64_from(1), 128, REQ_TPU, 4, 0, 0);
+    assert_eq(node_capacity_can_fit(n2, tpu_req), 1, "rebuilt node fits REQ_TPU(4)");
+    var tpu_big = resource_req_new(f64_from(1), 128, REQ_TPU, 16, 0, 0);
+    assert_eq(node_capacity_can_fit(n2, tpu_big), 0, "rebuilt node rejects REQ_TPU(16)");
+    return 0;
+}
+
+fn test_json_cron_entry() {
+    test_group("json_cron_entry");
+    var req = make_req(f64_from(1), 128);
+    var tmpl = cron_task_template_new(str_from("job"), str_from("recurring"), str_from("agent-1"), 5, req);
+    var expr = result_unwrap(cron_expr_parse(str_from("0 2 * * *")));
+    var e = cron_entry_new(str_from("backup"), expr, tmpl, 1, CRON_SKIP);
+    CronEntry_set_last_fired(e, 1700000000);
+    var e2 = cron_entry_from_json_str(cron_entry_to_json_str(e));
+    assert_eq(str_eq(CronEntry_name(e2), str_from("backup")), 1, "ce name");
+    assert_eq(CronEntry_enabled(e2), 1, "ce enabled");
+    assert_eq(CronEntry_missed_policy(e2), CRON_SKIP, "ce policy");
+    assert_eq(CronEntry_last_fired(e2), 1700000000, "ce last_fired");
+    # nested expr still matches the right instant (02:00 daily)
+    var at_2am = _chrono_ymd_to_epoch_secs(2026, 3, 10, 2, 0, 0);
+    assert_eq(cron_expr_matches(CronEntry_expr(e2), at_2am), 1, "ce nested expr matches 02:00");
+    # nested template
+    assert_eq(str_eq(CronTaskTemplate_name(CronEntry_task_template(e2)), str_from("job")), 1, "ce nested tmpl name");
+    return 0;
+}
+
+fn test_json_cron_scheduler_deterministic() {
+    test_group("json_cron_sched");
+    var c = cron_scheduler_new();
+    cron_scheduler_add(c, str_from("zebra"), str_from("0 1 * * *"), make_template(), 1, CRON_CATCHUP);
+    cron_scheduler_add(c, str_from("alpha"), str_from("*/5 * * * *"), make_template(), 1, CRON_SKIP);
+    cron_scheduler_add(c, str_from("mid"), str_from("0 12 * * *"), make_template(), 0, CRON_CATCHUP);
+    var s1 = cron_scheduler_to_json_str(c);
+    var s2 = cron_scheduler_to_json_str(c);
+    assert_eq(str_eq(s1, s2), 1, "deterministic output (2 serializations equal)");
+    # entries emitted in sorted key order: alpha, mid, zebra
+    assert_eq(str_index_of_cstr(s1, "alpha") < str_index_of_cstr(s1, "mid"), 1, "alpha before mid");
+    assert_eq(str_index_of_cstr(s1, "mid") < str_index_of_cstr(s1, "zebra"), 1, "mid before zebra");
+    var c2 = cron_scheduler_from_json_str(s1);
+    assert_eq(map_size(CronScheduler_entries(c2)), 3, "3 entries restored");
+    assert_eq(str_eq(cron_scheduler_to_json_str(c2), s1), 1, "re-serialize matches");
+    return 0;
+}
+
+fn test_json_task_scheduler_snapshot() {
+    test_group("json_scheduler_snapshot");
+    var s = task_scheduler_new();
+    task_scheduler_register_node(s, node_capacity_add_accel(
+        node_capacity_new(str_from("tpu-a"), f64_from(8), 16384, 102400, 0), profile_tpu(0, 4, TPU_V4)));
+    task_scheduler_register_node(s, node_capacity_new(str_from("cpu-b"), f64_from(16), 32768, 204800, 0));
+    task_scheduler_submit_task(s, make_task("t-alpha", 5));
+    task_scheduler_submit_task(s, make_task("t-beta", 9));
+    task_scheduler_schedule_pending(s);
+    var snap1 = task_scheduler_to_json_str(s);
+    var snap2 = task_scheduler_to_json_str(s);
+    assert_eq(str_eq(snap1, snap2), 1, "snapshot deterministic");
+    var s2 = task_scheduler_from_json_str(snap1);
+    assert_eq(map_size(TaskScheduler_tasks(s2)), 2, "2 tasks restored");
+    assert_eq(map_size(TaskScheduler_nodes(s2)), 2, "2 nodes restored");
+    # restored scheduler re-serializes identically (full-fidelity snapshot)
+    assert_eq(str_eq(task_scheduler_to_json_str(s2), snap1), 1, "snapshot round-trip identical");
+    # stats over the restored scheduler match the original
+    assert_eq(SchedulerStats_total_tasks(task_scheduler_stats(s2)),
+        SchedulerStats_total_tasks(task_scheduler_stats(s)), "restored stats total match");
+    return 0;
+}
+
+# --- M4 adversarial regression guards (from the container-codec verify pass) ---
+
+# A Str with bytes: "  \  LF  TAB  c a f  0xC3 0xA9  (café) — exercises every
+# JSON escape plus a multibyte UTF-8 char, built independent of source escaping.
+fn _nasty_str() {
+    var sb = str_builder_new();
+    str_builder_add_byte(sb, 34);
+    str_builder_add_byte(sb, 92);
+    str_builder_add_byte(sb, 10);
+    str_builder_add_byte(sb, 9);
+    str_builder_add_byte(sb, 99);
+    str_builder_add_byte(sb, 97);
+    str_builder_add_byte(sb, 102);
+    str_builder_add_byte(sb, 195);
+    str_builder_add_byte(sb, 169);
+    return str_builder_build(sb);
+}
+
+# GUARD 1 — string fidelity through the container DOM path (escape + UTF-8).
+fn test_json_string_fidelity() {
+    test_group("json_str_fidelity");
+    var nasty = _nasty_str();
+    var node = node_capacity_new(nasty, f64_from(1), 128, 256, 0);
+    var njs = node_capacity_to_json_str(node);
+    # emitted JSON must be valid (re-parseable as an object)
+    assert_eq(json_v_is_obj(json_v_parse_str(str_data(njs), str_len(njs))), 1, "node json valid");
+    var n2 = node_capacity_from_json_str(njs);
+    assert_eq(str_eq(NodeCapacity_node_id(n2), nasty), 1, "node_id byte-identical");
+    var t = scheduled_task_new(str_from("t"), str_from("d"), str_from("a"), 5, resource_req_default());
+    ScheduledTask_set_fail_reason(t, nasty);
+    var t2 = scheduled_task_from_json_str(scheduled_task_to_json_str(t));
+    assert_eq(str_eq(ScheduledTask_fail_reason(t2), nasty), 1, "fail_reason byte-identical");
+    return 0;
+}
+
+# GUARD 2 — determinism independent of insertion order (not just repeated calls).
+# Fixed task_id + pinned created_at, so the determinism check isolates ordering
+# from clock-derived data (dt_now() would otherwise differ between the two builds).
+fn _mk_task_id(id, prio) {
+    var t = make_task(id, prio);
+    ScheduledTask_set_task_id(t, str_from(id));
+    ScheduledTask_set_created_at(t, 1000);
+    return t;
+}
+fn test_json_determinism_reorder() {
+    test_group("json_determinism");
+    var a = task_scheduler_new();
+    task_scheduler_submit_task(a, _mk_task_id("zebra", 5));
+    task_scheduler_submit_task(a, _mk_task_id("alpha", 5));
+    task_scheduler_submit_task(a, _mk_task_id("mid", 5));
+    var b = task_scheduler_new();
+    task_scheduler_submit_task(b, _mk_task_id("mid", 5));
+    task_scheduler_submit_task(b, _mk_task_id("zebra", 5));
+    task_scheduler_submit_task(b, _mk_task_id("alpha", 5));
+    assert_eq(str_eq(task_scheduler_to_json_str(a), task_scheduler_to_json_str(b)), 1,
+        "same tasks, different insert order -> identical JSON");
+    return 0;
+}
+
+# GUARD 3 — empty / minimal collections serialize as [] and restore to size 0.
+fn test_json_empty_collections() {
+    test_group("json_empty");
+    var s2 = task_scheduler_from_json_str(task_scheduler_to_json_str(task_scheduler_new()));
+    assert_eq(map_size(TaskScheduler_tasks(s2)), 0, "empty tasks -> 0");
+    assert_eq(map_size(TaskScheduler_nodes(s2)), 0, "empty nodes -> 0");
+    var c2 = cron_scheduler_from_json_str(cron_scheduler_to_json_str(cron_scheduler_new()));
+    assert_eq(map_size(CronScheduler_entries(c2)), 0, "empty entries -> 0");
+    var cpu = node_capacity_new(str_from("cpu"), f64_from(4), 1024, 2048, 0);
+    var cpu2 = node_capacity_from_json_str(node_capacity_to_json_str(cpu));
+    assert_eq(vec_len(NodeCapacity_accel_profiles(cpu2)), 0, "zero profiles -> 0");
+    return 0;
+}
+
+# GUARD 4 — malformed / partial input: non-object -> 0, empty object -> defaults, no crash.
+fn test_json_malformed_input() {
+    test_group("json_malformed");
+    assert_eq(scheduled_task_from_json_str(str_from("[1,2,3]")), 0, "array root -> 0");
+    assert_eq(scheduled_task_from_json_str(str_from("42")), 0, "int root -> 0");
+    assert_eq(node_capacity_from_json_str(str_from("null")), 0, "null root -> 0");
+    assert_eq(task_scheduler_from_json_str(str_from("{")), 0, "unterminated -> 0");
+    assert_eq(cron_entry_from_json_str(str_from("")), 0, "empty string -> 0");
+    # empty object -> constructed with sane defaults, no crash
+    var ctt = cron_task_template_from_json_str(str_from("{}"));
+    assert_eq(ctt != 0, 1, "empty obj -> non-null");
+    assert_eq(CronTaskTemplate_priority(ctt), 5, "ctt default priority 5");
+    var st = scheduled_task_from_json_str(str_from("{}"));
+    assert_eq(ScheduledTask_status(st), TASK_QUEUED, "st default status queued");
+    return 0;
+}
+
+# GUARD 5 — behavior parity + numeric boundaries after round-trip.
+fn test_json_parity_boundaries() {
+    test_group("json_parity_bounds");
+    # f64 boundaries bit-exact through NodeCapacity.total_cpu
+    var tiny = node_capacity_new(str_from("n"), f64_div(f64_from(1), f64_from(1000000000)), 1, 1, 0);
+    var tiny2 = node_capacity_from_json_str(node_capacity_to_json_str(tiny));
+    assert_eq(NodeCapacity_total_cpu(tiny2) == NodeCapacity_total_cpu(tiny), 1, "1e-9 cpu bit-exact");
+    var zero = node_capacity_new(str_from("z"), f64_from(0), 1, 1, 0);
+    var zero2 = node_capacity_from_json_str(node_capacity_to_json_str(zero));
+    assert_eq(NodeCapacity_total_cpu(zero2) == f64_from(0), 1, "0.0 cpu bit-exact");
+    # i64 boundary: near-max timestamp, no coercion
+    var t = scheduled_task_new(str_from("t"), str_from("d"), str_from("a"), 5, resource_req_default());
+    ScheduledTask_set_scheduled_at(t, 9223372036854775807);
+    var t2 = scheduled_task_from_json_str(scheduled_task_to_json_str(t));
+    assert_eq(ScheduledTask_scheduled_at(t2), 9223372036854775807, "i64-max timestamp exact");
+    # chip-count-exact placement boundary through a restored node
+    var node = node_capacity_add_accel(
+        node_capacity_new(str_from("tpu"), f64_from(8), 4096, 8192, 0), profile_tpu(0, 8, TPU_V4));
+    var node2 = node_capacity_from_json_str(node_capacity_to_json_str(node));
+    assert_eq(node_capacity_can_fit(node2, resource_req_new(f64_from(1), 1, REQ_TPU, 8, 0, 0)), 1, "restored fits TPU(8)");
+    assert_eq(node_capacity_can_fit(node2, resource_req_new(f64_from(1), 1, REQ_TPU, 9, 0, 0)), 0, "restored rejects TPU(9)");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_uuid_format();
@@ -823,6 +1087,19 @@ fn main() {
     test_json_scheduler_stats();
     test_json_cron_expr();
     test_json_cron_expr_semantic();
+    test_json_training_template();
+    test_json_cron_task_template();
+    test_json_scheduled_task();
+    test_json_scheduled_task_null_fields();
+    test_json_node_capacity();
+    test_json_cron_entry();
+    test_json_cron_scheduler_deterministic();
+    test_json_task_scheduler_snapshot();
+    test_json_string_fidelity();
+    test_json_determinism_reorder();
+    test_json_empty_collections();
+    test_json_malformed_input();
+    test_json_parity_boundaries();
     return assert_summary();
 }
 

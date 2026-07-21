@@ -1,4 +1,4 @@
-commit	3f1b236850a9988d13bec776cbcf4a455fd259a8	ai-hwaccel	https://github.com/MacCracken/ai-hwaccel.git	2.3.14
+commit	8e02addd40446731473b2de240311ded323b9965	ai-hwaccel	https://github.com/MacCracken/ai-hwaccel.git	2.3.15
 d9f3b17ddbbe1bba48917c3a679807b01c39c4a1ce776efdbdfbb7a1680e86e4  lib/tagged.cyr
 bffba3143adaa5628e8bc086881dcb2e672351948d8c2569a23d73a749e98afd  lib/syscalls_macos.cyr
 99505e855d2a2714ea9121a60623d1f0ed0bafaace1e34c6f08a3aab11899753  lib/bayan.cyr
@@ -12,7 +12,7 @@ acbf37e24af05cfdd043733db630f2f4ab0a2b5bd984c111c381e271184329f1  lib/hashmap_fa
 c7b3bf5beebddc082d4fa643a7113deaf26d0fd80dd5cd70ba0e3c21671107d0  lib/fs_win.cyr
 27c9752b70e797b43d30204e5077749526144495ba7021b1272067f3236d81f9  lib/args_agnos.cyr
 17da1a84ea09620067a04004c267e1d0a2adf0470981c086aeae07ae4136ac51  lib/freelist.cyr
-3ce14c66122154e8c0b75f5044d9b3130b97e1e0bf70535d7124abfd949d5f8f  lib/ai-hwaccel.cyr
+0a416c0e9196001b31c0aaee3ba45852982ee1e7366f96f747a85004fd41e7a3  lib/ai-hwaccel.cyr
 ac55a4ff22d49ccf6c44893be077e1c824825aed845d82c04767f4f87c29d6da  lib/sync_macos.cyr
 fef4873fa425a431e25ed77409ee4dde92d4fc07fe1df76af336ab74d63d8b11  lib/sakshi.cyr
 7b045871f231519e65f28a4b7abfbae6dd8e586ce03053fd367b3a119e8303c9  lib/atomic.cyr
