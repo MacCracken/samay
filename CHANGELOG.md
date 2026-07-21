@@ -4,6 +4,37 @@ All notable changes to Samay are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.7.0] — 2026-07-21
+
+**M5 (part 2) — security audit + restore-path hardening.** A multi-lens security audit
+(code review + adversarial PoC + live CVE/0day web research) of the untrusted-input
+surface — cron parsing and JSON snapshot restore. Report:
+[`docs/audit/2026-07-21-audit.md`](docs/audit/2026-07-21-audit.md). 10 confirmed findings,
+all denial-of-service on the snapshot-restore path (no Critical/High, no corruption/RCE);
+the parser boundaries and the 2024–2026 cron/JSON CVE classes were found closed.
+
+### Fixed — security (fail-closed restore validation, [ADR-0005](docs/adr/0005-restore-input-validation.md))
+- **Null-`Str` deref SIGSEGV DoS** on snapshots missing required fields (F1/F2/F3): the
+  `*_from_jsonv` deserializers now **reject** a record (`return 0`) when a required `Str`,
+  nested struct, or map-key field is absent or the wrong type, matching Rust serde. A
+  malformed record is dropped by the container loop, not fatal; well-formed snapshots
+  restore unchanged.
+- **Input-validation divergences from Rust** (F6/F7): `priority` clamped to 1–10 and
+  `status` range-checked on restore; `NodeCapacity` u64-domain fields (memory/disk/
+  running_tasks) clamped to ≥0 via `_jv_uint`.
+- **Unbounded-allocation DoS** (F4/F5 vector): `SAMAY_JSON_MAX_ITEMS` (100000) caps
+  restored `tasks`/`nodes`/`entries`/`accel_profiles`; larger arrays reject the snapshot.
+
+### Tests
+- 13 new security regression guards (**283 → 296**): required-field rejection per record
+  type, malformed-record-dropped-not-fatal, priority clamp, negative-resource clamp.
+
+### Notes
+- Tracked audit follow-ups (Rec 3–5, non-ship-blocking): stable O(n log n) sort +
+  terminal-task pruning; cron aggregate-work budget; upstream stdlib hash seeding. The
+  size cap bounds these to a finite worst case; the residual is bounded DoS, deferred
+  rather than risk a sort rewrite destabilising the v0.6.0 determinism guarantee.
+
 ## [0.6.0] — 2026-07-21
 
 **M5 (part 1) — deterministic scheduling.** Every ordering-sensitive path now breaks ties

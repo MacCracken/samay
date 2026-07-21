@@ -981,12 +981,14 @@ fn test_json_malformed_input() {
     assert_eq(node_capacity_from_json_str(str_from("null")), 0, "null root -> 0");
     assert_eq(task_scheduler_from_json_str(str_from("{")), 0, "unterminated -> 0");
     assert_eq(cron_entry_from_json_str(str_from("")), 0, "empty string -> 0");
-    # empty object -> constructed with sane defaults, no crash
-    var ctt = cron_task_template_from_json_str(str_from("{}"));
-    assert_eq(ctt != 0, 1, "empty obj -> non-null");
-    assert_eq(CronTaskTemplate_priority(ctt), 5, "ctt default priority 5");
-    var st = scheduled_task_from_json_str(str_from("{}"));
-    assert_eq(ScheduledTask_status(st), TASK_QUEUED, "st default status queued");
+    # record types with missing required fields -> rejected (fail-closed, ADR-0005)
+    assert_eq(cron_task_template_from_json_str(str_from("{}")), 0, "record missing required -> 0");
+    assert_eq(scheduled_task_from_json_str(str_from("{}")), 0, "task missing required -> 0");
+    assert_eq(node_capacity_from_json_str(str_from("{}")), 0, "node missing node_id -> 0");
+    # container types with no items -> valid empty container (no required scalar fields)
+    var es = task_scheduler_from_json_str(str_from("{}"));
+    assert_eq(es != 0, 1, "empty scheduler obj -> valid");
+    assert_eq(map_size(TaskScheduler_tasks(es)), 0, "empty scheduler has 0 tasks");
     return 0;
 }
 
@@ -1194,6 +1196,64 @@ fn test_det_cron_list() {
     return 0;
 }
 
+# --- Security regression guards (restore-side validation, ADR-0005) ---
+
+# A valid ScheduledTask snapshot, minus whichever required field the caller omits.
+fn _task_json_full() {
+    var t = scheduled_task_new(str_from("t"), str_from("n"), str_from("a"), 5,
+        resource_req_new(f64_from(1), 256, REQ_NONE, 0, 0, 0));
+    return scheduled_task_to_json_str(t);
+}
+
+# Missing required fields must reject (return 0), not produce a poisoned struct
+# that SIGSEGVs on later use.
+fn test_sec_reject_missing_required() {
+    test_group("sec_reject_missing");
+    # training: missing model_id
+    assert_eq(training_job_template_from_json_str(str_from("{\"method\":0,\"dataset\":\"d\"}")), 0, "training no model_id -> 0");
+    # scheduled task: missing task_id (map-key field)
+    assert_eq(scheduled_task_from_json_str(str_from("{\"name\":\"n\",\"description\":\"d\",\"agent_id\":\"a\"}")), 0, "task no task_id -> 0");
+    # node: missing node_id
+    assert_eq(node_capacity_from_json_str(str_from("{\"total_cpu\":1.0}")), 0, "node no node_id -> 0");
+    # task with missing nested resource_requirements
+    assert_eq(scheduled_task_from_json_str(str_from("{\"task_id\":\"t\",\"name\":\"n\",\"description\":\"d\",\"agent_id\":\"a\"}")), 0, "task no req -> 0");
+    return 0;
+}
+
+# A container with a malformed record drops that record and still serializes
+# (the null-key map crash is gone).
+fn test_sec_container_drops_bad() {
+    test_group("sec_drop_bad");
+    var s = task_scheduler_from_json_str(str_from("{\"tasks\":[{\"name\":\"orphan\"}]}"));
+    assert_eq(s != 0, 1, "scheduler restored");
+    assert_eq(map_size(TaskScheduler_tasks(s)), 0, "malformed task dropped");
+    # re-serialization must not crash on a null key/Str
+    var js = task_scheduler_to_json_str(s);
+    assert_eq(str_len(js) > 0, 1, "re-serialized without crash");
+    return 0;
+}
+
+# Out-of-range priority is clamped to 1..10 on restore (i64-overflow guard).
+fn test_sec_clamp_priority() {
+    test_group("sec_clamp_prio");
+    var hi = scheduled_task_from_json_str(str_from("{\"task_id\":\"t\",\"name\":\"n\",\"description\":\"d\",\"agent_id\":\"a\",\"resource_requirements\":{\"cpu_cores\":1.0,\"memory_mb\":1,\"accel_req\":0,\"accel_min_chips\":0,\"network\":0,\"disk_mb\":0},\"priority\":9999999999}"));
+    assert_eq(hi != 0, 1, "restored");
+    assert_eq(ScheduledTask_priority(hi), 10, "priority clamped to 10");
+    var lo = scheduled_task_from_json_str(str_from("{\"task_id\":\"t\",\"name\":\"n\",\"description\":\"d\",\"agent_id\":\"a\",\"resource_requirements\":{\"cpu_cores\":1.0,\"memory_mb\":1,\"accel_req\":0,\"accel_min_chips\":0,\"network\":0,\"disk_mb\":0},\"priority\":-5}"));
+    assert_eq(ScheduledTask_priority(lo), 1, "priority clamped to 1");
+    return 0;
+}
+
+# Negative unsigned-domain values are clamped to 0 on NodeCapacity restore.
+fn test_sec_clamp_negative_resources() {
+    test_group("sec_clamp_neg");
+    var n = node_capacity_from_json_str(str_from("{\"node_id\":\"n\",\"total_cpu\":1.0,\"available_cpu\":1.0,\"total_memory_mb\":-1000,\"running_tasks\":-3}"));
+    assert_eq(n != 0, 1, "restored");
+    assert_eq(NodeCapacity_total_memory_mb(n), 0, "negative memory -> 0");
+    assert_eq(NodeCapacity_running_tasks(n), 0, "negative running_tasks -> 0");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_uuid_format();
@@ -1287,6 +1347,10 @@ fn main() {
     test_det_schedule_colliding();
     test_det_preempt_tie();
     test_det_cron_list_rehash();
+    test_sec_reject_missing_required();
+    test_sec_container_drops_bad();
+    test_sec_clamp_priority();
+    test_sec_clamp_negative_resources();
     return assert_summary();
 }
 

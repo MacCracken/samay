@@ -25,3 +25,4 @@ Decisions about samay — what we chose, the context, and the consequences we ac
 | [0002](0002-ai-hwaccel-profile-placement.md) | Placement via ai-hwaccel device profiles | Accepted (v0.4.0) |
 | [0003](0003-str-string-representation.md) | `Str` (ptr+len) as samay's string representation | Accepted (v0.5.0-dev) — supersedes 0001 point 4 |
 | [0004](0004-deterministic-tie-breaks.md) | Deterministic scheduling via explicit tie-breaks | Accepted (v0.6.0-dev) — intentional divergence from Rust |
+| [0005](0005-restore-input-validation.md) | Input validation on snapshot restore | Accepted (v0.7.0) — fail-closed deserialization (security audit) |

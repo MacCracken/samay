@@ -70,6 +70,41 @@ fn _jv_f64(obj, key, dflt): i64 {
     return json_v_float(el);
 }
 
+# --- restore-side input validation (security hardening, ADR-0005) ---
+#
+# Snapshots may be untrusted (read from disk/network). The from_jsonv
+# deserializers below REJECT a record (return 0) when a required field is
+# missing or the wrong type — matching Rust serde's required-field semantics
+# — so a malformed snapshot fails closed instead of producing a poisoned
+# struct that SIGSEGVs later (a null Str deref) or corrupts a map (null key).
+# Container loops already skip null records, so a bad record is dropped, not
+# fatal. Numeric-domain fields are clamped to their valid range on restore.
+
+# Ceiling on how many items a restored collection may hold, so a hostile
+# snapshot cannot force unbounded allocation. Far above any realistic
+# scheduler; caps the anti-catastrophe bound (OOM / minutes-long work). Note
+# this bounds but does not fully eliminate the O(n^2)-sort (F5) and
+# hash-collision (F4) costs within the cap — those have tracked follow-ups
+# (stable O(n log n) sort; upstream hash seeding). See docs/audit/.
+var SAMAY_JSON_MAX_ITEMS = 100000;
+
+# Clamp an i64 into [lo, hi].
+fn _clamp_i64(x, lo, hi): i64 {
+    if (x < lo) { return lo; }
+    if (x > hi) { return hi; }
+    return x;
+}
+
+# Read an int field, coerced to its non-negative (u64-like) domain; a
+# negative value clamps to 0. Default if absent.
+fn _jv_uint(obj, key, dflt): i64 {
+    var el = json_v_obj_get(obj, key);
+    if (el == 0) { return dflt; }
+    var x = json_v_int(el);
+    if (x < 0) { return 0; }
+    return x;
+}
+
 # --- nested-leaf bridges (leaves have no Str fields -> exact round-trip) ---
 
 # ResourceReq -> json node, via its #derive codec.
@@ -119,13 +154,17 @@ fn training_job_template_to_jsonv(t): i64 {
 fn training_job_template_from_jsonv(v): i64 {
     if (v == 0) { return 0; }
     if (json_v_is_obj(v) == 0) { return 0; }
+    var model = _jv_str(v, "model_id");
+    var dataset = _jv_str(v, "dataset");
+    if (model == 0) { return 0; }
+    if (dataset == 0) { return 0; }
     return training_job_template_new(
-        _jv_str(v, "model_id"),
+        model,
         _jv_int(v, "method", TM_LORA),
-        _jv_str(v, "dataset"),
+        dataset,
         _jv_opt_str_get(v, "target_node"),
-        _jv_int(v, "max_duration_secs", 0),
-        _jv_int(v, "checkpoint_interval_secs", 0));
+        _jv_uint(v, "max_duration_secs", 0),
+        _jv_uint(v, "checkpoint_interval_secs", 0));
 }
 
 fn training_job_template_to_json_str(t): i64 { return json_v_build(training_job_template_to_jsonv(t)); }
@@ -148,12 +187,18 @@ fn cron_task_template_to_jsonv(t): i64 {
 fn cron_task_template_from_jsonv(v): i64 {
     if (v == 0) { return 0; }
     if (json_v_is_obj(v) == 0) { return 0; }
+    var name = _jv_str(v, "name");
+    var desc = _jv_str(v, "description");
+    var agent = _jv_str(v, "agent_id");
+    var req = _rr_from(v, "resource_requirements");
+    if (name == 0) { return 0; }
+    if (desc == 0) { return 0; }
+    if (agent == 0) { return 0; }
+    if (req == 0) { return 0; }
     return cron_task_template_new(
-        _jv_str(v, "name"),
-        _jv_str(v, "description"),
-        _jv_str(v, "agent_id"),
-        _jv_int(v, "priority", 5),
-        _rr_from(v, "resource_requirements"));
+        name, desc, agent,
+        _clamp_i64(_jv_int(v, "priority", 5), 1, 10),
+        req);
 }
 
 fn cron_task_template_to_json_str(t): i64 { return json_v_build(cron_task_template_to_jsonv(t)); }
@@ -169,14 +214,27 @@ fn cron_task_template_from_json_str(s): i64 { return cron_task_template_from_jso
 fn scheduled_task_from_jsonv(v): i64 {
     if (v == 0) { return 0; }
     if (json_v_is_obj(v) == 0) { return 0; }
+    var tid = _jv_str(v, "task_id");
+    var name = _jv_str(v, "name");
+    var desc = _jv_str(v, "description");
+    var agent = _jv_str(v, "agent_id");
+    var req = _rr_from(v, "resource_requirements");
+    if (tid == 0) { return 0; }
+    if (name == 0) { return 0; }
+    if (desc == 0) { return 0; }
+    if (agent == 0) { return 0; }
+    if (req == 0) { return 0; }
+    var st = _jv_int(v, "status", TASK_QUEUED);
+    if (st < TASK_QUEUED) { st = TASK_QUEUED; }
+    if (st > TASK_PREEMPTED) { st = TASK_QUEUED; }
     var p = alloc(112);
-    ScheduledTask_set_task_id(p, _jv_str(v, "task_id"));
-    ScheduledTask_set_name(p, _jv_str(v, "name"));
-    ScheduledTask_set_description(p, _jv_str(v, "description"));
-    ScheduledTask_set_agent_id(p, _jv_str(v, "agent_id"));
-    ScheduledTask_set_priority(p, _jv_int(v, "priority", 1));
-    ScheduledTask_set_resource_requirements(p, _rr_from(v, "resource_requirements"));
-    ScheduledTask_set_status(p, _jv_int(v, "status", TASK_QUEUED));
+    ScheduledTask_set_task_id(p, tid);
+    ScheduledTask_set_name(p, name);
+    ScheduledTask_set_description(p, desc);
+    ScheduledTask_set_agent_id(p, agent);
+    ScheduledTask_set_priority(p, _clamp_i64(_jv_int(v, "priority", 1), 1, 10));
+    ScheduledTask_set_resource_requirements(p, req);
+    ScheduledTask_set_status(p, st);
     ScheduledTask_set_fail_reason(p, _jv_opt_str_get(v, "fail_reason"));
     ScheduledTask_set_created_at(p, _jv_int(v, "created_at", 0));
     ScheduledTask_set_scheduled_at(p, _jv_int(v, "scheduled_at", 0));
@@ -241,19 +299,22 @@ fn node_capacity_to_jsonv(node): i64 {
 fn node_capacity_from_jsonv(v): i64 {
     if (v == 0) { return 0; }
     if (json_v_is_obj(v) == 0) { return 0; }
+    var nid = _jv_str(v, "node_id");
+    if (nid == 0) { return 0; }
     var p = alloc(72);
-    NodeCapacity_set_node_id(p, _jv_str(v, "node_id"));
+    NodeCapacity_set_node_id(p, nid);
     NodeCapacity_set_total_cpu(p, _jv_f64(v, "total_cpu", f64_from(0)));
     NodeCapacity_set_available_cpu(p, _jv_f64(v, "available_cpu", f64_from(0)));
-    NodeCapacity_set_total_memory_mb(p, _jv_int(v, "total_memory_mb", 0));
-    NodeCapacity_set_available_memory_mb(p, _jv_int(v, "available_memory_mb", 0));
-    NodeCapacity_set_total_disk_mb(p, _jv_int(v, "total_disk_mb", 0));
-    NodeCapacity_set_available_disk_mb(p, _jv_int(v, "available_disk_mb", 0));
-    NodeCapacity_set_running_tasks(p, _jv_int(v, "running_tasks", 0));
+    NodeCapacity_set_total_memory_mb(p, _jv_uint(v, "total_memory_mb", 0));
+    NodeCapacity_set_available_memory_mb(p, _jv_uint(v, "available_memory_mb", 0));
+    NodeCapacity_set_total_disk_mb(p, _jv_uint(v, "total_disk_mb", 0));
+    NodeCapacity_set_available_disk_mb(p, _jv_uint(v, "available_disk_mb", 0));
+    NodeCapacity_set_running_tasks(p, _jv_uint(v, "running_tasks", 0));
     var profs = vec_new();
     var arr = json_v_obj_get(v, "accel_profiles");
     if (arr != 0) {
         var n = json_v_arr_len(arr);
+        if (n > SAMAY_JSON_MAX_ITEMS) { return 0; }
         var i = 0;
         while (i < n) {
             # ai-hwaccel's profile_from_json takes a json_v node directly.
@@ -287,13 +348,16 @@ fn cron_entry_to_jsonv(e): i64 {
 fn cron_entry_from_jsonv(v): i64 {
     if (v == 0) { return 0; }
     if (json_v_is_obj(v) == 0) { return 0; }
-    var e = cron_entry_new(
-        _jv_str(v, "name"),
-        _ce_from(v, "expr"),
-        cron_task_template_from_jsonv(json_v_obj_get(v, "task_template")),
-        _jv_int(v, "enabled", 1),
-        _jv_int(v, "missed_policy", CRON_CATCHUP));
-    CronEntry_set_last_fired(e, _jv_int(v, "last_fired", 0));
+    var name = _jv_str(v, "name");
+    var expr = _ce_from(v, "expr");
+    var tmpl = cron_task_template_from_jsonv(json_v_obj_get(v, "task_template"));
+    if (name == 0) { return 0; }
+    if (expr == 0) { return 0; }
+    if (tmpl == 0) { return 0; }
+    var mp = _jv_int(v, "missed_policy", CRON_CATCHUP);
+    if (mp != CRON_SKIP) { mp = CRON_CATCHUP; }
+    var e = cron_entry_new(name, expr, tmpl, _jv_int(v, "enabled", 1), mp);
+    CronEntry_set_last_fired(e, _jv_uint(v, "last_fired", 0));
     return e;
 }
 
@@ -363,6 +427,7 @@ fn cron_scheduler_from_jsonv(v): i64 {
     var arr = json_v_obj_get(v, "entries");
     if (arr != 0) {
         var n = json_v_arr_len(arr);
+        if (n > SAMAY_JSON_MAX_ITEMS) { return 0; }
         var i = 0;
         while (i < n) {
             var e = cron_entry_from_jsonv(json_v_arr_get(arr, i));
@@ -412,6 +477,7 @@ fn task_scheduler_from_jsonv(v): i64 {
     var tarr = json_v_obj_get(v, "tasks");
     if (tarr != 0) {
         var tn = json_v_arr_len(tarr);
+        if (tn > SAMAY_JSON_MAX_ITEMS) { return 0; }
         var ti = 0;
         while (ti < tn) {
             var t = scheduled_task_from_jsonv(json_v_arr_get(tarr, ti));
@@ -422,6 +488,7 @@ fn task_scheduler_from_jsonv(v): i64 {
     var narr = json_v_obj_get(v, "nodes");
     if (narr != 0) {
         var nn = json_v_arr_len(narr);
+        if (nn > SAMAY_JSON_MAX_ITEMS) { return 0; }
         var ni = 0;
         while (ni < nn) {
             var node = node_capacity_from_jsonv(json_v_arr_get(narr, ni));
