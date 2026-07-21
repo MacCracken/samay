@@ -7,15 +7,18 @@
 ## v1.0 criteria
 
 - [x] Rust → Cyrius surface parity verified against `rust-old/` (v0.2.0)
-- [x] Test coverage mirrors the Rust suite + feature tests (237/237 assertions)
+- [x] Test coverage mirrors the Rust suite + feature tests (296/296 assertions)
 - [x] Benchmarks captured (`docs/benchmarks.md`)
 - [x] Real cron-expression parsing + parse-time validation (v0.3.0)
 - [x] Missed-schedule policy (catch-up vs skip), explicit + logged (v0.3.0)
 - [x] Resource-aware placement wired through ai-hwaccel `requirement_satisfied()`/profiles (v0.4.0)
 - [x] JSON `Serialize` + `Deserialize` with roundtrip tests for every public type (leaf types via `#derive(Serialize)`; container types via bayan `json_v` in `src/json.cyr`; 6.4.69 Grisu2 f64 is bit-exact)
 - [x] Determinism guarantees (same schedule + same time → same decisions), tested — explicit tie-breaks on unique keys ([ADR-0004](../adr/0004-deterministic-tie-breaks.md))
-- [ ] At least one downstream consumer (daimon or kavach) green against `dist/samay.cyr`
-- [ ] CHANGELOG complete from v0.2.0 onward
+- [x] At least one downstream consumer green against `dist/samay.cyr` — **kavach 3.8.0**
+  sizes its sandboxes from a samay `ResourceReq` (`src/samay_bridge.cyr`), 436 assertions
+  green. (daimon deferred: samay is the extraction of daimon's own scheduler — 3 symbol
+  collisions — so its integration is a breaking major migration, not a minor.)
+- [x] CHANGELOG complete from v0.2.0 onward (every release 0.2.0 → 0.7.0 documented)
 - [x] Security audit pass ([`docs/audit/2026-07-21-audit.md`](../audit/2026-07-21-audit.md)) — 10 findings, crash-class remediated ([ADR-0005](../adr/0005-restore-input-validation.md))
 
 ## Milestones
@@ -63,7 +66,9 @@ Bit-exact f64 depends on toolchain ≥6.4.69 (Grisu2 JSON codec).
   validation ([ADR-0005](../adr/0005-restore-input-validation.md)).
 - [x] Fuzz harnesses — insertion-order permutation fuzz (M5 determinism) + adversarial
   malformed-snapshot probing (security audit); in-suite regression guards.
-- [ ] Consumer integration (daimon/kavach green against `dist/samay.cyr`, carried over sandhi)
+- [x] Consumer integration — **kavach 3.8.0** green against `dist/samay.cyr` (sandbox
+  sizing from `ResourceReq`). daimon deferred to a dedicated major migration (samay is
+  its scheduler; symbol collisions).
 - [ ] Follow-ups from the audit (Rec 3–5): stable O(n log n) sort + terminal-task pruning;
   cron aggregate-work budget; upstream stdlib hash seeding.
 

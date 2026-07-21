@@ -4,6 +4,41 @@ All notable changes to Samay are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.0.0] — 2026-07-21
+
+**v1.0 — the Rust → Cyrius port is complete.** Every v1.0 criterion is met; no source
+change lands in this release beyond the version stamp — it marks the milestone. The
+surface has been stable since the 0.2.0 parity port and hardened release-by-release
+through 0.7.0.
+
+### v1.0 criteria — all met
+- **Surface parity** with the frozen Rust oracle (`rust-old/`), verified test-for-test (0.2.0).
+- **Real cron** — 5-field expressions with parse-time validation + Vixie DOM/DOW rule, and
+  an explicit, always-logged missed-schedule catch-up/skip policy (0.3.0).
+- **Resource-aware placement** through ai-hwaccel device profiles —
+  `requirement_satisfied()`, no accelerator task fits a node without a matching profile
+  ([ADR-0002](docs/adr/0002-ai-hwaccel-profile-placement.md), 0.4.0).
+- **JSON `Serialize`/`Deserialize`** for every public type — `#derive(Serialize)` leaves +
+  a bayan `json_v` container codec; full scheduler snapshot/restore is byte-identical, f64
+  bit-exact (0.5.0).
+- **Deterministic scheduling** — every ordering-sensitive path breaks ties on a unique key,
+  never hashmap iteration order; fuzz-verified across all `map_values` sites
+  ([ADR-0004](docs/adr/0004-deterministic-tie-breaks.md), 0.6.0).
+- **Security audit** — multi-lens review + adversarial PoC + live CVE/0day research
+  ([`docs/audit/2026-07-21-audit.md`](docs/audit/2026-07-21-audit.md)); crash-class
+  remediated with fail-closed restore validation ([ADR-0005](docs/adr/0005-restore-input-validation.md), 0.7.0).
+- **Downstream consumer green** — **kavach 3.8.0** sizes its sandboxes from a samay
+  `ResourceReq` against `dist/samay.cyr`.
+- **Benchmarks** captured; **CHANGELOG** complete from 0.2.0; `fmt`/`lint` clean; 296/296
+  assertions.
+
+### Notes
+- **Toolchain:** requires cyrius ≥ 6.4.69 (the derive's Grisu2 f64 JSON codec).
+- **Not in v1.0** (tracked): daimon integration — samay is the extraction of daimon's own
+  scheduler, so it is a breaking major migration rather than an additive one. Audit
+  follow-ups Rec 3–5 (stable O(n log n) sort, cron aggregate budget, upstream hash
+  seeding) remain non-blocking hardening items.
+
 ## [0.7.0] — 2026-07-21
 
 **M5 (part 2) — security audit + restore-path hardening.** A multi-lens security audit

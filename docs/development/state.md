@@ -5,7 +5,7 @@
 
 ## Version
 
-**0.7.0** — security-audited restore (fail-closed input validation, ADR-0005) + deterministic scheduling (explicit tie-breaks, ADR-0004) atop full JSON `Serialize`/`Deserialize` snapshot/restore (v0.5.0) on toolchain 6.4.69, the `Str` migration, and M3 resource-aware placement. `NodeCapacity` holds real ai-hwaccel
+**1.0.0** — the Rust→Cyrius port is complete: all v1.0 criteria met. Security-audited restore (ADR-0005) + deterministic scheduling (ADR-0004) + full JSON snapshot/restore (v0.5.0) + ai-hwaccel placement + real cron, on toolchain 6.4.69, atop the `Str` migration. One downstream consumer (kavach 3.8.0) integrated. `NodeCapacity` holds real ai-hwaccel
 accelerator profiles; `can_fit` delegates to `requirement_satisfied()` (ADR-0002).
 Built on M2 cron correctness (0.3.0) and the 0.2.0 Rust→Cyrius parity port (Rust
 reference frozen at `rust-old/`).
@@ -47,8 +47,11 @@ reference frozen at `rust-old/`).
 
 ## Consumers
 
-- daimon, kavach — declared consumers; do not yet reference samay (integration
-  is future work). zugot has a placeholder marketplace recipe expecting a GH release.
+- **kavach 3.8.0** — integrated: sizes sandboxes from a samay `ResourceReq`
+  (`kavach/src/samay_bridge.cyr`), 436 assertions green against `dist/samay.cyr`.
+- daimon — deferred: samay is the extraction of daimon's own scheduler (3 symbol
+  collisions), so its integration is a breaking major migration, not additive.
+- zugot has a placeholder marketplace recipe expecting a GH release.
 
 ## Next
 
@@ -67,9 +70,10 @@ See [`roadmap.md`](roadmap.md). M0–M4 done (M4 = full JSON Serialize/Deseriali
   snapshot-restore DoS (no Critical/High/RCE); parser boundaries and the 2024–2026
   cron/JSON CVE classes found closed. Crash-class remediated with fail-closed restore
   validation ([ADR-0005](../adr/0005-restore-input-validation.md)); 13 regression guards.
-- ⏭ **Consumer integration** — daimon/kavach green against `dist/samay.cyr`, carried over
-  `sandhi` (AGNOS HTTP/JSON-RPC service boundary). Neither references samay yet. **The last
-  open v1.0 criterion.**
+- ✅ **Consumer integration** (kavach 3.8.0) — kavach consumes `dist/samay.cyr` to size
+  sandboxes from a task's `ResourceReq`. This was the last open v1.0 criterion — **all v1.0
+  criteria are now met; samay is v1.0-ready.** daimon deferred to a dedicated major
+  migration (samay = its scheduler; symbol collisions).
 - ⏭ **Audit follow-ups (Rec 3–5, non-blocking):** stable O(n log n) sort + terminal-task
   pruning (F5); cron aggregate-work budget (F8/F9); upstream stdlib hash seeding (F4).
 
