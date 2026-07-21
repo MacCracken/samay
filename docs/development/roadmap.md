@@ -13,7 +13,7 @@
 - [x] Missed-schedule policy (catch-up vs skip), explicit + logged (v0.3.0)
 - [x] Resource-aware placement wired through ai-hwaccel `requirement_satisfied()`/profiles (v0.4.0)
 - [x] JSON `Serialize` + `Deserialize` with roundtrip tests for every public type (leaf types via `#derive(Serialize)`; container types via bayan `json_v` in `src/json.cyr`; 6.4.69 Grisu2 f64 is bit-exact)
-- [ ] Determinism guarantees (same schedule + same time → same decisions), tested
+- [x] Determinism guarantees (same schedule + same time → same decisions), tested — explicit tie-breaks on unique keys ([ADR-0004](../adr/0004-deterministic-tie-breaks.md))
 - [ ] At least one downstream consumer (daimon or kavach) green against `dist/samay.cyr`
 - [ ] CHANGELOG complete from v0.2.0 onward
 - [ ] Security audit pass (`docs/audit/YYYY-MM-DD-audit.md`)
@@ -53,9 +53,13 @@ adversarial verification pass (escaping, determinism-under-reorder, empty collec
 malformed input, behavior parity, boundaries): 0 codec bugs, 5 regression guards added.
 Bit-exact f64 depends on toolchain ≥6.4.69 (Grisu2 JSON codec).
 
-### M5 — Determinism + hardening (v0.6.0 → v1.0)
-Deterministic scheduling order (stable tie-breaks independent of hashmap
-iteration), fuzz harnesses, security audit, consumer integration (daimon/kavach).
+### M5 — Determinism + hardening (v0.6.0 → v1.0) — in progress
+- [x] Deterministic scheduling order — stable tie-breaks on unique keys, independent of
+  hashmap iteration ([ADR-0004](../adr/0004-deterministic-tie-breaks.md)); tested by
+  opposite-insertion-order equality (254/254).
+- [ ] Fuzz harnesses (insertion-order permutations, malformed snapshots)
+- [ ] Security audit (`docs/audit/YYYY-MM-DD-audit.md`)
+- [ ] Consumer integration (daimon/kavach green against `dist/samay.cyr`, carried over sandhi)
 
 ## Out of scope (for v1.0)
 

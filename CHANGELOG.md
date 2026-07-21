@@ -4,6 +4,30 @@ All notable changes to Samay are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.6.0] — 2026-07-21
+
+**M5 (part 1) — deterministic scheduling.** Every ordering-sensitive path now breaks ties
+on a unique key (`task_id` / `node_id` / cron entry `name`) instead of hashmap iteration
+order, via one shared `samay_str_lt` comparator. Intentional divergence from the Rust
+oracle, which left ties to randomized `HashMap` order — see
+[ADR-0004](docs/adr/0004-deterministic-tie-breaks.md). Fuzz harnesses, security audit, and
+consumer integration remain open M5 items toward v1.0.
+
+### Changed
+- `pending_tasks`/`schedule_pending` tie-break by `task_id`; `best_fit_node` by `node_id`
+  on equal utilization; `preempt_if_needed` by `task_id` on equal priority+created_at;
+  `tasks_for_node` returns `task_id`-sorted; `cron` `list_entries`/`check_due_at` emit in
+  entry-`name` order. Non-tied decisions are unchanged (all parity assertions still pass).
+- `src/json.cyr`'s local string comparator folded into the shared `samay_str_lt`.
+
+### Tests
+- 7 determinism guards (**237 → 281**): opposite-insertion-order decision equality,
+  best-fit tie → lowest node_id, `tasks_for_node` ordering, cron listing order, plus
+  three from a 6-probe fuzz pass — **hash-colliding** task_ids (self-validating: proves
+  the raw bucket order differs, then that decisions don't), the preempt tie-break, and
+  cron listing across a map rehash. The fuzz pass found **0 residual gaps** across all
+  10 `map_values` sites.
+
 ## [0.5.0] — 2026-07-21
 
 **M4 complete — JSON `Serialize`/`Deserialize` for every public type.** Leaf types

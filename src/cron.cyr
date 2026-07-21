@@ -93,8 +93,31 @@ fn cron_scheduler_remove_entry(c, name): i64 {
     return Ok(0);
 }
 
+# Stable insertion sort of a vec of CronEntry pointers by name (ascending).
+# Entry names are unique map keys, so this makes list_entries and check_due_at
+# deterministic independent of hashmap iteration order (ADR-0004).
+fn _sort_entries_by_name(v): i64 {
+    var n = vec_len(v);
+    var i = 1;
+    while (i < n) {
+        var key = vec_get(v, i);
+        var j = i - 1;
+        while (j >= 0) {
+            var cur = vec_get(v, j);
+            if (samay_str_lt(CronEntry_name(key), CronEntry_name(cur)) == 0) { break; }
+            vec_set(v, j + 1, cur);
+            j = j - 1;
+        }
+        vec_set(v, j + 1, key);
+        i = i + 1;
+    }
+    return 0;
+}
+
 fn cron_scheduler_list_entries(c): i64 {
-    return map_values(CronScheduler_entries(c));
+    var v = map_values(CronScheduler_entries(c));
+    _sort_entries_by_name(v);
+    return v;
 }
 
 # "<base> (cron)" as a fresh Str.
@@ -187,6 +210,7 @@ fn cron_scheduler_check_due_at(c, now_ns): i64 {
     var now_secs = now_ns / 1000000000;
     var tasks = vec_new();
     var entries = map_values(CronScheduler_entries(c));
+    _sort_entries_by_name(entries);
     var n = vec_len(entries);
     var i = 0;
     while (i < n) {

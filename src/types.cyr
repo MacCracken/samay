@@ -14,6 +14,30 @@
 fn _f64_max(a, b): i64 { if (f64_gt(a, b) == 1) { return a; } return b; }
 fn _f64_min(a, b): i64 { if (f64_lt(a, b) == 1) { return a; } return b; }
 
+# Lexicographic (unsigned byte-wise) less-than for two `Str`s. Returns 1 if
+# `a` sorts strictly before `b`, else 0. The determinism tie-breaker used
+# across the scheduler/cron/json layers: task_id / node_id / entry-name are
+# unique keys, so ordering by them turns every "arbitrary among equals"
+# choice into a total order independent of hashmap iteration (see ADR-0004).
+fn samay_str_lt(a, b): i64 {
+    var la = str_len(a);
+    var lb = str_len(b);
+    var da = str_data(a);
+    var db = str_data(b);
+    var n = la;
+    if (lb < n) { n = lb; }
+    var i = 0;
+    while (i < n) {
+        var ca = load8(da + i);
+        var cb = load8(db + i);
+        if (ca < cb) { return 1; }
+        if (ca > cb) { return 0; }
+        i = i + 1;
+    }
+    if (la < lb) { return 1; }
+    return 0;
+}
+
 # ---------------------------------------------------------------------------
 # TaskPriority — ordered classification (Rust enum w/ derived Ord)
 # ---------------------------------------------------------------------------

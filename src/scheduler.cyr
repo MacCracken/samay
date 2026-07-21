@@ -23,14 +23,19 @@ fn task_scheduler_new(): i64 {
 # --- ordering ---
 
 # True (1) if task `a` should be scheduled before `b`: higher priority
-# first, ties broken by earlier created_at (Rust sort_by).
+# first, then earlier created_at (Rust sort_by), then — the determinism
+# tie-break the Rust HashMap left to iteration order — smaller task_id.
+# task_id is a unique UUID, so this is a total order (ADR-0004).
 fn _task_before(a, b): i64 {
     var pa = ScheduledTask_priority(a);
     var pb = ScheduledTask_priority(b);
     if (pa > pb) { return 1; }
     if (pa < pb) { return 0; }
-    if (ScheduledTask_created_at(a) < ScheduledTask_created_at(b)) { return 1; }
-    return 0;
+    var ca = ScheduledTask_created_at(a);
+    var cb = ScheduledTask_created_at(b);
+    if (ca < cb) { return 1; }
+    if (ca > cb) { return 0; }
+    return samay_str_lt(ScheduledTask_task_id(a), ScheduledTask_task_id(b));
 }
 
 # Stable insertion sort of a vec of task pointers by `_task_before`.
@@ -43,6 +48,27 @@ fn _sort_tasks(v): i64 {
         while (j >= 0) {
             var cur = vec_get(v, j);
             if (_task_before(key, cur) == 0) { break; }
+            vec_set(v, j + 1, cur);
+            j = j - 1;
+        }
+        vec_set(v, j + 1, key);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Stable insertion sort of a vec of task pointers by task_id (ascending).
+# Gives `tasks_for_node` a deterministic order (Rust returned raw HashMap
+# iteration order); task_id is unique so the order is total.
+fn _sort_tasks_by_id(v): i64 {
+    var n = vec_len(v);
+    var i = 1;
+    while (i < n) {
+        var key = vec_get(v, i);
+        var j = i - 1;
+        while (j >= 0) {
+            var cur = vec_get(v, j);
+            if (samay_str_lt(ScheduledTask_task_id(key), ScheduledTask_task_id(cur)) == 0) { break; }
             vec_set(v, j + 1, cur);
             j = j - 1;
         }
@@ -131,6 +157,7 @@ fn task_scheduler_tasks_for_node(s, node_id): i64 {
         }
         i = i + 1;
     }
+    _sort_tasks_by_id(out);
     return out;
 }
 
@@ -148,6 +175,9 @@ fn _best_fit_node(s, req): i64 {
             var u = node_capacity_utilization(node);
             if (best == 0) { best = node; best_util = u; }
             elif (f64_lt(u, best_util) == 1) { best = node; best_util = u; }
+            elif (f64_eq(u, best_util) == 1) {
+                if (samay_str_lt(NodeCapacity_node_id(node), NodeCapacity_node_id(best)) == 1) { best = node; }
+            }
         }
         i = i + 1;
     }
@@ -222,7 +252,12 @@ fn task_scheduler_preempt_if_needed(s, task): i64 {
                 if (cand == 0) { cand = t; }
                 elif (ScheduledTask_priority(t) < ScheduledTask_priority(cand)) { cand = t; }
                 elif (ScheduledTask_priority(t) == ScheduledTask_priority(cand)) {
-                    if (ScheduledTask_created_at(t) > ScheduledTask_created_at(cand)) { cand = t; }
+                    var ct = ScheduledTask_created_at(t);
+                    var cc = ScheduledTask_created_at(cand);
+                    if (ct > cc) { cand = t; }
+                    elif (ct == cc) {
+                        if (samay_str_lt(ScheduledTask_task_id(t), ScheduledTask_task_id(cand)) == 1) { cand = t; }
+                    }
                 }
             }
         }

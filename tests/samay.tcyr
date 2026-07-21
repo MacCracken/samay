@@ -1014,6 +1014,186 @@ fn test_json_parity_boundaries() {
     return 0;
 }
 
+# --- M5: determinism guarantees (tie-breaks independent of hashmap order) ---
+
+fn _det_task(id, prio, created) {
+    var t = make_task(id, prio);
+    ScheduledTask_set_task_id(t, str_from(id));
+    ScheduledTask_set_created_at(t, created);
+    return t;
+}
+
+# Flagship: same 3 equal-priority/equal-created tasks + 2 equal nodes, inserted
+# in opposite orders, must yield an identical decision sequence.
+fn test_det_schedule_pending() {
+    test_group("det_schedule");
+    var a = task_scheduler_new();
+    task_scheduler_register_node(a, make_node("node-a", f64_from(8), 8192));
+    task_scheduler_register_node(a, make_node("node-b", f64_from(8), 8192));
+    task_scheduler_submit_task(a, _det_task("task-1", 5, 100));
+    task_scheduler_submit_task(a, _det_task("task-2", 5, 100));
+    task_scheduler_submit_task(a, _det_task("task-3", 5, 100));
+    var b = task_scheduler_new();
+    task_scheduler_submit_task(b, _det_task("task-3", 5, 100));
+    task_scheduler_submit_task(b, _det_task("task-2", 5, 100));
+    task_scheduler_submit_task(b, _det_task("task-1", 5, 100));
+    task_scheduler_register_node(b, make_node("node-b", f64_from(8), 8192));
+    task_scheduler_register_node(b, make_node("node-a", f64_from(8), 8192));
+    var da = task_scheduler_schedule_pending(a);
+    var db = task_scheduler_schedule_pending(b);
+    assert_eq(vec_len(da), vec_len(db), "same decision count");
+    var i = 0;
+    while (i < vec_len(da)) {
+        assert_eq(str_eq(SchedulingDecision_task_id(vec_get(da, i)), SchedulingDecision_task_id(vec_get(db, i))), 1, "task order identical");
+        assert_eq(str_eq(SchedulingDecision_assigned_node(vec_get(da, i)), SchedulingDecision_assigned_node(vec_get(db, i))), 1, "node choice identical");
+        i = i + 1;
+    }
+    # pending order tie-break: lexicographically-first task_id goes first
+    assert_eq(str_eq_cstr(SchedulingDecision_task_id(vec_get(da, 0)), "task-1"), 1, "task-1 first (task_id tie-break)");
+    return 0;
+}
+
+# best-fit tie: one task, two equal-utilization nodes -> lowest node_id, both orders.
+fn test_det_best_fit_tie() {
+    test_group("det_best_fit");
+    var a = task_scheduler_new();
+    task_scheduler_register_node(a, make_node("node-a", f64_from(4), 4096));
+    task_scheduler_register_node(a, make_node("node-b", f64_from(4), 4096));
+    task_scheduler_submit_task(a, _det_task("t", 5, 100));
+    var b = task_scheduler_new();
+    task_scheduler_register_node(b, make_node("node-b", f64_from(4), 4096));
+    task_scheduler_register_node(b, make_node("node-a", f64_from(4), 4096));
+    task_scheduler_submit_task(b, _det_task("t", 5, 100));
+    var na = SchedulingDecision_assigned_node(vec_get(task_scheduler_schedule_pending(a), 0));
+    var nb = SchedulingDecision_assigned_node(vec_get(task_scheduler_schedule_pending(b), 0));
+    assert_eq(str_eq_cstr(na, "node-a"), 1, "tie -> node-a (order 1)");
+    assert_eq(str_eq_cstr(nb, "node-a"), 1, "tie -> node-a (order 2)");
+    return 0;
+}
+
+# tasks_for_node returns task_id order regardless of submission order.
+fn test_det_tasks_for_node() {
+    test_group("det_tasks_for_node");
+    var s = task_scheduler_new();
+    var t3 = _det_task("t3", 5, 100); ScheduledTask_set_status(t3, TASK_RUNNING); ScheduledTask_set_node_preference(t3, str_from("n"));
+    var t1 = _det_task("t1", 5, 100); ScheduledTask_set_status(t1, TASK_RUNNING); ScheduledTask_set_node_preference(t1, str_from("n"));
+    var t2 = _det_task("t2", 5, 100); ScheduledTask_set_status(t2, TASK_RUNNING); ScheduledTask_set_node_preference(t2, str_from("n"));
+    task_scheduler_submit_task(s, t3);
+    task_scheduler_submit_task(s, t1);
+    task_scheduler_submit_task(s, t2);
+    var v = task_scheduler_tasks_for_node(s, str_from("n"));
+    assert_eq(vec_len(v), 3, "3 tasks for node n");
+    assert_eq(str_eq_cstr(ScheduledTask_task_id(vec_get(v, 0)), "t1"), 1, "sorted t1");
+    assert_eq(str_eq_cstr(ScheduledTask_task_id(vec_get(v, 1)), "t2"), 1, "sorted t2");
+    assert_eq(str_eq_cstr(ScheduledTask_task_id(vec_get(v, 2)), "t3"), 1, "sorted t3");
+    return 0;
+}
+
+# The strong guard: task_ids that COLLIDE in the hashmap (all hash to slot 9 at
+# cap 16), so opposite insertion orders yield opposite map_values bucket order.
+# Without the samay_str_lt tie-break this test would FAIL (the UUID-based guards
+# above can silently false-clean, since non-colliding keys iterate identically).
+# Self-validating: first asserts the raw map order actually differs.
+fn test_det_schedule_colliding() {
+    test_group("det_collide");
+    var a = task_scheduler_new();
+    task_scheduler_register_node(a, make_node("node-a", f64_from(16), 16384));
+    task_scheduler_submit_task(a, _det_task("task-0", 5, 100));
+    task_scheduler_submit_task(a, _det_task("task-15", 5, 100));
+    task_scheduler_submit_task(a, _det_task("task-20", 5, 100));
+    task_scheduler_submit_task(a, _det_task("task-33", 5, 100));
+    var b = task_scheduler_new();
+    task_scheduler_register_node(b, make_node("node-a", f64_from(16), 16384));
+    task_scheduler_submit_task(b, _det_task("task-33", 5, 100));
+    task_scheduler_submit_task(b, _det_task("task-20", 5, 100));
+    task_scheduler_submit_task(b, _det_task("task-15", 5, 100));
+    task_scheduler_submit_task(b, _det_task("task-0", 5, 100));
+    # non-vacuity: raw bucket order must differ between the two insertion orders
+    var ra = map_values(TaskScheduler_tasks(a));
+    var rb = map_values(TaskScheduler_tasks(b));
+    assert_eq(str_eq(ScheduledTask_task_id(vec_get(ra, 0)), ScheduledTask_task_id(vec_get(rb, 0))), 0,
+        "raw map order differs (test is non-vacuous)");
+    # despite that, scheduling decisions are byte-identical
+    var da = task_scheduler_schedule_pending(a);
+    var db = task_scheduler_schedule_pending(b);
+    assert_eq(vec_len(da), 4, "4 decisions");
+    var i = 0;
+    while (i < 4) {
+        assert_eq(str_eq(SchedulingDecision_task_id(vec_get(da, i)), SchedulingDecision_task_id(vec_get(db, i))), 1, "collide task order identical");
+        i = i + 1;
+    }
+    # and pending order is task_id-sorted: task-0 < task-15 < task-20 < task-33
+    assert_eq(str_eq_cstr(SchedulingDecision_task_id(vec_get(da, 0)), "task-0"), 1, "sorted[0]=task-0");
+    assert_eq(str_eq_cstr(SchedulingDecision_task_id(vec_get(da, 3)), "task-33"), 1, "sorted[3]=task-33");
+    return 0;
+}
+
+# preempt tie-break: several equal-priority/equal-created RUNNING tasks with
+# colliding ids, opposite orders -> the preempted victim is the lowest task_id.
+fn test_det_preempt_tie() {
+    test_group("det_preempt");
+    var a = task_scheduler_new();
+    var b = task_scheduler_new();
+    var ids0 = _det_task("task-0", 2, 100);  ScheduledTask_set_status(ids0, TASK_RUNNING);
+    var ids15 = _det_task("task-15", 2, 100); ScheduledTask_set_status(ids15, TASK_RUNNING);
+    var ids20 = _det_task("task-20", 2, 100); ScheduledTask_set_status(ids20, TASK_RUNNING);
+    task_scheduler_submit_task(a, ids0);
+    task_scheduler_submit_task(a, ids15);
+    task_scheduler_submit_task(a, ids20);
+    var jds0 = _det_task("task-0", 2, 100);  ScheduledTask_set_status(jds0, TASK_RUNNING);
+    var jds15 = _det_task("task-15", 2, 100); ScheduledTask_set_status(jds15, TASK_RUNNING);
+    var jds20 = _det_task("task-20", 2, 100); ScheduledTask_set_status(jds20, TASK_RUNNING);
+    task_scheduler_submit_task(b, jds20);
+    task_scheduler_submit_task(b, jds15);
+    task_scheduler_submit_task(b, jds0);
+    var pa = task_scheduler_preempt_if_needed(a, make_task("hi", 10));
+    var pb = task_scheduler_preempt_if_needed(b, make_task("hi", 10));
+    assert_eq(pa != 0, 1, "preemption produced");
+    assert_eq(str_eq_cstr(PreemptionAction_preempted_task_id(pa), "task-0"), 1, "victim = task-0 (order 1)");
+    assert_eq(str_eq_cstr(PreemptionAction_preempted_task_id(pb), "task-0"), 1, "victim = task-0 (order 2)");
+    return 0;
+}
+
+# cron list determinism under a map rehash (14 entries forces grow past cap 16).
+fn test_det_cron_list_rehash() {
+    test_group("det_cron_rehash");
+    var fwd = cron_scheduler_new();
+    var rev = cron_scheduler_new();
+    var i = 0;
+    while (i < 14) {
+        var sb = str_builder_new(); str_builder_add_cstr(sb, "e"); str_builder_add_int(sb, i);
+        cron_scheduler_add(fwd, str_builder_build(sb), str_from("* * * * *"), make_template(), 1, CRON_SKIP);
+        var sb2 = str_builder_new(); str_builder_add_cstr(sb2, "e"); str_builder_add_int(sb2, 13 - i);
+        cron_scheduler_add(rev, str_builder_build(sb2), str_from("* * * * *"), make_template(), 1, CRON_SKIP);
+        i = i + 1;
+    }
+    var lf = cron_scheduler_list_entries(fwd);
+    var lr = cron_scheduler_list_entries(rev);
+    assert_eq(vec_len(lf), 14, "14 entries");
+    var j = 0;
+    while (j < 14) {
+        assert_eq(str_eq(CronEntry_name(vec_get(lf, j)), CronEntry_name(vec_get(lr, j))), 1, "rehash list order identical");
+        j = j + 1;
+    }
+    # spot-check sorted: e0 < e1 (byte order "e0".."e9","e1"? no — lexical: e0,e1,e10,e11,e12,e13,e2..e9)
+    assert_eq(str_eq_cstr(CronEntry_name(vec_get(lf, 0)), "e0"), 1, "first is e0");
+    return 0;
+}
+
+# cron list_entries emits name order regardless of insertion order.
+fn test_det_cron_list() {
+    test_group("det_cron_list");
+    var c = cron_scheduler_new();
+    cron_scheduler_add(c, str_from("zebra"), str_from("* * * * *"), make_template(), 1, CRON_SKIP);
+    cron_scheduler_add(c, str_from("alpha"), str_from("* * * * *"), make_template(), 1, CRON_SKIP);
+    cron_scheduler_add(c, str_from("mid"), str_from("* * * * *"), make_template(), 1, CRON_SKIP);
+    var e = cron_scheduler_list_entries(c);
+    assert_eq(str_eq_cstr(CronEntry_name(vec_get(e, 0)), "alpha"), 1, "list[0]=alpha");
+    assert_eq(str_eq_cstr(CronEntry_name(vec_get(e, 1)), "mid"), 1, "list[1]=mid");
+    assert_eq(str_eq_cstr(CronEntry_name(vec_get(e, 2)), "zebra"), 1, "list[2]=zebra");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_uuid_format();
@@ -1100,6 +1280,13 @@ fn main() {
     test_json_empty_collections();
     test_json_malformed_input();
     test_json_parity_boundaries();
+    test_det_schedule_pending();
+    test_det_best_fit_tie();
+    test_det_tasks_for_node();
+    test_det_cron_list();
+    test_det_schedule_colliding();
+    test_det_preempt_tie();
+    test_det_cron_list_rehash();
     return assert_summary();
 }
 
