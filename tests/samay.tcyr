@@ -38,7 +38,7 @@ fn mk_cron(expr_str, policy) {
 
 fn test_uuid_format() {
     test_group("uuid");
-    var u = uuid_v4();
+    var u = samay_uuid_v4();
     assert_eq(str_len(u), 36, "uuid is 36 chars");
     assert_eq(load8(str_data(u) + 8), 45, "dash at index 8");
     assert_eq(load8(str_data(u) + 14), 52, "version nibble is '4'");
@@ -46,7 +46,7 @@ fn test_uuid_format() {
 }
 fn test_uuid_unique() {
     test_group("uuid_unique");
-    assert_eq(str_eq_cstr(uuid_v4(), uuid_v4()), 0, "two uuids differ");
+    assert_eq(str_eq_cstr(samay_uuid_v4(), samay_uuid_v4()), 0, "two uuids differ");
     return 0;
 }
 

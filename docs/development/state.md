@@ -5,7 +5,7 @@
 
 ## Version
 
-**1.0.0** — the Rust→Cyrius port is complete: all v1.0 criteria met. Security-audited restore (ADR-0005) + deterministic scheduling (ADR-0004) + full JSON snapshot/restore (v0.5.0) + ai-hwaccel placement + real cron, on toolchain 6.4.69, atop the `Str` migration. One downstream consumer (kavach 3.8.0) integrated. `NodeCapacity` holds real ai-hwaccel
+**1.0.1** — the Rust→Cyrius port is complete (uuid_v4→samay_uuid_v4 symbol-hygiene fix): all v1.0 criteria met. Security-audited restore (ADR-0005) + deterministic scheduling (ADR-0004) + full JSON snapshot/restore (v0.5.0) + ai-hwaccel placement + real cron, on toolchain 6.4.69, atop the `Str` migration. One downstream consumer (kavach 3.8.0) integrated. `NodeCapacity` holds real ai-hwaccel
 accelerator profiles; `can_fit` delegates to `requirement_satisfied()` (ADR-0002).
 Built on M2 cron correctness (0.3.0) and the 0.2.0 Rust→Cyrius parity port (Rust
 reference frozen at `rust-old/`).

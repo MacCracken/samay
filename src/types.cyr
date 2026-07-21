@@ -193,7 +193,7 @@ fn scheduled_task_new(name, description, agent_id, priority, req): i64 {
     var prio = priority;
     if (prio < 1) { prio = 1; }
     if (prio > 10) { prio = 10; }
-    ScheduledTask_set_task_id(p, uuid_v4());
+    ScheduledTask_set_task_id(p, samay_uuid_v4());
     ScheduledTask_set_name(p, name);
     ScheduledTask_set_description(p, description);
     ScheduledTask_set_agent_id(p, agent_id);

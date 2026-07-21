@@ -4,6 +4,16 @@ All notable changes to Samay are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.0.1] — 2026-07-21
+
+**Symbol-hygiene fix — `uuid_v4` → `samay_uuid_v4`.** samay's `uuid_v4` collided with
+libro's incompatible `uuid_v4(buf)` (a buffer-writing UUID generator used by libro's
+security-critical audit chain); under the ecosystem's last-def-wins linking, bundling
+both silently broke one. Surfaced while integrating daimon (which depends on libro).
+Renamed samay's generator to the namespaced `samay_uuid_v4` — the fix samay's own
+"symbol hygiene" domain principle mandates. No behavior change; only the internal
+`scheduled_task_new` and the uuid tests referenced it (no known external consumer did).
+
 ## [1.0.0] — 2026-07-21
 
 **v1.0 — the Rust → Cyrius port is complete.** Every v1.0 criterion is met; no source

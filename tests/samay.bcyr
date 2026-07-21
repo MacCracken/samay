@@ -25,11 +25,11 @@ fn main(): i64 {
     bench_batch_stop(b2, 1000000);
     bench_report(b2);
 
-    # uuid_v4: getrandom + hex format (allocating).
-    var b3 = bench_new("uuid_v4");
+    # samay_uuid_v4: getrandom + hex format (allocating).
+    var b3 = bench_new("samay_uuid_v4");
     bench_batch_start(b3);
     i = 0;
-    while (i < 100000) { uuid_v4(); i = i + 1; }
+    while (i < 100000) { samay_uuid_v4(); i = i + 1; }
     bench_batch_stop(b3, 100000);
     bench_report(b3);
 
