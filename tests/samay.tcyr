@@ -718,6 +718,64 @@ fn test_cron_first_eval_nomatch() {
     assert_eq(vec_len(cron_scheduler_check_due_at(c, at_ns(2026, 7, 18, 3, 45))), 0, "no fire at 3:45");
     return 0;
 }
+# --- v1.1.0: a capped due-count is a floor, and says so ---
+
+fn test_cron_count_capped_flag() {
+    test_group("cron_count_capped");
+    # _cron_count_due short-circuits at CRON_MAX_COUNT. When it does, the value
+    # it returns is a FLOOR, not the true count -- the window holds 527,040
+    # minutes, so a per-minute expression really has 527,040 due occurrences
+    # while this reports 100,000. Before v1.1.0 the caller stated that figure as
+    # exact, making the operator-facing number wrong by 427,040. The cap is
+    # deliberately kept (raising it costs ~5x on this expression); what changed
+    # is that the logs now say ">=".
+    var now_s = _chrono_ymd_to_epoch_secs(2026, 8, 30, 12, 0, 0);
+    var old_s = now_s - CRON_SCAN_WINDOW_SECS * 5;
+    var clamped = 0;
+    var capped = 0;
+
+    var every = result_unwrap(cron_expr_parse(str_from("* * * * *")));
+    var n = _cron_count_due(every, old_s, now_s, &clamped, &capped);
+    assert_eq(capped, 1, "per-minute expression trips the count cap");
+    assert_eq(n, CRON_MAX_COUNT, "capped count returns exactly the cap");
+    assert_eq(clamped, 1, "and the pre-window clamp is reported too");
+    assert_eq(n < CRON_SCAN_WINDOW_SECS / 60, 1, "capped value really is a floor, not the truth");
+
+    # A daily expression scans the same window without ever reaching the cap,
+    # so its count is exact and must NOT be flagged as a floor.
+    var daily = result_unwrap(cron_expr_parse(str_from("0 3 * * *")));
+    var clamped2 = 0;
+    var capped2 = 0;
+    var n2 = _cron_count_due(daily, old_s, now_s, &clamped2, &capped2);
+    assert_eq(capped2, 0, "daily expression does not trip the cap");
+    assert_eq(n2, 366, "exact count over the 366-day window");
+
+    # A short, recent window is exact and unflagged on both counts.
+    var clamped3 = 0;
+    var capped3 = 0;
+    var n3 = _cron_count_due(daily, now_s - 86400 * 3, now_s, &clamped3, &capped3);
+    assert_eq(capped3, 0, "short window not capped");
+    assert_eq(clamped3, 0, "short window not clamped");
+    assert_eq(n3, 3, "three daily occurrences in three days");
+    return 0;
+}
+
+fn test_task_status_name() {
+    test_group("task_status_name");
+    # Public API with zero in-tree callers (and none in kavach or daimon).
+    # Mirrors samay_training_method_name, which IS used -- so this is kept, not
+    # deleted: removing an exported symbol is a major-version action. Pinned
+    # here so it cannot rot unnoticed.
+    assert_eq(streq(task_status_name(TASK_QUEUED), "queued"), 1, "queued");
+    assert_eq(streq(task_status_name(TASK_SCHEDULED), "scheduled"), 1, "scheduled");
+    assert_eq(streq(task_status_name(TASK_RUNNING), "running"), 1, "running");
+    assert_eq(streq(task_status_name(TASK_COMPLETED), "completed"), 1, "completed");
+    assert_eq(streq(task_status_name(TASK_FAILED), "failed"), 1, "failed");
+    assert_eq(streq(task_status_name(TASK_CANCELLED), "cancelled"), 1, "cancelled");
+    assert_eq(streq(task_status_name(TASK_PREEMPTED), "preempted"), 1, "preempted");
+    return 0;
+}
+
 fn test_cron_clock_regression() {
     test_group("cron_clock_regression");
     # A backward clock step must hold the watermark, not rewind it. Before
@@ -1828,6 +1886,8 @@ fn main() {
     test_cron_disabled();
     test_cron_first_eval_match();
     test_cron_first_eval_nomatch();
+    test_cron_count_capped_flag();
+    test_task_status_name();
     test_cron_clock_regression();
     test_cron_disabled_no_debt();
     test_cron_catchup();

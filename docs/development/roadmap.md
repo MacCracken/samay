@@ -1,6 +1,6 @@
 # samay — Roadmap
 
-> **Last refreshed**: 2026-08-30 (v1.0.4)
+> **Last refreshed**: 2026-08-30 (v1.1.0)
 >
 > **Forward-looking only.** Nothing shipped belongs here — per-release detail
 > lives in [`../../CHANGELOG.md`](../../CHANGELOG.md) (complete from 0.1.0), the
@@ -10,19 +10,18 @@
 > An item moves when its dependencies are met; a trigger-gated item has no pin at
 > all, deliberately — see [Trigger-gated](#trigger-gated--no-pin-by-design).
 
-> **Current**: **v1.0.4**, cyrius pin **6.5.36**, deps ai-hwaccel **2.3.19** +
-> bayan-json **1.5.2**. Gates green: **416 assertions**, **5/5 benchmarks**,
-> lint 0-warn / 0 untracked deferrals, fmt clean, `dist/` in sync (2,331 lines),
-> 0 symbol collisions against the vendored deps. `src/` is 9 modules / 2,404
-> lines against the frozen 1,479-line Rust oracle.
+> **Current**: **v1.1.0**, cyrius pin **6.5.36**, deps ai-hwaccel **2.3.19** +
+> bayan-json **1.5.2**. Gates green: **432 assertions**, **5/5 benchmarks**,
+> lint 0-warn / 0 untracked deferrals, fmt clean, `dist/` in sync (2,345 lines),
+> 0 symbol collisions against the vendored deps. `src/` is 9 modules against the
+> frozen 1,479-line Rust oracle.
 
 ## The arc at a glance
 
 | Version | Theme | Risk | Gate to entry |
 |---|---|---|---|
-| **1.1.0** | Cron catch-up counting tells the truth | low | none — ready |
-| **1.1.1** | Arithmetic hygiene on the stats path | low | none — ready |
-| **1.1.2** | Checked `alloc()` across `src/` | low | none — ready |
+| ~~1.1.0~~ | ~~Cron catch-up counting tells the truth~~ | — | **shipped 2026-08-30** |
+| **1.1.1** | Checked `alloc()` across `src/` | low | none — ready |
 | **1.2.0** | Split `node_preference` (ADR-0009) | medium | wire back-compat proof |
 | **1.3.0** | F5 — stable sort + terminal-task pruning | **high** | sort consolidation first |
 | **1.4.0** | F8/F9 — cron aggregate work budget | medium | an ADR on the exhaustion rule |
@@ -33,56 +32,22 @@
 
 ## 1.1.x — surfaced by the 2026-08-30 deferral sweep
 
-These were deferred in the 2026-07-21 audit's recommendations or in an ADR, and
-each was re-checked against the current source before landing here: **all three
-are still open, none has silently shipped.** All are small, none changes a public
-signature or the wire format.
+**1.1.0 shipped 2026-08-30** and is recorded in the CHANGELOG, not here. Of the
+three items it was scoped around, **two were not work**: verifying each against
+current source found one a measured no-op and one already shipped in the original
+port. Both are under [Considered and rejected](#considered-and-rejected) with the
+evidence. That is the sweep working as intended — the check is the point, and it
+cost less than either implementation would have.
 
-### 1.1.0 — cron catch-up counting tells the truth
-
-- [ ] **Clamp `last_fired` on restore to `>= now - CRON_SCAN_WINDOW_SECS`**
-  (audit Rec 4, unimplemented — `src/json.cyr:511` reads it through `_jv_uint`,
-  which floors at 0 and nothing more). A snapshot carrying an ancient
-  `last_fired` makes the very next `check_due_at` walk the whole 366-day window
-  and then discard everything before it. Pre-window occurrences are
-  dropped-and-logged anyway, so **firing semantics are unchanged** — this only
-  stops paying for a scan whose result is thrown away.
-- [ ] **Raise `CRON_MAX_COUNT` to the window size and fix its comment.** It is
-  `100000` against a window that holds **527,040** minutes, so the
-  operator-facing "N missed occurrences" can be wrong by **427,040**, and the
-  comment claiming the count is "accurate for realistic downtimes" is false past
-  ~69 days. Costs **no additional worst-case work**: `_cron_count_due` already
-  bounds its loop by the window, so raising the cap only stops the early return
-  from firing.
-
-*Together these make the number samay reports about missed work actually true,
-which is the point of the never-silently-skip principle — a wrong count is a
-quieter version of the same failure.*
-
-### 1.1.1 — arithmetic hygiene on the stats path
-
-- [ ] **Saturate the duration subtractions in `task_scheduler_stats`**
-  (audit Rec 6, unimplemented). `(completed - started)` and
-  `(started - created_at)` are unguarded, and v1.0.3's restore validation clamps
-  scalars but never cross-validates timestamps — so a restored task with
-  `completed < started` contributes a **negative** millisecond figure that drags
-  the reported average below zero. Saturate to 0 and the average stays meaningful.
-- [ ] **Pin `task_status_name` with a test, and keep it.** Zero callers in `src/`,
-  `tests/`, the bench, `main.cyr`, or either consumer — but it is exported public
-  API and mirrors `samay_training_method_name`, which *is* used in three places.
-  Deleting a public symbol is a major-version action; the right response to dead
-  public API is a test, not a removal.
-
-### 1.1.2 — checked `alloc()` across `src/`
+### 1.1.1 — checked `alloc()` across `src/`
 
 - [ ] **Check the 16 `alloc()` results in `src/`.** `alloc` returns 0 on OOM, and
   none of the sites test it, so OOM becomes a wild write at a small address
   rather than a recoverable failure. The P-1 sweep **refuted** the specific crash
   scenario originally filed — under real memory pressure the process dies inside
   `lib/chrono.cyr`'s allocation first, never reaching samay's sites — so this is
-  defensive coding, not a demonstrated defect, and it is pinned last in the arc
-  for that reason. Add the rule to CLAUDE.md's Key Principles beside the
-  `var buf[N]` note so new code inherits it.
+  defensive coding, not a demonstrated defect. Add the rule to CLAUDE.md's Key
+  Principles beside the `var buf[N]` note so new code inherits it.
 
 ### Not version-pinned — do it independently of any release
 
@@ -92,8 +57,6 @@ quieter version of the same failure.*
   `proposals/`. `lib/hashmap.cyr`'s unseeded FNV-1a means the collision set is
   precomputable once against every consumer. samay cannot fix a vendored module,
   but it can stop being the reason nobody knows.
-
----
 
 ## 1.2.x – 1.5.x — existing backlog, re-sequenced
 
@@ -189,7 +152,27 @@ and a version number would just rot. Each names the event.
 
 ## Considered and rejected
 
-Recorded so they are not re-proposed.
+Recorded so they are not re-proposed. Each was measured, not argued.
+
+- **Clamp `last_fired` on restore to `>= now - CRON_SCAN_WINDOW_SECS`**
+  (audit Rec 4, planned for 1.1.0). **A measured no-op.** `_cron_count_due`
+  already floors `start` at `min_start`, so an ancient watermark and a clamped
+  one scan the identical 527,040-minute window — **3.93 ms vs 3.93 ms**,
+  indistinguishable across three runs with warm-up controlled. The only
+  behavioural change would be suppressing `_cron_log_clamp`, a **true** warning
+  that pre-window occurrences were dropped. Nothing gained, information lost.
+  *The real cost here is the full-window scan itself (~3.9 ms per stale entry),
+  and the fix for that is the aggregate budget at 1.4.0, not a restore clamp.*
+- **Raise `CRON_MAX_COUNT` to the window size** (planned for 1.1.0). **Not free,
+  as had been claimed.** A matching minute costs ~40× a missing one — it passes
+  the v1.0.3 prefilter and reaches `epoch_to_date` — so `* * * * *` over a full
+  window is **28.9 ms** capped at 100,000 against **~153 ms** uncapped. 5× more
+  work to make a log line exact. v1.1.0 shipped the free half instead: the count
+  now carries a floor flag and the logs say `>=` (v1.1.0).
+- **Saturating subtraction in the stats averages** (audit Rec 6, planned for
+  1.1.1). **Already shipped** — the guards have been in `task_scheduler_stats`
+  since `e3861d2 "rust port parity"`, the original port. Rec 6 was filed as "no
+  confirmed finding, still worth it" and was already satisfied when written.
 
 - **SKIP-path early exit in `_cron_count_due`** (audit Rec 4, second half).
   Exiting the count early once a match is found would make the SKIP branch cheap

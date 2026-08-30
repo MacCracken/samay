@@ -5,24 +5,31 @@
 
 ## Version
 
-**1.0.4** — concurrency audit; retires the risk v1.0.3 left explicitly open.
-**samay is not thread-safe, by contract** ([ADR-0008](../adr/0008-threading-contract.md)):
-one scheduler per thread, serialise externally. Deliberately no internal lock — the query
-functions return raw pointers into scheduler-owned structs, so a mutex would look safe,
-invite the assumption, and still corrupt. Measured under 8 threads sharing one scheduler:
-73% of node reservations lost (towards **over-admission**), and the tasks hashmap's size
-field left disagreeing with its contents. One race IS fixed, because it breaks callers who
-honour the contract: `lib/chrono.cyr` publishes its month table before filling it, so
-racing threads — even with separate schedulers — could evaluate cron against the wrong
-date (1/400 through samay's public API). New additive `samay_init()` closes it from
-outside; both constructors call it. Verified safe by measurement: the allocator (0
-overlapping blocks in 80,000), `samay_uuid_v4` (0 duplicates in 200,000), and v1.0.3's
-reconciliation. 416 assertions. Toolchain 6.5.36, ai-hwaccel 2.3.19, bayan-json 1.5.2.
-Both consumers (kavach 3.8.0, daimon 2.0.0) integrated and unaffected — neither is
-multi-threaded. `NodeCapacity` holds real ai-hwaccel accelerator profiles; `can_fit`
-delegates to `requirement_satisfied()`
-([ADR-0002](../adr/0002-ai-hwaccel-profile-placement.md)). Built on M2 cron correctness
-(0.3.0) and the 0.2.0 Rust→Cyrius parity port (Rust reference frozen at `rust-old/`).
+**1.1.0** — cron catch-up counts stop overstating their own precision.
+`_cron_count_due` short-circuits at `CRON_MAX_COUNT`, and when it does the value
+is a **floor**: the window holds 527,040 minutes, so a `* * * * *` entry really has
+527,040 due occurrences while the function reports 100,000. Both logs stated that
+as fact — off by 427,040. The count now carries a floor flag and the logs prefix
+it with `>=`. The cap is deliberately kept: a matching minute costs ~40x a missing
+one (it reaches `epoch_to_date`), so raising it takes that expression from 28.9 ms
+to ~153 ms — 5x more work to make a log line exact, where `>=` is free.
+
+⚠ **Two of the three items 1.1.0 was scoped around were not work**, found by
+checking them against source rather than trusting the audit's recommendation text:
+the `last_fired` restore clamp is a measured no-op (3.93 ms vs 3.93 ms — the scan
+is already floored at the window) and would only suppress a true warning, and the
+stats saturating subtraction has been in `task_scheduler_stats` since the original
+port. Both are recorded under *Considered and rejected* in
+[`roadmap.md`](roadmap.md).
+
+Built on v1.0.4's concurrency contract ([ADR-0008](../adr/0008-threading-contract.md)):
+samay is **not thread-safe**, one scheduler per thread, no internal lock because the
+query API returns interior pointers. `samay_init()` closes the one process-global
+hazard that bites even callers who honour the contract. `NodeCapacity` holds real
+ai-hwaccel accelerator profiles; `can_fit` delegates to `requirement_satisfied()`
+([ADR-0002](../adr/0002-ai-hwaccel-profile-placement.md)). Both consumers
+(kavach 3.8.0, daimon 2.0.0) integrated; neither is multi-threaded and neither
+calls samay's cron or JSON API.
 
 ## Toolchain
 
@@ -44,14 +51,16 @@ delegates to `requirement_satisfied()`
 
 ## Tests
 
-- `tests/samay.tcyr` — **416/416 assertions passing** (`cyrius test`), up from 296 in
+- `tests/samay.tcyr` — **432/432 assertions passing** (`cyrius test`), up from 296 in
   v1.0.2. Includes the v1.0.3 additions: the capacity-conservation invariant (the
   assertion whose absence let ADR-0007's defect ship), a cron differential guard pinning
   the optimised matcher to an in-test reference implementation, back-compat snapshot
   restore, wrong-typed nested-leaf rejection, and the parser features that previously had
   **zero** coverage (every `@shortcut` expansion, month/day names, DOW `7`→Sunday).
   v1.0.4 adds the `samay_init()` pre-warm guards (that the chrono month table is
-  *filled*, not merely published, after each constructor).
+  *filled*, not merely published, after each constructor). v1.1.0 adds the
+  capped-due-count guards and pins `task_status_name`, which had zero callers
+  anywhere but is exported public API.
 - `tests/samay.bcyr` — 5 benchmarks, all green (see `docs/benchmarks.md`). Was dead
   (SIGSEGV) from v0.5.0 to v1.0.1: the `Str` migration left it passing bare cstring
   literals into `Str`-taking APIs. Now run by CI so it cannot rot silently again.
@@ -92,9 +101,9 @@ delegates to `requirement_satisfied()`
 ## Next
 
 See [`roadmap.md`](roadmap.md) — it carries the full backlog with version pins and
-is the single source for forward work. In brief: **1.1.x** picks up three audit
-recommendations the 2026-08-30 deferral sweep found still open (cron catch-up
-counting accuracy, saturating stats arithmetic, checked `alloc()`); **1.2.0**
+is the single source for forward work. In brief: **1.1.0** shipped the one
+deferral of three that survived verification (capped counts report as floors);
+**1.1.1** is checked `alloc()`; **1.2.0**
 splits `node_preference`; **1.3.0** is F5 (stable sort + terminal-task pruning),
 the one item with real risk; **1.4.0** is the F8/F9 cron work budget; **1.5.0**
 is the write-side JSON codec. Everything else is trigger-gated and deliberately

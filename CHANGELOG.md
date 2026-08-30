@@ -4,6 +4,70 @@ All notable changes to Samay are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.1.0] — 2026-08-30
+
+**Cron catch-up counts stop overstating their own precision.** 432 assertions
+(was 416). No public signature changed, no wire-format change.
+
+This release is smaller than the roadmap said it would be, because verifying the
+three planned items against current source found **two already closed or not
+worth doing**. That check is recorded below rather than quietly dropped — see
+*Planned and dropped*.
+
+### Fixed — a capped due-count was stated as if it were exact
+
+`_cron_count_due` short-circuits at `CRON_MAX_COUNT` (100,000). When it does, the
+value it returns is a **floor**, not the true count — the catch-up window holds
+**527,040** minutes, so a `* * * * *` entry genuinely has 527,040 due occurrences
+while the function reports 100,000. Both callers then stated that figure as fact:
+
+- `_cron_log_skip` — "skip policy dropped 99,999 missed occurrence(s)"
+- `_cron_log_catchup_cap` — "fired 1000 of 100000 due occurrence(s)"
+
+Off by **427,040** in the worst case. samay's domain principle is that a missed
+schedule is never silently dropped; reporting a wrong number is a quieter version
+of the same failure, so the count now carries a `capped_out` flag and both logs
+prefix the figure with `>=` when it is a floor.
+
+**The cap itself is deliberately kept.** Measured on 6.5.36: a *matching* minute
+costs roughly 40× a missing one, because a match passes the v1.0.3 prefilter and
+reaches `epoch_to_date`. So `* * * * *` over a full window is **28.9 ms** capped
+at 100,000, against **~153 ms** uncapped — 5× more work to make a log line exact.
+Saying `>=` is free. The stale comment claiming the count is "accurate for
+realistic downtimes" (false past ~69 days for a per-minute entry) is corrected.
+
+### Added
+- `test_cron_count_capped_flag` — pins that a per-minute expression trips the cap
+  and is flagged a floor, that a daily expression over the same window is exact
+  and unflagged, and that a short recent window is neither capped nor clamped.
+- `test_task_status_name` — `task_status_name` has zero callers in `src/`,
+  `tests/`, the bench, or either consumer, but it is exported public API and
+  mirrors `samay_training_method_name`, which *is* used in three places. Removing
+  an exported symbol is a major-version action, so it is kept and pinned instead
+  of deleted.
+
+### Planned and dropped — verified against source, not assumed
+
+Two of the three items this release was scoped around turned out not to be work:
+
+- **Clamp `last_fired` to `>= now - CRON_SCAN_WINDOW_SECS` on restore**
+  (audit Rec 4). **No-op.** `_cron_count_due` already floors `start` at
+  `min_start`, so an ancient watermark and a clamped one scan the identical
+  527,040-minute window — measured 3.93 ms vs 3.93 ms, indistinguishable. The
+  only thing the clamp would change is suppressing `_cron_log_clamp`, a **true**
+  warning that occurrences older than the window were dropped. It would trade
+  nothing for less information.
+- **Saturating subtraction in the stats averages** (audit Rec 6). **Already
+  shipped** — `if (ms < 0) { ms = 0; }` and `if (wms < 0) { wms = 0; }` have been
+  in `task_scheduler_stats` since `e3861d2 "rust port parity"`, the original
+  port. Rec 6 was filed as "no confirmed finding, still worth it" and was already
+  satisfied when written.
+
+Both were carried on the roadmap as open. They were listed from the audit's
+recommendation text without re-checking the code — the exact failure the
+roadmap's own trigger-discipline note warns about, committed by the note's
+author. The roadmap now records both under *Considered and rejected*.
+
 ## [1.0.4] — 2026-08-30
 
 **Concurrency audit — the risk v1.0.3 left explicitly unretired.** samay now states a
