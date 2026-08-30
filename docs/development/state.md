@@ -91,23 +91,14 @@ delegates to `requirement_satisfied()`
 
 ## Next
 
-See [`roadmap.md`](roadmap.md). M0–M5 complete; v1.0 shipped, and v1.0.3 closes the P-1
-sweep. Open items are tracked under "Post-1.0 tracked follow-ups" in the roadmap:
-
-- ⏭ **F5** — stable O(n log n) sort + terminal-task pruning. Four insertion sorts remain,
-  ~85× slower than merge sort at n=8000. Held out of v1.0.3 deliberately: ADR-0004's
-  determinism guarantee rides on those comparators and the release was already cron- and
-  JSON-heavy. Consolidate the four into one shared comparator first.
-- ⏭ **F8/F9** — cron cross-entry aggregate work budget. v1.0.3's prefilter cut the cost
-  ~12× and removed the heap growth, so this is now a policy question (any exhaustion rule
-  collides with "missed schedules are never silently skipped"), not an availability one.
-- ⏭ **F4** — upstream stdlib hash seeding; in `lib/`, off-limits to samay. v1.0.3's NaN
-  guard removed the last path by which bucket order could reach a documented-deterministic
-  decision.
-- ⏭ **Write-side codec** — `_rr_node`/`_ce_node` still serialize-then-reparse (~68% of
-  `scheduled_task_to_jsonv`). Held back so v1.0.3's emitted bytes are provably unchanged.
-- ⏭ **`node_preference` split** into user-preference vs current-assignment
-  ([ADR-0007](../adr/0007-reservation-lifecycle.md) Consequences). Needs a minor release.
+See [`roadmap.md`](roadmap.md) — it carries the full backlog with version pins and
+is the single source for forward work. In brief: **1.1.x** picks up three audit
+recommendations the 2026-08-30 deferral sweep found still open (cron catch-up
+counting accuracy, saturating stats arithmetic, checked `alloc()`); **1.2.0**
+splits `node_preference`; **1.3.0** is F5 (stable sort + terminal-task pruning),
+the one item with real risk; **1.4.0** is the F8/F9 cron work budget; **1.5.0**
+is the write-side JSON codec. Everything else is trigger-gated and deliberately
+unpinned.
 
 **Concurrency — audited in v1.0.4, see [ADR-0008](../adr/0008-threading-contract.md).**
 Retired as an unknown; now a stated contract with measured backing. Open items from it:

@@ -5,110 +5,199 @@
 > **Forward-looking only.** Nothing shipped belongs here — per-release detail
 > lives in [`../../CHANGELOG.md`](../../CHANGELOG.md) (complete from 0.1.0), the
 > decisions in [`../adr/`](../adr/), and live state in [`state.md`](state.md).
-> The v1.0 criteria checklist and the M0–M5 milestone narrative were removed at
-> this refresh: every item was `[x]`, and a roadmap that is mostly a trophy case
-> stops being read.
+>
+> Version pins below are **targets that fix ordering, not commitments to dates**.
+> An item moves when its dependencies are met; a trigger-gated item has no pin at
+> all, deliberately — see [Trigger-gated](#trigger-gated--no-pin-by-design).
 
 > **Current**: **v1.0.4**, cyrius pin **6.5.36**, deps ai-hwaccel **2.3.19** +
 > bayan-json **1.5.2**. Gates green: **416 assertions**, **5/5 benchmarks**,
 > lint 0-warn / 0 untracked deferrals, fmt clean, `dist/` in sync (2,331 lines),
 > 0 symbol collisions against the vendored deps. `src/` is 9 modules / 2,404
 > lines against the frozen 1,479-line Rust oracle.
->
-> v1.0 shipped at 1.0.0 (2026-07-21). The 1.0.2–1.0.4 arc was dependency
-> currency, a P-1 audit sweep, and a concurrency audit — recorded in the
-> CHANGELOG and in ADRs [0006](../adr/0006-cron-expression-model.md),
-> [0007](../adr/0007-reservation-lifecycle.md) and
-> [0008](../adr/0008-threading-contract.md), not here.
 
-## Open — tracked follow-ups
+## The arc at a glance
 
-Carried from [`../audit/2026-07-21-audit.md`](../audit/2026-07-21-audit.md) and
-the 2026-08-29 P-1 sweep. Referenced by ID from the source comments that defer to
-them, so `cyrius lint` can see each deferral is tracked — do not renumber.
+| Version | Theme | Risk | Gate to entry |
+|---|---|---|---|
+| **1.1.0** | Cron catch-up counting tells the truth | low | none — ready |
+| **1.1.1** | Arithmetic hygiene on the stats path | low | none — ready |
+| **1.1.2** | Checked `alloc()` across `src/` | low | none — ready |
+| **1.2.0** | Split `node_preference` (ADR-0009) | medium | wire back-compat proof |
+| **1.3.0** | F5 — stable sort + terminal-task pruning | **high** | sort consolidation first |
+| **1.4.0** | F8/F9 — cron aggregate work budget | medium | an ADR on the exhaustion rule |
+| **1.5.0** | Write-side JSON codec | medium | byte-equality corpus |
+| *(none)* | Trigger-gated items | — | a consumer event |
 
-- [ ] **F5 — stable O(n log n) sort + terminal-task pruning.** Four insertion
-  sorts remain (`src/scheduler.cyr` ×2, `src/cron.cyr`, `src/json.cyr`); measured
-  ~85× slower than a merge sort at n=8000. Consolidate the four into one shared
-  `samay_sort_by_key` **first**, then replace the algorithm once — two of them are
-  already exact `_sort_by_key` specialisations. Held out of 1.0.3 deliberately:
-  ADR-0004's determinism guarantee rides on those comparators and that release
-  was already cron- and JSON-heavy. Terminal tasks also accumulate in
-  `TaskScheduler.tasks` with no removal API, so every subsequent sort and
-  snapshot grows without bound. *Trigger*: a consumer with a long-lived scheduler
-  or >1k concurrent tasks. *Medium.*
-- [ ] **F8/F9 — cron aggregate-work budget.** Per-entry catch-up is bounded
-  (`CRON_SCAN_WINDOW_SECS`, `CRON_MAX_COUNT`, `CRON_CATCHUP_CAP`); the aggregate
-  across many entries in one `check_due_at` is not. 1.0.3's alloc-free prefilter
-  cut the cost ~12× and removed the heap growth entirely, so this is now a
-  **policy** question rather than an availability one: any budget needs an
-  exhaustion rule, and every candidate collides with "missed schedules are never
-  silently skipped". Lands in `_cron_check_entry`, which 1.0.3 extracted for
-  exactly this. *Trigger*: a consumer running many cron entries across a long
-  outage. *Medium.*
-- [ ] **Wire-side write optimisation.** `_rr_node` / `_ce_node` still
-  serialize-then-reparse through the `#derive` codec (~68% of
-  `scheduled_task_to_jsonv`; measured 3.14 µs → 695 ns for a direct builder).
-  The read side moved to hand-written codecs in 1.0.3; the write side was held
-  back so that release's emitted bytes were provably unchanged. *Trigger*: needs
-  a byte-equality corpus over ≥500 `ResourceReq` values before landing — it is
-  the one change that can silently alter the wire. *Medium.*
-- [ ] **F4 — upstream stdlib hash seeding.** `lib/hashmap.cyr` uses an unseeded
-  FNV-1a. samay cannot fix a vendored module, and 1.0.3 removed the one path by
-  which bucket order could still reach a documented-deterministic decision (the
-  NaN-utilization fall-through in `_best_fit_node`). Retained only so the
-  deferral in `src/json.cyr` stays tracked. *Trigger*: upstream, not ours.
+---
 
-## Open — from the 1.0.4 concurrency audit
+## 1.1.x — surfaced by the 2026-08-30 deferral sweep
 
-See [ADR-0008](../adr/0008-threading-contract.md) for the measurements.
+These were deferred in the 2026-07-21 audit's recommendations or in an ADR, and
+each was re-checked against the current source before landing here: **all three
+are still open, none has silently shipped.** All are small, none changes a public
+signature or the wire format.
 
-- [ ] **Upstream: `lib/chrono.cyr` publishes `_chrono_mdays` before filling it.**
-  A racing thread reads an all-zero month table and `epoch_to_date` returns month
-  13 — a silently wrong date, reachable from `cron_expr_matches`. samay closes the
-  window from outside with `samay_init()`, but the fix belongs upstream. **Filed**
-  2026-08-30 at `cyrius/docs/development/proposals/2026-08-30-lazy-init-publish-before-fill.md`.
-  Drop `samay_init`'s chrono pre-warm only once that ships *and* the pin moves
-  past it. *Trigger*: upstream release.
-- [ ] **Opt-in concurrent-entry detector.** A debug mode that notices two threads
-  inside one scheduler and aborts or warns, so a consumer catches a contract
-  violation immediately instead of via corrupted capacity. Considered during the
-  audit and deliberately not built — no consumer is multi-threaded today.
-  *Trigger*: any consumer adopting a threaded shape. *Medium.*
+### 1.1.0 — cron catch-up counting tells the truth
 
-## Deferred — no trigger has fired
+- [ ] **Clamp `last_fired` on restore to `>= now - CRON_SCAN_WINDOW_SECS`**
+  (audit Rec 4, unimplemented — `src/json.cyr:511` reads it through `_jv_uint`,
+  which floors at 0 and nothing more). A snapshot carrying an ancient
+  `last_fired` makes the very next `check_due_at` walk the whole 366-day window
+  and then discard everything before it. Pre-window occurrences are
+  dropped-and-logged anyway, so **firing semantics are unchanged** — this only
+  stops paying for a scan whose result is thrown away.
+- [ ] **Raise `CRON_MAX_COUNT` to the window size and fix its comment.** It is
+  `100000` against a window that holds **527,040** minutes, so the
+  operator-facing "N missed occurrences" can be wrong by **427,040**, and the
+  comment claiming the count is "accurate for realistic downtimes" is false past
+  ~69 days. Costs **no additional worst-case work**: `_cron_count_due` already
+  bounds its loop by the window, so raising the cap only stops the early return
+  from firing.
 
-- [ ] **Split `node_preference` into user-preference and current-assignment.**
-  `schedule_pending` overwrites the caller's requested node with the chosen one,
-  which destroys the accurate "preferred node" decision reason. ADR-0007 balanced
-  the accounting with a separate `reserved_on` instead; this is the cleaner model
-  but changes the meaning of a shipped field. Achievable without a wire break if
-  the new field is nullable and defaulted. *Trigger*: a minor release, with its
-  own ADR. *Medium.*
-- [ ] **Benchmark the accelerator placement path.** Every `can_fit` /
-  `_best_fit_node` number on record used `REQ_NONE`, which short-circuits before
-  touching profiles — so the figures understate exactly the workload samay's
-  domain principles are written about. ai-hwaccel's `find_satisfying_profile` has
-  never been measured inside the placement loop. *Trigger*: before any placement
-  perf claim. *Low.*
-- [ ] **Structure-aware fuzzing over `task_scheduler_from_json_str`.** All restore
-  probing to date has been hand-crafted against specific hypotheses. 1.0.3's
-  fail-closed validation is exactly what a fuzzer should be pointed at.
-  *Trigger*: any new restore-path finding, or a consumer accepting snapshots
-  across a trust boundary. *Medium.*
-- [ ] **Non-x86_64 verification.** No aarch64 or agnos measurements exist. The
-  NaN/Inf handling added in 1.0.3 is the part most likely to differ.
-  *Trigger*: an aarch64 or agnos consumer. *Medium.*
-- [ ] **Audit test *correctness*, not just coverage.** The P-1 sweep found one
-  test asserting a defect as intended behaviour, with the wrong rule restated in
-  its own comment; it had passed for four releases. Nothing establishes it was the
-  only one. *Trigger*: fold into the next audit pass rather than scheduling
-  separately. *Low.*
+*Together these make the number samay reports about missed work actually true,
+which is the point of the never-silently-skip principle — a wrong count is a
+quieter version of the same failure.*
 
-> **Trigger discipline.** Every item above names an event that actually occurs.
-> Self-referential triggers ("at the next rewrite") never arrive. When a trigger
-> fires, check first whether the item has already shipped — that check is what
-> catches a completed item sitting on a deferred list for releases.
+### 1.1.1 — arithmetic hygiene on the stats path
+
+- [ ] **Saturate the duration subtractions in `task_scheduler_stats`**
+  (audit Rec 6, unimplemented). `(completed - started)` and
+  `(started - created_at)` are unguarded, and v1.0.3's restore validation clamps
+  scalars but never cross-validates timestamps — so a restored task with
+  `completed < started` contributes a **negative** millisecond figure that drags
+  the reported average below zero. Saturate to 0 and the average stays meaningful.
+- [ ] **Pin `task_status_name` with a test, and keep it.** Zero callers in `src/`,
+  `tests/`, the bench, `main.cyr`, or either consumer — but it is exported public
+  API and mirrors `samay_training_method_name`, which *is* used in three places.
+  Deleting a public symbol is a major-version action; the right response to dead
+  public API is a test, not a removal.
+
+### 1.1.2 — checked `alloc()` across `src/`
+
+- [ ] **Check the 16 `alloc()` results in `src/`.** `alloc` returns 0 on OOM, and
+  none of the sites test it, so OOM becomes a wild write at a small address
+  rather than a recoverable failure. The P-1 sweep **refuted** the specific crash
+  scenario originally filed — under real memory pressure the process dies inside
+  `lib/chrono.cyr`'s allocation first, never reaching samay's sites — so this is
+  defensive coding, not a demonstrated defect, and it is pinned last in the arc
+  for that reason. Add the rule to CLAUDE.md's Key Principles beside the
+  `var buf[N]` note so new code inherits it.
+
+### Not version-pinned — do it independently of any release
+
+- [ ] **File the F4 hash-seeding issue upstream.** Audit Rec 5 said to file it;
+  the roadmap has said "upstream, not ours" ever since; **nobody filed it.**
+  Verified 2026-08-30: nothing matching in `cyrius/docs/development/issues/` or
+  `proposals/`. `lib/hashmap.cyr`'s unseeded FNV-1a means the collision set is
+  precomputable once against every consumer. samay cannot fix a vendored module,
+  but it can stop being the reason nobody knows.
+
+---
+
+## 1.2.x – 1.5.x — existing backlog, re-sequenced
+
+Ordering is by dependency and blast radius, not by appetite. F5 (1.3.0) is the
+one with real risk, and it sits behind a mechanical refactor that must land first.
+
+### 1.2.0 — split `node_preference` into request and assignment
+
+- [ ] `schedule_pending` overwrites the caller's requested node with the chosen
+  one (`src/scheduler.cyr`), which destroys the accurate "preferred node"
+  decision reason. ADR-0007 balanced the *accounting* with a separate
+  `reserved_on` and deliberately left the field semantics alone, because changing
+  the meaning of a shipped field is not a patch-release action. **Needs its own
+  ADR-0009.** Achievable without a wire break if the new field is nullable and
+  defaulted on restore — the same shape `reserved_on` used in 1.0.3, which is the
+  proof that it works. *Entry gate*: a back-compat restore test over a 1.0.x
+  snapshot corpus, both directions.
+
+### 1.3.0 — F5: stable sort + terminal-task pruning
+
+- [ ] **Consolidate the four insertion sorts first, then swap the algorithm
+  once.** `src/scheduler.cyr` ×2, `src/cron.cyr`, `src/json.cyr`; two are already
+  exact `_sort_by_key` specialisations, so the consolidation is mechanical and
+  removes ~40 lines. Only then replace the algorithm — measured ~85× slower than
+  a merge sort at n=8000.
+- [ ] **Prune terminal tasks.** They accumulate in `TaskScheduler.tasks` forever;
+  there is no removal API at all. Adds `task_scheduler_remove_task` (additive) and
+  an optional `task_scheduler_prune_terminal`, both caller-driven and off by
+  default. Depends on `reserved_on` (shipped 1.0.3) so a removal releases any held
+  reservation. Also cap the **write** side of `task_scheduler_to_jsonv` at
+  `SAMAY_JSON_MAX_ITEMS` — today the read side rejects >100k while the write side
+  has no cap, so samay can emit a snapshot it will then refuse to restore.
+- **Why this is the risky one**: ADR-0004's determinism guarantee rides on those
+  comparators. *Entry gate*: sort 2,000 randomised inputs and assert the merge
+  result is element-for-element identical to the insertion result, plus the
+  existing determinism group green.
+
+### 1.4.0 — F8/F9: cron aggregate work budget
+
+- [ ] Per-entry catch-up is bounded (`CRON_SCAN_WINDOW_SECS`, `CRON_MAX_COUNT`,
+  `CRON_CATCHUP_CAP`); the aggregate across many entries in one `check_due_at` is
+  not. v1.0.3's alloc-free prefilter cut the cost ~12× and removed the heap growth
+  entirely, so this is now a **policy** question rather than an availability one.
+  Lands in `_cron_check_entry`, which v1.0.3 extracted for exactly this.
+  *Entry gate*: an ADR settling the exhaustion rule — every candidate (stop early,
+  skip remaining entries, degrade to SKIP) collides with "missed schedules are
+  never silently skipped", and that conflict is the actual work.
+
+### 1.5.0 — write-side JSON codec
+
+- [ ] `_rr_node` / `_ce_node` still serialize-then-reparse through the `#derive`
+  codec — measured 3.14 µs → 695 ns for a direct builder, ~68% of
+  `scheduled_task_to_jsonv`. The read side moved to hand-written codecs in 1.0.3;
+  the write side was held back so that release's emitted bytes were provably
+  unchanged. *Entry gate*: a byte-equality corpus over ≥500 `ResourceReq` values
+  including `1/3`, `0.1`, `7/9` — this is the one change that can silently alter
+  the wire, so it ships alone or not at all.
+
+---
+
+## Trigger-gated — no pin, by design
+
+Pinning these would be theatre: none can start until an external event occurs,
+and a version number would just rot. Each names the event.
+
+- [ ] **Opt-in concurrent-entry detector** — a debug mode that notices two threads
+  inside one scheduler and aborts. Considered during the 1.0.4 audit and
+  deliberately not built ([ADR-0008](../adr/0008-threading-contract.md)).
+  *Trigger*: any consumer adopting a threaded shape.
+- [ ] **Benchmark the accelerator placement path** — every `can_fit` /
+  `_best_fit_node` figure on record used `REQ_NONE`, which short-circuits before
+  touching profiles, so the numbers understate exactly the workload samay's domain
+  principles are about. *Trigger*: before any placement perf claim.
+- [ ] **Structure-aware fuzzing over `task_scheduler_from_json_str`** — all restore
+  probing to date is hand-crafted against specific hypotheses. *Trigger*: a new
+  restore-path finding, or a consumer accepting snapshots across a trust boundary.
+- [ ] **Non-x86_64 verification** — no aarch64 or agnos measurements exist; the
+  NaN/Inf handling added in 1.0.3 is most likely to differ. *Trigger*: an aarch64
+  or agnos consumer.
+- [ ] **Audit test *correctness*, not just coverage** — the P-1 sweep found a test
+  asserting a defect as intended behaviour, wrong rule restated in its own comment,
+  passing for four releases. Nothing establishes it was the only one. *Trigger*:
+  fold into the next audit pass.
+- [ ] **F4 — upstream hash seeding lands.** Once filed (above) and fixed upstream,
+  re-check whether samay's own guarantees change. v1.0.3 already removed the one
+  path by which bucket order reached a documented-deterministic decision.
+  *Trigger*: an upstream release.
+- [ ] **Drop `samay_init`'s chrono pre-warm.** Only once
+  `cyrius/docs/development/proposals/2026-08-30-lazy-init-publish-before-fill.md`
+  ships **and** the pin moves past it. *Trigger*: an upstream release.
+
+---
+
+## Considered and rejected
+
+Recorded so they are not re-proposed.
+
+- **SKIP-path early exit in `_cron_count_due`** (audit Rec 4, second half).
+  Exiting the count early once a match is found would make the SKIP branch cheap
+  — but that branch logs `due - 1`, the **exact** number of dropped occurrences.
+  An early exit turns that number into a fabrication, and "missed schedules are
+  never silently skipped" is not satisfied by reporting a wrong count instead of
+  none. 1.1.0 makes the count *more* accurate for the same reason. Revisit only
+  with a bounded form that reports "≥ N" honestly.
 
 ## Out of scope
 
@@ -117,6 +206,12 @@ See [ADR-0008](../adr/0008-threading-contract.md) for the measurements.
 - Timezone / DST support. Everything is UTC; adding a timezone changes the
   on-the-wire JSON and the whole cron model
   ([ADR-0006](../adr/0006-cron-expression-model.md)).
-- Making samay thread-safe. It is single-threaded **by contract**, and an
-  internal lock would be false safety while the query API returns interior
-  pointers ([ADR-0008](../adr/0008-threading-contract.md)).
+- Making samay thread-safe. Single-threaded **by contract**; an internal lock
+  would be false safety while the query API returns interior pointers
+  ([ADR-0008](../adr/0008-threading-contract.md)).
+
+> **Trigger discipline.** Every trigger above names an event that actually
+> occurs. Self-referential triggers ("at the next rewrite") never arrive. When
+> one fires, check first whether the item has already shipped — that check is
+> what this sweep ran, and it found three audit recommendations still open and
+> one never actioned.

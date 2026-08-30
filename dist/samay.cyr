@@ -1519,7 +1519,7 @@ fn _cron_log_clamp(name): i64 {
 # watermark. Extracted from cron_scheduler_check_due_at in v1.0.3 — the
 # policy decisions below were six levels deep in a single loop body, and this
 # is where the cross-entry aggregate work budget has to land — that is the
-# open F8/F9 follow-up tracked in docs/development/roadmap.md (Post-1.0).
+# open F8/F9 follow-up tracked in docs/development/roadmap.md, pinned to 1.4.0.
 fn _cron_check_entry(tasks, e, now_ns, now_secs): i64 {
     # A disabled entry TRACKS the clock rather than freezing. Freezing made
     # the whole disabled interval count as "missed", so re-enabling fired a
@@ -1801,8 +1801,8 @@ fn _jv_f64(obj, key, dflt): i64 {
 # scheduler; caps the anti-catastrophe bound (OOM / minutes-long work). Note
 # this bounds but does not fully eliminate the O(n^2)-sort (F5) and
 # hash-collision (F4) costs within the cap. Both are tracked in
-# docs/development/roadmap.md under "Post-1.0 tracked follow-ups"; origin is
-# docs/audit/2026-07-21-audit.md.
+# docs/development/roadmap.md — F5 is pinned to 1.3.0, F4 is trigger-gated on
+# an upstream fix; origin is docs/audit/2026-07-21-audit.md.
 var SAMAY_JSON_MAX_ITEMS = 100000;
 
 # Clamp an i64 into [lo, hi].

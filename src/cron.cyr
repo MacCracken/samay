@@ -254,7 +254,7 @@ fn _cron_log_clamp(name): i64 {
 # watermark. Extracted from cron_scheduler_check_due_at in v1.0.3 — the
 # policy decisions below were six levels deep in a single loop body, and this
 # is where the cross-entry aggregate work budget has to land — that is the
-# open F8/F9 follow-up tracked in docs/development/roadmap.md (Post-1.0).
+# open F8/F9 follow-up tracked in docs/development/roadmap.md, pinned to 1.4.0.
 fn _cron_check_entry(tasks, e, now_ns, now_secs): i64 {
     # A disabled entry TRACKS the clock rather than freezing. Freezing made
     # the whole disabled interval count as "missed", so re-enabling fired a
