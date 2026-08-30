@@ -235,6 +235,10 @@ fn cron_expr_parse(s): i64 {
     }
 
     var expr = alloc(56);
+    # Cannot be an Err: Ok/Err themselves heap-allocate 16 bytes, so under true
+    # OOM this function has no way to return at all -- not even to reject a
+    # malformed expression. Fail-fast is the only honest option here.
+    if (expr == 0) { panic("samay: out of memory in cron_expr_parse"); }
     CronExpr_set_minute_mask(expr, mmask);
     CronExpr_set_hour_mask(expr, hmask);
     CronExpr_set_dom_mask(expr, dommask);

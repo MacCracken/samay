@@ -178,6 +178,13 @@ struct ResourceReq {
 
 fn resource_req_new(cpu_cores, memory_mb, accel_req, accel_min_chips, network, disk_mb): i64 {
     var p = alloc(48);
+    # NOT `return 0`: _rr_from (src/json.cyr:200) forwards this result, and
+    # its callers read 0 as ADR-0005's "required field missing -- reject this
+    # record", then drop the record and continue (src/json.cyr:585, :635). An
+    # OOM-0 would silently delete a WELL-FORMED task from a VALID snapshot
+    # while the restore reported success -- contradicting the module's own rule
+    # that samay never silently drops (src/json.cyr:418). See ADR-0009.
+    if (p == 0) { panic("samay: out of memory in resource_req_new"); }
     ResourceReq_set_cpu_cores(p, cpu_cores);
     ResourceReq_set_memory_mb(p, memory_mb);
     ResourceReq_set_accel_req(p, accel_req);
@@ -236,6 +243,7 @@ struct ScheduledTask {
 # Create a new task in Queued status. Priority is clamped to 1-10.
 fn scheduled_task_new(name, description, agent_id, priority, req): i64 {
     var p = alloc(120);   # 15 fields * 8
+    if (p == 0) { panic("samay: out of memory in scheduled_task_new"); }
     var prio = priority;
     if (prio < 1) { prio = 1; }
     if (prio > 10) { prio = 10; }
@@ -294,6 +302,7 @@ struct NodeCapacity {
 
 fn node_capacity_new(node_id, total_cpu, total_memory_mb, total_disk_mb, gpu_available): i64 {
     var p = alloc(72);   # 9 fields * 8
+    if (p == 0) { panic("samay: out of memory in node_capacity_new"); }
     NodeCapacity_set_node_id(p, node_id);
     NodeCapacity_set_total_cpu(p, total_cpu);
     NodeCapacity_set_available_cpu(p, total_cpu);
@@ -301,7 +310,17 @@ fn node_capacity_new(node_id, total_cpu, total_memory_mb, total_disk_mb, gpu_ava
     NodeCapacity_set_available_memory_mb(p, total_memory_mb);
     NodeCapacity_set_total_disk_mb(p, total_disk_mb);
     NodeCapacity_set_available_disk_mb(p, total_disk_mb);
-    NodeCapacity_set_accel_profiles(p, vec_new());
+    # vec_new returns 0 on OOM (lib/vec.cyr:35) and this used to store it
+    # straight into the struct, which was then returned looking healthy. For a
+    # CPU node the gpu_available branch below is skipped, so nothing ever
+    # touched the null vec: node_capacity_can_fit returned 1 for a REQ_NONE
+    # requirement and schedule_pending PLACED A TASK ON THE CORRUPT NODE --
+    # a successful, wrong scheduling decision, dying much later in vec_len(0).
+    # That is the class this project's resource-awareness rule exists to
+    # forbid, so it aborts at the allocation instead (ADR-0009).
+    var profs = vec_new();
+    if (profs == 0) { panic("samay: out of memory in node_capacity_new (accel_profiles)"); }
+    NodeCapacity_set_accel_profiles(p, profs);
     NodeCapacity_set_running_tasks(p, 0);
     # Convenience: a `gpu_available` node registers one CUDA profile.
     if (gpu_available == 1) {
@@ -411,6 +430,7 @@ struct SchedulingDecision {
 
 fn scheduling_decision_new(task_id, assigned_node, reason, score): i64 {
     var p = alloc(32);
+    if (p == 0) { panic("samay: out of memory in scheduling_decision_new"); }
     SchedulingDecision_set_task_id(p, task_id);
     SchedulingDecision_set_assigned_node(p, assigned_node);
     SchedulingDecision_set_reason(p, reason);
@@ -428,6 +448,13 @@ struct PreemptionAction {
 
 fn preemption_action_new(preempted_task_id, preempting_task_id, reason): i64 {
     var p = alloc(24);
+    # NOT `return 0`: 0 is already a live value one frame up with an
+    # incompatible meaning -- task_scheduler_preempt_if_needed returns 0 for
+    # "no candidate needs preempting" (src/scheduler.cyr:358) and forwards this
+    # pointer as the affirmative answer. An OOM-0 would be indistinguishable
+    # from "nothing to preempt", and tests/samay.tcyr:319/:328 assert exactly
+    # that equality -- so they would PASS on an OOM. See ADR-0009.
+    if (p == 0) { panic("samay: out of memory in preemption_action_new"); }
     PreemptionAction_set_preempted_task_id(p, preempted_task_id);
     PreemptionAction_set_preempting_task_id(p, preempting_task_id);
     PreemptionAction_set_reason(p, reason);
@@ -448,6 +475,7 @@ struct SchedulerStats {
 
 fn scheduler_stats_new(): i64 {
     var p = alloc(56);
+    if (p == 0) { panic("samay: out of memory in scheduler_stats_new"); }
     SchedulerStats_set_total_tasks(p, 0);
     SchedulerStats_set_queued(p, 0);
     SchedulerStats_set_running(p, 0);

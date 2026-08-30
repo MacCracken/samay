@@ -29,6 +29,7 @@ struct CronTaskTemplate {
 
 fn cron_task_template_new(name, description, agent_id, priority, req): i64 {
     var p = alloc(40);
+    if (p == 0) { panic("samay: out of memory in cron_task_template_new"); }
     CronTaskTemplate_set_name(p, name);
     CronTaskTemplate_set_description(p, description);
     CronTaskTemplate_set_agent_id(p, agent_id);
@@ -51,6 +52,7 @@ struct CronEntry {
 
 fn cron_entry_new(name, expr, task_template, enabled, missed_policy): i64 {
     var p = alloc(48);
+    if (p == 0) { panic("samay: out of memory in cron_entry_new"); }
     CronEntry_set_name(p, name);
     CronEntry_set_expr(p, expr);
     CronEntry_set_task_template(p, task_template);
@@ -68,7 +70,12 @@ struct CronScheduler {
 fn cron_scheduler_new(): i64 {
     samay_init();   # close the chrono lazy-init window while single-threaded
     var c = alloc(8);
-    CronScheduler_set_entries(c, map_new_str());
+    if (c == 0) { panic("samay: out of memory in cron_scheduler_new"); }
+    # map_new_str returns 0 on OOM without aborting; a null entries map
+    # survives construction and dies later inside map_set.
+    var entries = map_new_str();
+    if (entries == 0) { panic("samay: out of memory in cron_scheduler_new (entries map)"); }
+    CronScheduler_set_entries(c, entries);
     return c;
 }
 
@@ -130,7 +137,12 @@ fn _cron_task_name(base): Str {
     var sb = str_builder_new();
     str_builder_add(sb, base);
     str_builder_add_cstr(sb, " (cron)");
-    return str_builder_build(sb);
+    # This becomes the task NAME handed to scheduled_task_new, and consumers
+    # read it back through str_cstr -- str_cstr(0) faults across the repo
+    # boundary, far from here.
+    var out = str_builder_build(sb);
+    if (out == 0) { panic("samay: out of memory in _cron_task_name"); }
+    return out;
 }
 
 # Build a fresh ScheduledTask from an entry's template.
@@ -316,7 +328,10 @@ fn _cron_check_entry(tasks, e, now_ns, now_secs): i64 {
 # of freshly-created ScheduledTask pointers.
 fn cron_scheduler_check_due_at(c, now_ns): i64 {
     var now_secs = now_ns / 1000000000;
+    # Returned to the caller, which does vec_len on it -- guard rather than
+    # hand back a 0 that faults a frame up (ADR-0009).
     var tasks = vec_new();
+    if (tasks == 0) { panic("samay: out of memory in cron_scheduler_check_due_at"); }
     var entries = map_values(CronScheduler_entries(c));
     _sort_entries_by_name(entries);
     var n = vec_len(entries);

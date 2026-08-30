@@ -223,6 +223,11 @@ fn _ce_from(obj, key): i64 {
     if (bayan_json_v_is_obj(el) == 0) { return 0; }
     if (bayan_json_v_obj_get(el, "minute_mask") == 0) { return 0; }
     var p = alloc(56);   # 7 fields * 8 — mirrors cron_expr_parse
+    # NOT `return 0`: this function already returns 0 for ADR-0005's "absent or
+    # wrong type -> reject this record", and the container readers act on that
+    # by dropping the record and continuing. An OOM-0 would delete a
+    # well-formed record from a valid snapshot while reporting success.
+    if (p == 0) { panic("samay: out of memory in _ce_from"); }
     CronExpr_set_minute_mask(p, _jv_int(el, "minute_mask", 0));
     CronExpr_set_hour_mask(p, _jv_int(el, "hour_mask", 0));
     CronExpr_set_dom_mask(p, _jv_int(el, "dom_mask", 0));
@@ -331,6 +336,7 @@ fn scheduled_task_from_jsonv(v): i64 {
     if (st < TASK_QUEUED) { st = TASK_QUEUED; }
     if (st > TASK_PREEMPTED) { st = TASK_QUEUED; }
     var p = alloc(120);   # 15 fields * 8 — MUST track scheduled_task_new
+    if (p == 0) { panic("samay: out of memory in scheduled_task_from_jsonv"); }
     ScheduledTask_set_task_id(p, tid);
     ScheduledTask_set_name(p, name);
     ScheduledTask_set_description(p, desc);
@@ -435,6 +441,7 @@ fn node_capacity_from_jsonv(v): i64 {
     if (nid == 0) { return 0; }
     if (str_len(nid) == 0) { return 0; }
     var p = alloc(72);
+    if (p == 0) { panic("samay: out of memory in node_capacity_from_jsonv"); }
     NodeCapacity_set_node_id(p, nid);
     # Enforce `0 <= available <= total` on all three axes. Without it a
     # snapshot carrying available_cpu=1e18 against total_cpu=1.0 gives a
@@ -456,7 +463,10 @@ fn node_capacity_from_jsonv(v): i64 {
     NodeCapacity_set_total_disk_mb(p, tdisk);
     NodeCapacity_set_available_disk_mb(p, adisk);
     NodeCapacity_set_running_tasks(p, _jv_uint(v, "running_tasks", 0));
+    # Same shape as node_capacity_new's accel_profiles bug, on the restore
+    # path: a null vec stored here returns a struct that looks healthy.
     var profs = vec_new();
+    if (profs == 0) { panic("samay: out of memory in node_capacity_from_jsonv (accel_profiles)"); }
     var arr = bayan_json_v_obj_get(v, "accel_profiles");
     if (arr != 0) {
         var n = bayan_json_v_arr_len(arr);

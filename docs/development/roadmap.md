@@ -1,6 +1,6 @@
 # samay — Roadmap
 
-> **Last refreshed**: 2026-08-30 (v1.1.0)
+> **Last refreshed**: 2026-08-30 (v1.1.1)
 >
 > **Forward-looking only.** Nothing shipped belongs here — per-release detail
 > lives in [`../../CHANGELOG.md`](../../CHANGELOG.md) (complete from 0.1.0), the
@@ -10,8 +10,8 @@
 > An item moves when its dependencies are met; a trigger-gated item has no pin at
 > all, deliberately — see [Trigger-gated](#trigger-gated--no-pin-by-design).
 
-> **Current**: **v1.1.0**, cyrius pin **6.5.36**, deps ai-hwaccel **2.3.19** +
-> bayan-json **1.5.2**. Gates green: **432 assertions**, **5/5 benchmarks**,
+> **Current**: **v1.1.1**, cyrius pin **6.5.36**, deps ai-hwaccel **2.3.19** +
+> bayan-json **1.5.2**. Gates green: **446 assertions**, **5/5 benchmarks**,
 > lint 0-warn / 0 untracked deferrals, fmt clean, `dist/` in sync (2,345 lines),
 > 0 symbol collisions against the vendored deps. `src/` is 9 modules against the
 > frozen 1,479-line Rust oracle.
@@ -21,7 +21,7 @@
 | Version | Theme | Risk | Gate to entry |
 |---|---|---|---|
 | ~~1.1.0~~ | ~~Cron catch-up counting tells the truth~~ | — | **shipped 2026-08-30** |
-| **1.1.1** | Checked `alloc()` across `src/` | low | none — ready |
+| ~~1.1.1~~ | ~~Checked `alloc()` across `src/`~~ | — | **shipped 2026-08-30** |
 | **1.2.0** | Split `node_preference` (ADR-0009) | medium | wire back-compat proof |
 | **1.3.0** | F5 — stable sort + terminal-task pruning | **high** | sort consolidation first |
 | **1.4.0** | F8/F9 — cron aggregate work budget | medium | an ADR on the exhaustion rule |
@@ -39,24 +39,26 @@ port. Both are under [Considered and rejected](#considered-and-rejected) with th
 evidence. That is the sweep working as intended — the check is the point, and it
 cost less than either implementation would have.
 
-### 1.1.1 — checked `alloc()` across `src/`
-
-- [ ] **Check the 16 `alloc()` results in `src/`.** `alloc` returns 0 on OOM, and
-  none of the sites test it, so OOM becomes a wild write at a small address
-  rather than a recoverable failure. The P-1 sweep **refuted** the specific crash
-  scenario originally filed — under real memory pressure the process dies inside
-  `lib/chrono.cyr`'s allocation first, never reaching samay's sites — so this is
-  defensive coding, not a demonstrated defect. Add the rule to CLAUDE.md's Key
-  Principles beside the `var buf[N]` note so new code inherits it.
+**1.1.1 shipped 2026-08-30.** Scope corrected on contact with evidence: the
+roadmap's premise — "OOM becomes a wild write at a small address" — was **false**
+(every field offset is ≤ 112 against `mmap_min_addr` 65536, so the store traps).
+The real exposure was **eleven allocation points that are not raw `alloc(`
+tokens**, where the null escapes as struct data; two were measured producing a
+*wrong scheduling decision* before any crash. 28 guards, a policy
+([ADR-0009](../adr/0009-oom-policy.md)), and a CI gate that fails on an unguarded
+allocation. See the CHANGELOG.
 
 ### Not version-pinned — do it independently of any release
 
-- [ ] **File the F4 hash-seeding issue upstream.** Audit Rec 5 said to file it;
-  the roadmap has said "upstream, not ours" ever since; **nobody filed it.**
-  Verified 2026-08-30: nothing matching in `cyrius/docs/development/issues/` or
-  `proposals/`. `lib/hashmap.cyr`'s unseeded FNV-1a means the collision set is
-  precomputable once against every consumer. samay cannot fix a vendored module,
-  but it can stop being the reason nobody knows.
+- [x] **File the F4 hash-seeding issue upstream.** ✅ **Filed 2026-08-30** at
+  `cyrius/docs/development/issues/2026-08-30-hashmap-unseeded-fnv1a-collision-dos.md`,
+  with the audit's measured PoC (raw `map_set` at N=8,000: **493 ms** colliding vs
+  **2.5 ms** distinct, ~197×; through `task_scheduler_from_json_str`, ~23–38×).
+  Audit Rec 5 asked for this on 2026-07-21 and it sat unfiled for six weeks while
+  the roadmap said "upstream, not ours" — which read as handled. The filing also
+  raises the compatibility question the fix actually turns on: seeding makes
+  `map_values` order differ between runs, which is a benefit (it surfaces latent
+  order dependencies) but needs a migration window.
 
 ## 1.2.x – 1.5.x — existing backlog, re-sequenced
 
@@ -140,8 +142,10 @@ and a version number would just rot. Each names the event.
   asserting a defect as intended behaviour, wrong rule restated in its own comment,
   passing for four releases. Nothing establishes it was the only one. *Trigger*:
   fold into the next audit pass.
-- [ ] **F4 — upstream hash seeding lands.** Once filed (above) and fixed upstream,
-  re-check whether samay's own guarantees change. v1.0.3 already removed the one
+- [ ] **F4 — upstream hash seeding lands.** Filed 2026-08-30; once **fixed**
+  upstream, re-check whether samay's own guarantees change (they should not —
+  ADR-0004 sorts explicitly and never trusts `map_values` order, which is exactly
+  why samay is unaffected by the seeding change). v1.0.3 already removed the one
   path by which bucket order reached a documented-deterministic decision.
   *Trigger*: an upstream release.
 - [ ] **Drop `samay_init`'s chrono pre-warm.** Only once

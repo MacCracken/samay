@@ -48,6 +48,7 @@ cyrius test                              # run tests/*.tcyr
 - Build with `cyrius build`, not raw `cat file | cc5` — the manifest auto-resolves deps
 - Source files only need project includes — stdlib auto-resolves from `cyrius.cyml`
 - `var buf[N]` = N **bytes**, not N entries
+- **`alloc()` returns 0 on OOM — check it, then `panic`.** Guard every allocation samay makes whose result it *returns* or *stores into one of its own structs* (raw `alloc`, plus `str_new`/`str_from*`/`str_builder_build`/`vec_new`/`map_new_str`), and abort: `panic("samay: out of memory in <fn>")`. Never propagate an OOM as a `0` return or an `Err` — `0` is already spent (ADR-0005 "rejected", "no preemption candidate") and `Ok`/`Err` allocate the 16 bytes that just failed. Results consumed by the very next statement, and values handed to a dep's constructor, are left to trap. A null must never leave the function that created it. See [ADR-0009](docs/adr/0009-oom-policy.md); CI gates it.
 
 ## Domain Principles (samay-specific)
 

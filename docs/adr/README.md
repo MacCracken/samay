@@ -29,3 +29,4 @@ Decisions about samay — what we chose, the context, and the consequences we ac
 | [0006](0006-cron-expression-model.md) | Cron expression model and missed-schedule semantics | Accepted (v1.0.3) — records the v0.3.0 divergence from the oracle's interval model; Vixie DOM/DOW correction |
 | [0007](0007-reservation-lifecycle.md) | Node capacity returned on every exit from the running set | Accepted (v1.0.3) — intentional divergence from Rust (the oracle leaks capacity too) |
 | [0008](0008-threading-contract.md) | samay is single-threaded by contract | Accepted (v1.0.4) — measured; no internal lock, deliberately |
+| [0009](0009-oom-policy.md) | Check every allocation, abort on failure | Accepted (v1.1.1) — never propagate an OOM as `0` or `Err`; CI-gated |

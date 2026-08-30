@@ -4,6 +4,86 @@ All notable changes to Samay are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.1.1] — 2026-08-30
+
+**Two measured wrong-answer paths closed, and a named abort everywhere else an
+allocation can fail.** 446 assertions (was 432). No public signature changed, no
+wire-format change — all 28 guards are pure insertions, so zero test churn and
+zero change for kavach, daimon or stiva.
+
+### The scope this release was planned with was wrong
+
+The roadmap said an unchecked `alloc()` "becomes a wild write at a small
+address." **It does not.** Every one of the 16 raw sites stores to the fresh
+pointer at a field offset ≤ 112, against `vm.mmap_min_addr = 65536` — so the
+store traps in the guard page. Measured across six modules: exit 139 at the first
+store, deterministically, inside the named constructor. Fifteen of sixteen store
+at offset 0 on the very next line. Guarding those buys a **message**, not a fix.
+
+The real defect was in eleven allocation points that are **not raw `alloc(`
+tokens** — `vec_new`, `map_new_str`, `str_new`, `str_builder_build` — which a
+mechanical `grep alloc(` never saw. Those are where a null **escapes as struct
+data** and the constructor returns an object that looks healthy.
+
+### Fixed — a task was placed on a corrupt node, with no fault
+
+`node_capacity_new` stored `vec_new()`'s result into `accel_profiles` unchecked.
+On OOM that is 0; for a CPU node the `gpu_available` branch is skipped, so nothing
+touches the null vec and **the struct is returned intact**. Measured:
+`node_capacity_can_fit` answered **1** for a `REQ_NONE` requirement, and a full
+`task_scheduler_schedule_pending` pass **placed a task on the corrupt node** — one
+decision, no error. It died much later in `vec_len(0)` on the JSON path.
+
+A successful but wrong placement is the class this project's resource-awareness
+and determinism rules exist to forbid. `node_capacity_from_jsonv` had the
+identical bug on the restore path.
+
+### Fixed — a null task_id that crashes on someone else's request
+
+`samay_uuid_v4` returned `str_new(out, 36)` unchecked. The null `Str` becomes
+`ScheduledTask.task_id` and then a hashmap key — and it does **not** fault there,
+because `hash_str_v` null-guards. The task inserts under bucket 0 and `map_size`
+becomes 1. The SIGSEGV lands on a **later, unrelated submit** that probes into
+slot 0 and reaches `str_eq(0, key)`: measured at the 8th, 10th and 10th subsequent
+submit across three runs. Nondeterministic, cross-frame, and unattributable to the
+allocation that actually failed.
+
+The *listed* site in that module (`alloc(37)`) fails immediately and harmlessly.
+The unlisted one was the bug.
+
+### Added — [ADR-0009](docs/adr/0009-oom-policy.md), 28 guards, and a CI gate
+
+The policy: **check every allocation samay performs whose result it returns or
+stores into one of its own structs, and `panic` on 0. Never propagate an OOM.**
+A null must never leave the function that created it.
+
+`return 0` was rejected on reproduced evidence, not taste — a propagated 0 travels
+*further*: a null `CronTaskTemplate` survived three API layers reporting a healthy
+`len=1` before faulting, and a two-task snapshot with one OOM-0 record restored as
+`tasks=1` with **exit 0** — the task silently lost, the restore reporting success,
+contradicting samay's own never-silently-drop rule. In the JSON readers 0 is
+already spent: ADR-0005 gives it the meaning "reject this record", so an OOM-0
+would drop a well-formed record from a valid snapshot *and* make the ADR-0005
+regression suite pass for the wrong reason. `preemption_action_new` has the same
+collision with "no candidate needs preempting".
+
+`Err` is unavailable structurally: `Ok`/`Err` each heap-allocate 16 bytes, so
+building the error needs the allocation that just failed. In `cron_expr_parse`
+that is total — under true OOM it cannot return at all.
+
+Because the OOM branch is not unit-testable (`fail_after_n_allocs` intercepts
+`alloc_via`, not bare `alloc()`), two things pin this instead:
+- `test_no_null_fields_from_constructors` — asserts no constructor returns a
+  struct with a null field. This is what would have caught the `accel_profiles`
+  bug.
+- **A CI gate** asserting every raw `alloc(` in `src/` has a `panic` within a few
+  lines, verified to fail when a guard is removed. Prose does not keep a rule.
+
+### Not claimed
+This is **not** a crash fix for the 16 listed sites — they already trapped, and
+now do so with a name instead of an anonymous `signal 11`. Nothing here changes
+the benchmarks, so no performance claim is made.
+
 ## [1.1.0] — 2026-08-30
 
 **Cron catch-up counts stop overstating their own precision.** 432 assertions

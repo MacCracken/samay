@@ -71,6 +71,22 @@ jobs:
           done
           exit $fail
 
+      - name: Every allocation in src/ is guarded (ADR-0009)
+        # The OOM branch is not unit-testable, so this is what actually pins
+        # the policy: every raw alloc() in src/ must have a `panic` within the
+        # next few lines. Fails the moment an unguarded allocation lands.
+        run: |
+          fail=0
+          for f in src/*.cyr; do
+            awk -v F="$f" '
+              /= *alloc\(/ { site=NR; buf=""; for (i=1;i<=7;i++) { if ((getline nxt) > 0) buf = buf nxt "\n"; else break }
+                              if (buf !~ /panic\(/) { print "  unguarded alloc: " F ":" site; bad=1 } }
+              END { exit bad }
+            ' "$f" || fail=1
+          done
+          [ $fail -eq 0 ] || { echo "ADR-0009: guard it with panic(\"samay: out of memory in <fn>\")"; exit 1; }
+          echo "alloc guard: all src/ allocations checked"
+
       - name: dist bundle in sync
         # dist/samay.cyr is the ONLY artifact consumers compile, and until
         # v1.0.3 nothing in CI ever looked at it: a source change that forgot

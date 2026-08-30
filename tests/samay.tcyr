@@ -535,6 +535,48 @@ fn test_reserved_on_roundtrip() {
 
 # --- v1.0.4: concurrency contract (ADR-0008) ---
 
+# --- v1.1.1: no constructor returns a struct with a null field (ADR-0009) ---
+
+fn test_no_null_fields_from_constructors() {
+    test_group("constructor_null_fields");
+    # The OOM *branch* of the 28 guards is not unit-testable -- lib/assert.cyr's
+    # fail_after_n_allocs intercepts alloc_via only, not bare alloc(), and
+    # threading an allocator through the constructors would be a signature
+    # change. What IS testable is the invariant those guards protect: a
+    # constructor never hands back a struct with a null field.
+    #
+    # This would have caught the real v1.1.1 bug. node_capacity_new stored
+    # vec_new()'s result unchecked; on OOM that is 0, the gpu_available branch
+    # is skipped for a CPU node, and the struct is returned looking healthy --
+    # can_fit then answered 1 and schedule_pending PLACED A TASK on it.
+    var n = node_capacity_new(str_from("t"), f64_from(1), 1, 1, 0);
+    assert_eq(NodeCapacity_accel_profiles(n) != 0, 1, "accel_profiles non-null");
+    assert_eq(vec_len(NodeCapacity_accel_profiles(n)), 0, "accel_profiles empty, not null");
+    assert_eq(NodeCapacity_node_id(n) != 0, 1, "node_id non-null");
+
+    var t = scheduled_task_new(str_from("n"), str_from("d"), str_from("a"), 5, resource_req_default());
+    assert_eq(ScheduledTask_task_id(t) != 0, 1, "task_id non-null");
+    assert_eq(str_len(ScheduledTask_task_id(t)), 36, "task_id fully rendered");
+    assert_eq(ScheduledTask_resource_requirements(t) != 0, 1, "req non-null");
+
+    var s = task_scheduler_new();
+    assert_eq(TaskScheduler_tasks(s) != 0, 1, "tasks map non-null");
+    assert_eq(TaskScheduler_nodes(s) != 0, 1, "nodes map non-null");
+
+    var c = cron_scheduler_new();
+    assert_eq(CronScheduler_entries(c) != 0, 1, "entries map non-null");
+    assert_eq(cron_scheduler_check_due_at(c, at_ns(2026, 8, 30, 12, 0)) != 0, 1, "check_due_at returns a vec, not 0");
+
+    var e = result_unwrap(cron_expr_parse(str_from("0 3 * * *")));
+    assert_eq(e != 0, 1, "parsed CronExpr non-null");
+    var tj = training_job_template_new(str_from("m"), TM_LORA, str_from("d"), 0, 60, 0);
+    assert_eq(tj != 0, 1, "training template non-null");
+    var task = training_job_to_scheduled_task(tj, str_from("agent"));
+    assert_eq(ScheduledTask_name(task) != 0, 1, "generated task name non-null");
+    assert_eq(ScheduledTask_description(task) != 0, 1, "generated description non-null");
+    return 0;
+}
+
 fn test_samay_init_prewarms_chrono() {
     test_group("samay_init_prewarm");
     # lib/chrono.cyr publishes _chrono_mdays BEFORE filling it, so a thread
@@ -1862,6 +1904,7 @@ fn main() {
     test_schedule_prefers_preference();
     test_schedule_fallback_when_full();
     test_schedule_transitions();
+    test_no_null_fields_from_constructors();
     test_samay_init_prewarms_chrono();
     test_constructors_prewarm();
     test_complete_releases();

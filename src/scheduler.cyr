@@ -24,8 +24,17 @@ struct TaskScheduler {
 fn task_scheduler_new(): i64 {
     samay_init();   # close the chrono lazy-init window while single-threaded
     var s = alloc(16);
-    TaskScheduler_set_tasks(s, map_new_str());
-    TaskScheduler_set_nodes(s, map_new_str());
+    if (s == 0) { panic("samay: out of memory in task_scheduler_new"); }
+    # map_new_str returns 0 on OOM (lib/hashmap.cyr:164) WITHOUT aborting --
+    # unlike map_set/_map_grow, which abort via _hm_die. The stdlib is
+    # inconsistent here and samay inherits the quiet half: a scheduler with
+    # both fields null survives construction and dies later inside map_set.
+    var tasks = map_new_str();
+    if (tasks == 0) { panic("samay: out of memory in task_scheduler_new (tasks map)"); }
+    var nodes = map_new_str();
+    if (nodes == 0) { panic("samay: out of memory in task_scheduler_new (nodes map)"); }
+    TaskScheduler_set_tasks(s, tasks);
+    TaskScheduler_set_nodes(s, nodes);
     return s;
 }
 
@@ -302,6 +311,7 @@ fn task_scheduler_schedule_pending(s): i64 {
             ScheduledTask_set_scheduled_at(task, dt_now());
             var reason = str_from("best-fit selection");
             if (pref != 0) { if (str_eq(pref, chosen) == 1) { reason = str_from("preferred node"); } }
+            if (reason == 0) { panic("samay: out of memory in task_scheduler_schedule_pending (reason)"); }
             ScheduledTask_set_node_preference(task, chosen);
             ScheduledTask_set_reserved_on(task, chosen);
             vec_push(decisions, scheduling_decision_new(ScheduledTask_task_id(task), chosen, reason, score));
@@ -325,7 +335,9 @@ fn _preempt_reason(hi, lo): Str {
     str_builder_add_cstr(sb, " preempts priority ");
     str_builder_add_int(sb, lo);
     str_builder_add_cstr(sb, " task");
-    return str_builder_build(sb);
+    var out = str_builder_build(sb);
+    if (out == 0) { panic("samay: out of memory in _preempt_reason"); }
+    return out;
 }
 
 # If `task` should preempt a running task, return a PreemptionAction; else 0.

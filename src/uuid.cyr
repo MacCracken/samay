@@ -24,6 +24,7 @@ fn samay_uuid_v4(): Str {
     store8(&b + 8, (load8(&b + 8) & 0x3F) | 0x80);
 
     var out = alloc(37);
+    if (out == 0) { panic("samay: out of memory in samay_uuid_v4 (buffer)"); }
     var op = 0;
     var i = 0;
     while (i < 16) {
@@ -38,5 +39,14 @@ fn samay_uuid_v4(): Str {
         i = i + 1;
     }
     store8(out + op, 0);
-    return str_new(out, 36);
+    # str_new returns 0 on OOM (lib/str.cyr:44). A null Str here becomes
+    # ScheduledTask.task_id and then a hashmap key -- and it does NOT fault
+    # there, because hash_str_v null-guards at lib/hashmap.cyr:85. The task
+    # inserts under bucket 0 and the SIGSEGV lands on some LATER, unrelated
+    # submit that probes into slot 0 and reaches str_eq(0, key). Measured at
+    # the 8th/10th/10th subsequent submit across three runs: nondeterministic,
+    # cross-frame, unattributable. Abort here instead (ADR-0009).
+    var s = str_new(out, 36);
+    if (s == 0) { panic("samay: out of memory in samay_uuid_v4 (Str header)"); }
+    return s;
 }
