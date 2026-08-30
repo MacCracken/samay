@@ -10,7 +10,7 @@ Single-scheduler, in-memory task scheduler. Pure decision engine: it decides
 | `uuid.cyr`      | RFC-4122 v4 task ids (getrandom → hex).                              |
 | `types.cyr`     | `ResourceReq`, `TaskStatus`, `TaskPriority`, `ScheduledTask`, `NodeCapacity`, `SchedulingDecision`, `PreemptionAction`, `SchedulerStats` + their logic (transitions, can-fit, utilization, reserve/release). |
 | `scheduler.cyr` | `TaskScheduler` — submit/get/cancel, pending ordering, best-fit placement, `schedule_pending`, preemption, stats. |
-| `cronexpr.cyr`  | `CronExpr` — standard 5-field cron parse (parse-time validated) + `cron_expr_matches` / `cron_expr_next_after` (Vixie DOM/DOW rule, names, `@shortcuts`). |
+| `cronexpr.cyr`  | `CronExpr` — standard 5-field cron parse (parse-time validated) + `cron_expr_matches` / `cron_expr_next_after` (Vixie DOM/DOW rule — either field starred => AND both masks, else OR, [ADR-0006](../adr/0006-cron-expression-model.md); names, `@shortcuts`). |
 | `cron.cyr`      | `CronScheduler`, `CronEntry`, `CronTaskTemplate` — recurring triggers via `CronExpr` + missed-schedule catch-up/skip policy, `check_due_at`. |
 | `training.cyr`  | `SamayTrainMethod`, `TrainingJobTemplate` — training jobs → High-priority GPU tasks. |
 | `lib.cyr`       | include-only aggregation header (whole-library entry).              |

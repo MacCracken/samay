@@ -14,6 +14,17 @@
 fn _f64_max(a, b): i64 { if (f64_gt(a, b) == 1) { return a; } return b; }
 fn _f64_min(a, b): i64 { if (f64_lt(a, b) == 1) { return a; } return b; }
 
+# Finite-f64 gate. NaN fails the self-equality test; +/-Inf exceeds any
+# finite bound. 1e18 is many orders above any real CPU-core count, so a value
+# beyond it is a corrupt snapshot either way.
+fn _f64_is_finite(x): i64 {
+    if (f64_eq(x, x) == 0) { return 0; }
+    var huge = f64_from(1000000000000000000);
+    if (f64_gt(x, huge) == 1) { return 0; }
+    if (f64_lt(x, f64_sub(f64_from(0), huge)) == 1) { return 0; }
+    return 1;
+}
+
 # Lexicographic (unsigned byte-wise) less-than for two `Str`s. Returns 1 if
 # `a` sorts strictly before `b`, else 0. The determinism tie-breaker used
 # across the scheduler/cron/json layers: task_id / node_id / entry-name are
@@ -170,6 +181,11 @@ fn resource_req_clone(req): i64 {
 # scheduled_at/started_at/completed_at/deadline (epoch-ns, 0=None),
 # node_preference (Str, 0=None).
 #derive(accessors)
+# `node_preference` is the caller's requested node AND, after placement, the
+# node actually chosen (schedule_pending overwrites it). `reserved_on` is
+# distinct: it names the node whose capacity this task is CURRENTLY holding,
+# and is 0 when it holds none. That distinction is what makes releasing
+# idempotent — see _release_task_node / _reconcile_reservations (ADR-0007).
 struct ScheduledTask {
     task_id: Str;
     name: Str;
@@ -185,11 +201,12 @@ struct ScheduledTask {
     completed_at: i64;
     deadline: i64;
     node_preference: Str;
+    reserved_on: Str;
 }
 
 # Create a new task in Queued status. Priority is clamped to 1-10.
 fn scheduled_task_new(name, description, agent_id, priority, req): i64 {
-    var p = alloc(112);   # 14 fields * 8
+    var p = alloc(120);   # 15 fields * 8
     var prio = priority;
     if (prio < 1) { prio = 1; }
     if (prio > 10) { prio = 10; }
@@ -207,6 +224,7 @@ fn scheduled_task_new(name, description, agent_id, priority, req): i64 {
     ScheduledTask_set_completed_at(p, 0);
     ScheduledTask_set_deadline(p, 0);
     ScheduledTask_set_node_preference(p, 0);
+    ScheduledTask_set_reserved_on(p, 0);
     return p;
 }
 

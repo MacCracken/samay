@@ -69,8 +69,35 @@ Bit-exact f64 depends on toolchain ≥6.4.69 (Grisu2 JSON codec).
 - [x] Consumer integration — **kavach 3.8.0** green against `dist/samay.cyr` (sandbox
   sizing from `ResourceReq`). daimon deferred to a dedicated major migration (samay is
   its scheduler; symbol collisions).
-- [ ] Follow-ups from the audit (Rec 3–5): stable O(n log n) sort + terminal-task pruning;
-  cron aggregate-work budget; upstream stdlib hash seeding.
+- [x] Consumer integration — **daimon 2.0.0** followed in its own major migration,
+  consuming samay as the single scheduler source of truth.
+
+## Post-1.0 tracked follow-ups
+
+Carried from [`docs/audit/2026-07-21-audit.md`](../audit/2026-07-21-audit.md) and the
+2026-08-29 P-1 sweep. Referenced by ID from the source comments that defer to them, so
+`cyrius lint` can see the deferral is tracked.
+
+- [ ] **F4 — upstream stdlib hash seeding.** `lib/hashmap.cyr` uses an unseeded FNV-1a;
+  samay cannot fix a vendored module. v1.0.3 removed the one path by which bucket order
+  could still leak into a documented-deterministic decision (the NaN-utilization
+  fall-through in `_best_fit_node`), so this is no longer reachable from samay's own
+  guarantees.
+- [ ] **F5 — stable O(n log n) sort + terminal-task pruning.** Four insertion sorts remain
+  (`src/scheduler.cyr`, `src/cron.cyr`, `src/json.cyr`); measured ~85× slower than a merge
+  sort at n=8000. Consolidate the four into one shared `samay_sort_by_key` first, then
+  replace the algorithm once. Deliberately held out of v1.0.3: ADR-0004's determinism
+  guarantee rides on those comparators, and that release was already cron- and JSON-heavy.
+  Terminal tasks also accumulate in `TaskScheduler.tasks` with no removal API.
+- [ ] **F8/F9 — cron aggregate-work budget.** Per-entry catch-up is bounded
+  (`CRON_SCAN_WINDOW_SECS`, `CRON_MAX_COUNT`, `CRON_CATCHUP_CAP`) but the aggregate across
+  many entries in one `check_due_at` is not. v1.0.3's alloc-free matcher prefilter cut the
+  cost ~12× and removed the heap growth entirely, so this is a policy question now rather
+  than an availability one: any budget needs an exhaustion rule, and every candidate
+  collides with "missed schedules are never silently skipped". Lands in `_cron_check_entry`.
+- [ ] **Wire-side write optimisation.** `_rr_node`/`_ce_node` still serialize-then-reparse
+  through the `#derive` codec (~68% of `scheduled_task_to_jsonv`). Held back so v1.0.3's
+  emitted bytes are provably unchanged; needs a byte-equality corpus before landing.
 
 ## Out of scope (for v1.0)
 

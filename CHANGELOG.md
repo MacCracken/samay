@@ -4,6 +4,117 @@ All notable changes to Samay are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.0.3] — 2026-08-29
+
+**P-1 audit sweep: two correctness defects fixed, ADR-0005's contract completed, and the
+first CI gate on the artifact consumers actually compile.** 406 assertions (was 296).
+No public signature removed or changed; one additive function and one additive nullable
+JSON key. kavach 3.8.0 and daimon 2.0.0 need no migration.
+
+Findings came from a multi-agent sweep across eight dimensions (security, memory safety,
+arithmetic, Rust parity, cron, determinism/JSON, performance, refactor/test-gaps): 45 raw
+findings, 43 surviving adversarial refutation. The two most severe were both found *off*
+the finder axis — one by a completeness critic asking what nobody had run.
+
+### Fixed — correctness
+
+- **A node was permanently retired after two successful task completions.**
+  `node_capacity_release` had exactly one caller, reachable only from `cancel_task`, and
+  there was no completion API at all. An 8-core node went to 0.000 available CPU after two
+  ordinary completions while `stats` reported 0 running — availability decayed
+  monotonically with throughput, making resource-aware placement structurally
+  unimplementable. Capacity is now returned on **every** exit from the running set, via
+  reconciliation at the head of `schedule_pending` plus a new
+  `task_scheduler_complete_task`. The same defect leaked on `SCHEDULED → QUEUED` and
+  double-reserved on re-placement. **This is inherited from the Rust oracle, which has the
+  identical shape** — diverging deliberately, per [ADR-0007](docs/adr/0007-reservation-lifecycle.md).
+- **`*/N` in day-of-month or day-of-week was silently ignored.** `_cron_parse_field`
+  correctly sets Vixie's star flag for any field beginning with `*`, but the matcher then
+  *discarded that field's mask* instead of AND-ing it. Equivalent to Vixie only for a bare
+  `*` (an all-ones mask, so AND is the identity) — but `*/2` over DOM is the odd days. So
+  `0 0 */2 * *` fired 365 days a year instead of 183, and `0 0 * * */2` fired 7 days a week
+  instead of 4. Both masks are now always applied ([ADR-0006](docs/adr/0006-cron-expression-model.md)).
+  Blast radius is provably confined to that one shape, verified by a 1,610,253-pair
+  differential sweep. **An existing test asserted the defect and stated the wrong rule in
+  its comment; it was rewritten from the Vixie source.**
+- **A backward clock step re-fired already-fired occurrences.** `last_fired` was stored
+  unconditionally, so an NTP correction or VM restore rewound the watermark — 9 tasks for
+  6 distinct minutes, with `task_id`s a consumer cannot deduplicate. The watermark now
+  only moves forward; a regression is logged instead.
+- **Re-enabling a disabled cron entry fired a silent burst.** The watermark froze while
+  disabled, so the whole disabled interval counted as missed: 720 tasks after a 30-day
+  disable of `0 * * * *`, logging nothing (only the *capped* path logged). Disabled
+  entries now track the clock, and every catch-up burst is logged.
+- **A profile containing a quote or backslash destroyed itself on serialization.**
+  ai-hwaccel writes string values unescaped, so `_parse` returned 0 and bayan rendered the
+  child as literal `null` — restore then dropped the accelerator, turning a node that
+  could fit a GPU task into one that could not, purely by round-tripping. Now skipped with
+  a warning rather than emitted as data-losing output.
+- **Training deadlines could wrap into the past.** `dur_seconds` multiplies by 1e9;
+  above ~9.2e9 seconds the product overflowed i64 while still passing the `max > 0` guard.
+  Now clamped to the available headroom and logged.
+
+### Fixed — hardening (completes [ADR-0005](docs/adr/0005-restore-input-validation.md))
+
+ADR-0005 promised rejection when a required field is *"missing **or the wrong type**"*.
+The wrong-type half was unimplemented for the two nested leaves, which bridged through
+their `#derive` codec — and that codec cannot fail: it allocs and returns a pointer
+whatever it is handed, over kernel-zeroed pages. So a string, int, array, `null` or `{}`
+in `resource_requirements` all produced a **non-zero, all-zero** `ResourceReq` (which fits
+any node), and every `req == 0` guard downstream was dead code.
+
+- Nested `resource_requirements` / `expr` are now read explicitly and type-checked.
+- `ResourceReq` numerics are clamped. Negative values previously ran *backwards* through
+  `node_capacity_reserve` — which computes `available - required` and so **added**
+  capacity, driving `available` above `total` and utilization to −61.
+- `NodeCapacity` enforces `0 ≤ available ≤ total` on all three axes and rejects
+  non-finite f64. A snapshot with `available_cpu: 1e18` against `total_cpu: 1.0` made that
+  node win every placement forever; `1e400` became `+Inf`, making utilization NaN.
+- `_best_fit_node` guards NaN utilization. Every IEEE comparison against NaN is false, so
+  both `f64_lt` and `f64_eq` failed and the ADR-0004 tie-break was skipped entirely —
+  letting hashmap bucket order pick the winner, the one thing ADR-0004 exists to prevent.
+- Empty `task_id` / `node_id` / cron entry `name` are rejected (all are map keys); flag
+  fields compared with `== 1` are normalised to 0/1; out-of-domain enums fall back to
+  their default rather than being clamped to a nearest bound that invents a meaning.
+
+### Added
+
+- `task_scheduler_complete_task(s, id, final_status)` — additive.
+- `ScheduledTask.reserved_on` — additive nullable JSON key. v1.0.2 readers ignore it;
+  v1.0.3 readers reconstruct it from a pre-1.0.3 snapshot. Tested both directions.
+- **CI now gates on `cyrius fmt`, `cyrius lint`, `cyrius distlib --check` and `cyrius bench`.**
+  `dist/samay.cyr` is the only artifact consumers compile and nothing had ever checked it
+  was in sync. Note `fmt`/`lint` take a *file* argument — a bare `cyrius fmt --check`
+  prints usage and exits 0, so a gate written that way checks nothing.
+- [ADR-0006](docs/adr/0006-cron-expression-model.md) also records, retroactively, the
+  v0.3.0 replacement of the oracle's interval model with cron expressions — a divergence
+  that shipped without one.
+
+### Performance
+
+- **`cron_expr_matches` 282 ns → 22 ns (12×), miss path now alloc-free** — 4,800,000 →
+  3,312 bytes per 100k missing calls. `epoch_to_date` allocates 48 bytes with no free and
+  walks years from 1970; the matcher called it before testing any bitmask. Closes the
+  alloc-free-matching roadmap item carried since M2.
+- **Placement scan 1,996,000 → 3,992 bytes** at 200 nodes × 500 pending (500×):
+  `_best_fit_node` rebuilt the whole node vector once per pending task.
+
+### Tests
+
+296 → 406 assertions. New: the capacity-conservation invariant (the assertion whose
+absence let the headline defect ship), the cron differential guard, back-compat snapshot
+restore, and the parser features that had **zero** coverage — every `@shortcut`
+expansion, month/day names, DOW `7`→Sunday folding. Swapping the `@monthly` and `@weekly`
+literals previously left all 296 assertions green.
+
+### Known / deferred
+
+Stable O(n log n) sorts + terminal-task pruning (F5), the cron cross-entry work budget
+(F8/F9), upstream hash seeding (F4), and the write-side codec optimisation are tracked in
+[`docs/development/roadmap.md`](docs/development/roadmap.md). Concurrency was **not**
+audited: whether `TaskScheduler`/`CronScheduler` are safe under concurrent access is
+unknown, and every figure here is single-threaded.
+
 ## [1.0.2] — 2026-08-29
 
 **Maintenance: toolchain 6.5.36, ai-hwaccel 2.3.19, bayan on the focused JSON sublib.**

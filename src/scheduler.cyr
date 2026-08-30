@@ -97,14 +97,45 @@ fn task_scheduler_get_task(s, id): i64 {
     return map_get(TaskScheduler_tasks(s), id);
 }
 
-# Release the node resources a task was holding, if any.
+# Return the node capacity a task is currently holding, if any. Keyed on
+# `reserved_on` (not `node_preference`, which schedule_pending overwrites with
+# the chosen node and never clears), and clears it afterwards — so calling
+# this twice is a no-op rather than a double release.
 fn _release_task_node(s, task): i64 {
-    var np = ScheduledTask_node_preference(task);
-    if (np != 0) {
-        var node = map_get(TaskScheduler_nodes(s), np);
+    var ron = ScheduledTask_reserved_on(task);
+    if (ron != 0) {
+        var node = map_get(TaskScheduler_nodes(s), ron);
         if (node != 0) {
             node_capacity_release(node, ScheduledTask_resource_requirements(task));
         }
+        ScheduledTask_set_reserved_on(task, 0);
+    }
+    return 0;
+}
+
+# A reservation is held only while a task is SCHEDULED or RUNNING. Return the
+# capacity of every task that has left that set without releasing.
+#
+# Before v1.0.3 the only release was in cancel_task, so an ordinary COMPLETED
+# task held its node's capacity forever: two successful completions retired an
+# 8-core node permanently, while stats reported 0 running (ADR-0007).
+#
+# This reconciles rather than hooking the transition because
+# scheduled_task_transition is public — a consumer can drive a task terminal
+# without calling any scheduler API, so a hook would leave the hole open.
+fn _reconcile_reservations(s): i64 {
+    var all = map_values(TaskScheduler_tasks(s));
+    var n = vec_len(all);
+    var i = 0;
+    while (i < n) {
+        var t = vec_get(all, i);
+        if (ScheduledTask_reserved_on(t) != 0) {
+            var st = ScheduledTask_status(t);
+            if (st != TASK_SCHEDULED) {
+                if (st != TASK_RUNNING) { _release_task_node(s, t); }
+            }
+        }
+        i = i + 1;
     }
     return 0;
 }
@@ -113,11 +144,33 @@ fn _release_task_node(s, task): i64 {
 fn task_scheduler_cancel_task(s, id): i64 {
     var task = map_get(TaskScheduler_tasks(s), id);
     if (task == 0) { return Err(1); }
-    var st = ScheduledTask_status(task);
-    if (st == TASK_RUNNING) { _release_task_node(s, task); }
-    elif (st == TASK_SCHEDULED) { _release_task_node(s, task); }
     var r = scheduled_task_transition(task, TASK_CANCELLED);
     if (is_err_result(r) == 1) { return r; }
+    # Release only once the transition is accepted, so a rejected cancel
+    # cannot hand back capacity the task is still using.
+    _release_task_node(s, task);
+    ScheduledTask_set_completed_at(task, dt_now());
+    return Ok(0);
+}
+
+# Finish a task and return its node reservation immediately. `final_status`
+# must be TASK_COMPLETED or TASK_FAILED. Ok(0) on success; Err(1) unknown id;
+# Err(2) non-terminal final_status; otherwise the transition's own Err.
+#
+# Added in v1.0.3 — there was previously no scheduler-level completion path at
+# all, so consumers called scheduled_task_transition directly and the capacity
+# was never returned. _reconcile_reservations still covers that route; this
+# releases at the moment of completion instead of at the next
+# schedule_pending, and makes the intended path the obvious one.
+fn task_scheduler_complete_task(s, id, final_status): i64 {
+    var task = map_get(TaskScheduler_tasks(s), id);
+    if (task == 0) { return Err(1); }
+    if (final_status != TASK_COMPLETED) {
+        if (final_status != TASK_FAILED) { return Err(2); }
+    }
+    var r = scheduled_task_transition(task, final_status);
+    if (is_err_result(r) == 1) { return r; }
+    _release_task_node(s, task);
     ScheduledTask_set_completed_at(task, dt_now());
     return Ok(0);
 }
@@ -163,8 +216,13 @@ fn task_scheduler_tasks_for_node(s, node_id): i64 {
 
 # Node with the most available capacity (lowest utilization) that fits req;
 # returns its node_id Str, or 0 if none fits.
-fn _best_fit_node(s, req): i64 {
-    var nodes = map_values(TaskScheduler_nodes(s));
+# Takes the node vec rather than the scheduler: map_values() rebuilds the
+# whole vec on every call, and this runs once per pending task. Hoisting it
+# to the caller turned 500 nodes x 2000 pending tasks from 16.4 MB of
+# unreclaimable bump-allocator traffic per schedule_pending into one vec.
+# The vec holds pointers to the same NodeCapacity structs, so the in-place
+# reserve below stays visible to later iterations.
+fn _best_fit_node(nodes, req): i64 {
     var n = vec_len(nodes);
     var best = 0;
     var best_util = f64_from(0);
@@ -173,6 +231,11 @@ fn _best_fit_node(s, req): i64 {
         var node = vec_get(nodes, i);
         if (node_capacity_can_fit(node, req) == 1) {
             var u = node_capacity_utilization(node);
+            # Every IEEE comparison against NaN is false, so a NaN utilization
+            # would fail both f64_lt and f64_eq and skip the ADR-0004
+            # tie-break entirely, letting map_values bucket order pick the
+            # winner. Treat NaN as fully-utilised (worst) so it never wins.
+            if (_f64_is_finite(u) == 0) { u = f64_from(1); }
             if (best == 0) { best = node; best_util = u; }
             elif (f64_lt(u, best_util) == 1) { best = node; best_util = u; }
             elif (f64_eq(u, best_util) == 1) {
@@ -189,8 +252,22 @@ fn _best_fit_node(s, req): i64 {
 
 # Schedule all pending tasks onto available nodes; returns a vec of
 # SchedulingDecision pointers.
+# No node could satisfy a pending task's requirements. Mirrors the oracle's
+# warn!("no node with sufficient capacity").
+fn _log_no_capacity(task_id): i64 {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "task '");
+    str_builder_add(sb, task_id);
+    str_builder_add_cstr(sb, "': no node with sufficient capacity");
+    var msg = str_builder_build(sb);
+    sakshi_warn(str_data(msg), str_len(msg));
+    return 0;
+}
+
 fn task_scheduler_schedule_pending(s): i64 {
     var decisions = vec_new();
+    _reconcile_reservations(s);
+    var nodes = map_values(TaskScheduler_nodes(s));
     var pending = task_scheduler_pending_tasks(s);
     var n = vec_len(pending);
     var i = 0;
@@ -206,7 +283,7 @@ fn task_scheduler_schedule_pending(s): i64 {
                 if (node_capacity_can_fit(pnode, req) == 1) { chosen = pref; }
             }
         }
-        if (chosen == 0) { chosen = _best_fit_node(s, req); }
+        if (chosen == 0) { chosen = _best_fit_node(nodes, req); }
 
         if (chosen != 0) {
             var node = map_get(TaskScheduler_nodes(s), chosen);
@@ -217,7 +294,13 @@ fn task_scheduler_schedule_pending(s): i64 {
             var reason = str_from("best-fit selection");
             if (pref != 0) { if (str_eq(pref, chosen) == 1) { reason = str_from("preferred node"); } }
             ScheduledTask_set_node_preference(task, chosen);
+            ScheduledTask_set_reserved_on(task, chosen);
             vec_push(decisions, scheduling_decision_new(ScheduledTask_task_id(task), chosen, reason, score));
+        } else {
+            # The Rust oracle warned here (rust-old/src/lib.rs:483) and the
+            # port dropped it. An unplaceable task is the single most
+            # operationally interesting event this loop produces.
+            _log_no_capacity(ScheduledTask_task_id(task));
         }
         i = i + 1;
     }

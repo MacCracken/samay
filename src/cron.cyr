@@ -192,6 +192,48 @@ fn _cron_log_catchup_cap(name, due): i64 {
     return 0;
 }
 
+# Every catch-up burst is logged, not only the capped ones. The domain
+# principle is that the missed-schedule policy is ALWAYS visible; before
+# v1.0.3 a sub-cap burst (e.g. 720 tasks after a 30-day gap) fired silently
+# because only the CRON_CATCHUP_CAP path logged.
+fn _cron_log_catchup(name, fired): i64 {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "cron '");
+    str_builder_add(sb, name);
+    str_builder_add_cstr(sb, "': catch-up policy fired ");
+    str_builder_add_int(sb, fired);
+    str_builder_add_cstr(sb, " missed occurrence(s)");
+    var msg = str_builder_build(sb);
+    sakshi_warn(str_data(msg), str_len(msg));
+    return 0;
+}
+
+# The clock moved backwards (NTP correction, VM restore, or a caller of the
+# injected-clock API passing a stale instant). Logged, never silent.
+fn _cron_log_clock_regression(name): i64 {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "cron '");
+    str_builder_add(sb, name);
+    str_builder_add_cstr(sb, "': clock moved backwards; watermark held, no re-fire");
+    var msg = str_builder_build(sb);
+    sakshi_warn(str_data(msg), str_len(msg));
+    return 0;
+}
+
+# Advance the watermark monotonically. Never rewind: before v1.0.3 this was an
+# unconditional store, so a backward clock step moved last_fired into the past
+# and the next forward call re-fired the whole intervening interval.
+fn _cron_advance(e, now_ns): i64 {
+    if (now_ns > CronEntry_last_fired(e)) { CronEntry_set_last_fired(e, now_ns); }
+    return 0;
+}
+
+fn _cron_fire_n(tasks, e, n): i64 {
+    var k = 0;
+    while (k < n) { vec_push(tasks, _cron_fire(e)); k = k + 1; }
+    return 0;
+}
+
 # Occurrences older than the catch-up window were dropped — logged, not silent.
 fn _cron_log_clamp(name): i64 {
     var sb = str_builder_new();
@@ -200,6 +242,53 @@ fn _cron_log_clamp(name): i64 {
     str_builder_add_cstr(sb, "': last_fired predates the ~366-day catch-up window; older missed occurrences dropped");
     var msg = str_builder_build(sb);
     sakshi_warn(str_data(msg), str_len(msg));
+    return 0;
+}
+
+# Evaluate one entry: fire per the missed-schedule policy and advance the
+# watermark. Extracted from cron_scheduler_check_due_at in v1.0.3 — the
+# policy decisions below were six levels deep in a single loop body, and this
+# is where the cross-entry aggregate work budget has to land — that is the
+# open F8/F9 follow-up tracked in docs/development/roadmap.md (Post-1.0).
+fn _cron_check_entry(tasks, e, now_ns, now_secs): i64 {
+    # A disabled entry TRACKS the clock rather than freezing. Freezing made
+    # the whole disabled interval count as "missed", so re-enabling fired a
+    # burst for time the operator had deliberately turned the schedule off
+    # (720 tasks for a 30-day disable of `0 * * * *`). See ADR-0007.
+    if (CronEntry_enabled(e) != 1) {
+        _cron_advance(e, now_ns);
+        return 0;
+    }
+    var lf = CronEntry_last_fired(e);
+    if (now_ns < lf) {
+        _cron_log_clock_regression(CronEntry_name(e));
+        return 0;
+    }
+    var expr = CronEntry_expr(e);
+    if (lf == 0) {
+        # First evaluation: fire only if the current minute matches;
+        # anchor last_fired at now (no retroactive firing).
+        if (cron_expr_matches(expr, now_secs) == 1) { vec_push(tasks, _cron_fire(e)); }
+        _cron_advance(e, now_ns);
+        return 0;
+    }
+    var clamped = 0;
+    var due = _cron_count_due(expr, lf / 1000000000, now_secs, &clamped);
+    if (clamped == 1) { _cron_log_clamp(CronEntry_name(e)); }
+    if (due > 0) {
+        if (CronEntry_missed_policy(e) == CRON_SKIP) {
+            vec_push(tasks, _cron_fire(e));
+            if (due > 1) { _cron_log_skip(CronEntry_name(e), due - 1); }
+        } else {
+            var fire_n = due;
+            var capped = 0;
+            if (fire_n > CRON_CATCHUP_CAP) { fire_n = CRON_CATCHUP_CAP; capped = 1; }
+            _cron_fire_n(tasks, e, fire_n);
+            if (capped == 1) { _cron_log_catchup_cap(CronEntry_name(e), due); }
+            elif (fire_n > 1) { _cron_log_catchup(CronEntry_name(e), fire_n); }
+        }
+    }
+    _cron_advance(e, now_ns);
     return 0;
 }
 
@@ -214,35 +303,7 @@ fn cron_scheduler_check_due_at(c, now_ns): i64 {
     var n = vec_len(entries);
     var i = 0;
     while (i < n) {
-        var e = vec_get(entries, i);
-        if (CronEntry_enabled(e) == 1) {
-            var expr = CronEntry_expr(e);
-            var lf = CronEntry_last_fired(e);
-            if (lf == 0) {
-                # First evaluation: fire only if the current minute matches;
-                # anchor last_fired at now (no retroactive firing).
-                if (cron_expr_matches(expr, now_secs) == 1) { vec_push(tasks, _cron_fire(e)); }
-                CronEntry_set_last_fired(e, now_ns);
-            } else {
-                var clamped = 0;
-                var due = _cron_count_due(expr, lf / 1000000000, now_secs, &clamped);
-                if (clamped == 1) { _cron_log_clamp(CronEntry_name(e)); }
-                if (due > 0) {
-                    if (CronEntry_missed_policy(e) == CRON_SKIP) {
-                        vec_push(tasks, _cron_fire(e));
-                        if (due > 1) { _cron_log_skip(CronEntry_name(e), due - 1); }
-                    } else {
-                        var fire_n = due;
-                        var capped = 0;
-                        if (fire_n > CRON_CATCHUP_CAP) { fire_n = CRON_CATCHUP_CAP; capped = 1; }
-                        var k = 0;
-                        while (k < fire_n) { vec_push(tasks, _cron_fire(e)); k = k + 1; }
-                        if (capped == 1) { _cron_log_catchup_cap(CronEntry_name(e), due); }
-                    }
-                }
-                CronEntry_set_last_fired(e, now_ns);
-            }
-        }
+        _cron_check_entry(tasks, vec_get(entries, i), now_ns, now_secs);
         i = i + 1;
     }
     return tasks;

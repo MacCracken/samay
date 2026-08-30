@@ -77,19 +77,30 @@ fn _jv_f64(obj, key, dflt): i64 {
 # --- restore-side input validation (security hardening, ADR-0005) ---
 #
 # Snapshots may be untrusted (read from disk/network). The from_jsonv
-# deserializers below REJECT a record (return 0) when a required field is
-# missing or the wrong type — matching Rust serde's required-field semantics
-# — so a malformed snapshot fails closed instead of producing a poisoned
-# struct that SIGSEGVs later (a null Str deref) or corrupts a map (null key).
-# Container loops already skip null records, so a bad record is dropped, not
-# fatal. Numeric-domain fields are clamped to their valid range on restore.
+# deserializers below REJECT a record (return 0) when a required Str field,
+# or a required nested struct, is missing OR THE WRONG TYPE — matching Rust
+# serde's required-field semantics — so a malformed snapshot fails closed
+# instead of producing a poisoned struct that SIGSEGVs later (a null Str
+# deref) or corrupts a map (null key). Container loops already skip null
+# records, so a bad record is dropped, not fatal.
+#
+# Numeric fields are CLAMPED to their valid domain rather than rejected, and
+# f64 fields additionally reject non-finite values (bayan maps an overflowing
+# exponent such as 1e400 to +Inf, and a NaN utilization would silently defeat
+# the ADR-0004 tie-break in _best_fit_node).
+#
+# v1.0.3 closed the "or the wrong type" half for the two nested leaves: they
+# used to bridge through their #derive codec, which cannot fail, so every
+# wrong-typed value produced a non-zero all-zero struct and the guards here
+# were dead code. See _rr_from / _ce_from.
 
 # Ceiling on how many items a restored collection may hold, so a hostile
 # snapshot cannot force unbounded allocation. Far above any realistic
 # scheduler; caps the anti-catastrophe bound (OOM / minutes-long work). Note
 # this bounds but does not fully eliminate the O(n^2)-sort (F5) and
-# hash-collision (F4) costs within the cap — those have tracked follow-ups
-# (stable O(n log n) sort; upstream hash seeding). See docs/audit/.
+# hash-collision (F4) costs within the cap. Both are tracked in
+# docs/development/roadmap.md under "Post-1.0 tracked follow-ups"; origin is
+# docs/audit/2026-07-21-audit.md.
 var SAMAY_JSON_MAX_ITEMS = 100000;
 
 # Clamp an i64 into [lo, hi].
@@ -97,6 +108,45 @@ fn _clamp_i64(x, lo, hi): i64 {
     if (x < lo) { return lo; }
     if (x > hi) { return hi; }
     return x;
+}
+
+# Read an f64 field, falling back to the default when absent or non-finite.
+fn _jv_f64_checked(obj, key, dflt): i64 {
+    var el = bayan_json_v_obj_get(obj, key);
+    if (el == 0) { return dflt; }
+    var x = bayan_json_v_float(el);
+    if (_f64_is_finite(x) == 0) { return dflt; }
+    return x;
+}
+
+# Read an f64 field clamped to the non-negative finite domain.
+fn _jv_f64_nonneg(obj, key, dflt): i64 {
+    var x = _jv_f64_checked(obj, key, dflt);
+    if (f64_lt(x, f64_from(0)) == 1) { return f64_from(0); }
+    return x;
+}
+
+# Read an enum-domain field: anything outside [lo, hi] falls back to `dflt`.
+# Deliberately NOT _clamp_i64 — clamping a continuous quantity preserves its
+# meaning, but clamping an enum invents one (accel_req 99 would become
+# REQ_ANY_ACCELERATOR, a requirement nobody asked for). Matches how
+# `status` and `missed_policy` already handle an out-of-domain value.
+fn _jv_enum(obj, key, lo, hi, dflt): i64 {
+    var el = bayan_json_v_obj_get(obj, key);
+    if (el == 0) { return dflt; }
+    var x = bayan_json_v_int(el);
+    if (x < lo) { return dflt; }
+    if (x > hi) { return dflt; }
+    return x;
+}
+
+# Read a flag field normalised to exactly 0 or 1. Anything non-zero is 1, so
+# a truthy-but-not-1 value cannot land in a field compared with `== 1`.
+fn _jv_bool01(obj, key, dflt): i64 {
+    var el = bayan_json_v_obj_get(obj, key);
+    if (el == 0) { return dflt; }
+    if (bayan_json_v_int(el) == 0) { return 0; }
+    return 1;
 }
 
 # Read an int field, coerced to its non-negative (u64-like) domain; a
@@ -109,6 +159,18 @@ fn _jv_uint(obj, key, dflt): i64 {
     return x;
 }
 
+# An accelerator profile could not be serialized into the snapshot. Logged,
+# never silent — see node_capacity_to_jsonv.
+fn _log_profile_skip(node_id): i64 {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "node '");
+    str_builder_add(sb, node_id);
+    str_builder_add_cstr(sb, "': accelerator profile omitted from snapshot (unserializable field)");
+    var msg = str_builder_build(sb);
+    sakshi_warn(str_data(msg), str_len(msg));
+    return 0;
+}
+
 # --- nested-leaf bridges (leaves have no Str fields -> exact round-trip) ---
 
 # ResourceReq -> json node, via its #derive codec.
@@ -118,11 +180,30 @@ fn _rr_node(req): i64 {
     return _parse(str_builder_build(sb));
 }
 
-# json node (at key) -> ResourceReq, or 0 if absent.
+# json node (at key) -> ResourceReq, or 0 if absent / not an object / not
+# shaped like a ResourceReq.
+#
+# Read explicitly rather than through the #derive codec. The derive cannot
+# fail: it allocs and returns a pointer whatever it is handed, and alloc is a
+# bump allocator over kernel-zeroed pages, so a string / int / array / null /
+# {} all yielded a NON-ZERO, all-zero ResourceReq. That made every `req == 0`
+# guard downstream dead code, and an all-zero requirement fits any node.
+# Reading the fields here also lets the numeric domain be clamped -- negative
+# requirements previously ran backwards through node_capacity_reserve, which
+# computes `available - required` and so ADDED capacity.
 fn _rr_from(obj, key): i64 {
     var el = bayan_json_v_obj_get(obj, key);
     if (el == 0) { return 0; }
-    return ResourceReq_from_json(bayan_json_parse(bayan_json_v_build(el)));
+    if (bayan_json_v_is_obj(el) == 0) { return 0; }
+    # Require a mandatory key, so a wrong-shaped object is rejected too.
+    if (bayan_json_v_obj_get(el, "cpu_cores") == 0) { return 0; }
+    return resource_req_new(
+      _jv_f64_nonneg(el, "cpu_cores", f64_from(0)),
+      _jv_uint(el, "memory_mb", 0),
+      _jv_enum(el, "accel_req", REQ_NONE, REQ_ANY_ACCELERATOR, REQ_NONE),
+      _jv_uint(el, "accel_min_chips", 0),
+      _jv_bool01(el, "network", 0),
+      _jv_uint(el, "disk_mb", 0));
 }
 
 # CronExpr -> json node.
@@ -132,11 +213,26 @@ fn _ce_node(expr): i64 {
     return _parse(str_builder_build(sb));
 }
 
-# json node (at key) -> CronExpr, or 0 if absent.
+# json node (at key) -> CronExpr, or 0 if absent / not an object / not
+# shaped like a CronExpr. Same reasoning as _rr_from: the derive bridge could
+# not fail, so a wrong-typed `expr` produced an all-zero CronExpr whose masks
+# match nothing -- an entry that silently never fires.
 fn _ce_from(obj, key): i64 {
     var el = bayan_json_v_obj_get(obj, key);
     if (el == 0) { return 0; }
-    return CronExpr_from_json(bayan_json_parse(bayan_json_v_build(el)));
+    if (bayan_json_v_is_obj(el) == 0) { return 0; }
+    if (bayan_json_v_obj_get(el, "minute_mask") == 0) { return 0; }
+    var p = alloc(56);   # 7 fields * 8 — mirrors cron_expr_parse
+    CronExpr_set_minute_mask(p, _jv_int(el, "minute_mask", 0));
+    CronExpr_set_hour_mask(p, _jv_int(el, "hour_mask", 0));
+    CronExpr_set_dom_mask(p, _jv_int(el, "dom_mask", 0));
+    CronExpr_set_month_mask(p, _jv_int(el, "month_mask", 0));
+    CronExpr_set_dow_mask(p, _jv_int(el, "dow_mask", 0));
+    # The star flags drive the Vixie AND/OR branch and are compared with
+    # `== 1`, so they must be exactly 0 or 1.
+    CronExpr_set_dom_star(p, _jv_bool01(el, "dom_star", 0));
+    CronExpr_set_dow_star(p, _jv_bool01(el, "dow_star", 0));
+    return p;
 }
 
 # ---------------------------------------------------------------------------
@@ -165,7 +261,7 @@ fn training_job_template_from_jsonv(v): i64 {
     if (dataset == 0) { return 0; }
     return training_job_template_new(
       model,
-      _jv_int(v, "method", TM_LORA),
+      _jv_enum(v, "method", TM_LORA, TM_DISTILL, TM_LORA),
       dataset,
       _jv_opt_str_get(v, "target_node"),
       _jv_uint(v, "max_duration_secs", 0),
@@ -229,10 +325,12 @@ fn scheduled_task_from_jsonv(v): i64 {
     if (desc == 0) { return 0; }
     if (agent == 0) { return 0; }
     if (req == 0) { return 0; }
+    # task_id is a map key; an empty one collides with any other empty one.
+    if (str_len(tid) == 0) { return 0; }
     var st = _jv_int(v, "status", TASK_QUEUED);
     if (st < TASK_QUEUED) { st = TASK_QUEUED; }
     if (st > TASK_PREEMPTED) { st = TASK_QUEUED; }
-    var p = alloc(112);
+    var p = alloc(120);   # 15 fields * 8 — MUST track scheduled_task_new
     ScheduledTask_set_task_id(p, tid);
     ScheduledTask_set_name(p, name);
     ScheduledTask_set_description(p, desc);
@@ -246,7 +344,21 @@ fn scheduled_task_from_jsonv(v): i64 {
     ScheduledTask_set_started_at(p, _jv_int(v, "started_at", 0));
     ScheduledTask_set_completed_at(p, _jv_int(v, "completed_at", 0));
     ScheduledTask_set_deadline(p, _jv_int(v, "deadline", 0));
-    ScheduledTask_set_node_preference(p, _jv_opt_str_get(v, "node_preference"));
+    var npref = _jv_opt_str_get(v, "node_preference");
+    ScheduledTask_set_node_preference(p, npref);
+    # Back-compat: snapshots written before v1.0.3 carry no `reserved_on`.
+    # A task that was SCHEDULED or RUNNING did hold a reservation, and
+    # schedule_pending had written the assigned node into node_preference, so
+    # the held-reservation state is reconstructable. Absent key vs explicit
+    # null matters here, so test the key rather than the decoded value.
+    if (bayan_json_v_obj_get(v, "reserved_on") == 0) {
+        var ron = 0;
+        if (st == TASK_SCHEDULED) { ron = npref; }
+        if (st == TASK_RUNNING) { ron = npref; }
+        ScheduledTask_set_reserved_on(p, ron);
+    } else {
+        ScheduledTask_set_reserved_on(p, _jv_opt_str_get(v, "reserved_on"));
+    }
     return p;
 }
 
@@ -266,6 +378,7 @@ fn scheduled_task_to_jsonv(t): i64 {
     bayan_json_v_obj_set(o, str_from("completed_at"), bayan_json_v_int_new(ScheduledTask_completed_at(t)));
     bayan_json_v_obj_set(o, str_from("deadline"), bayan_json_v_int_new(ScheduledTask_deadline(t)));
     bayan_json_v_obj_set(o, str_from("node_preference"), _jv_opt_str(ScheduledTask_node_preference(t)));
+    bayan_json_v_obj_set(o, str_from("reserved_on"), _jv_opt_str(ScheduledTask_reserved_on(t)));
     return o;
 }
 
@@ -295,7 +408,20 @@ fn node_capacity_to_jsonv(node): i64 {
     while (i < n) {
         var psb = str_builder_new();
         profile_to_json(psb, vec_get(profs, i));
-        bayan_json_v_arr_push(arr, _parse(str_builder_build(psb)));
+        # ai-hwaccel's serializer writes string values without JSON escaping,
+        # so a profile whose device_name/driver_version contains a quote or a
+        # backslash produces text _parse cannot read. Pushing the resulting 0
+        # made bayan render the child as the literal `null`, and restore then
+        # dropped the accelerator silently — a node that could fit a GPU task
+        # stopped being able to, purely by round-tripping. Skip and log
+        # instead: a logged omission beats data-losing output, and the rest
+        # of the snapshot stays intact (samay never silently drops).
+        var pv = _parse(str_builder_build(psb));
+        if (pv == 0) {
+            _log_profile_skip(NodeCapacity_node_id(node));
+        } else {
+            bayan_json_v_arr_push(arr, pv);
+        }
         i = i + 1;
     }
     bayan_json_v_obj_set(o, str_from("accel_profiles"), arr);
@@ -307,14 +433,28 @@ fn node_capacity_from_jsonv(v): i64 {
     if (bayan_json_v_is_obj(v) == 0) { return 0; }
     var nid = _jv_str(v, "node_id");
     if (nid == 0) { return 0; }
+    if (str_len(nid) == 0) { return 0; }
     var p = alloc(72);
     NodeCapacity_set_node_id(p, nid);
-    NodeCapacity_set_total_cpu(p, _jv_f64(v, "total_cpu", f64_from(0)));
-    NodeCapacity_set_available_cpu(p, _jv_f64(v, "available_cpu", f64_from(0)));
-    NodeCapacity_set_total_memory_mb(p, _jv_uint(v, "total_memory_mb", 0));
-    NodeCapacity_set_available_memory_mb(p, _jv_uint(v, "available_memory_mb", 0));
-    NodeCapacity_set_total_disk_mb(p, _jv_uint(v, "total_disk_mb", 0));
-    NodeCapacity_set_available_disk_mb(p, _jv_uint(v, "available_disk_mb", 0));
+    # Enforce `0 <= available <= total` on all three axes. Without it a
+    # snapshot carrying available_cpu=1e18 against total_cpu=1.0 gives a
+    # hugely negative utilization, and that node then wins every
+    # _best_fit_node argmin forever.
+    var tcpu = _jv_f64_nonneg(v, "total_cpu", f64_from(0));
+    var acpu = _jv_f64_nonneg(v, "available_cpu", f64_from(0));
+    if (f64_gt(acpu, tcpu) == 1) { acpu = tcpu; }
+    NodeCapacity_set_total_cpu(p, tcpu);
+    NodeCapacity_set_available_cpu(p, acpu);
+    var tmem = _jv_uint(v, "total_memory_mb", 0);
+    var amem = _jv_uint(v, "available_memory_mb", 0);
+    if (amem > tmem) { amem = tmem; }
+    NodeCapacity_set_total_memory_mb(p, tmem);
+    NodeCapacity_set_available_memory_mb(p, amem);
+    var tdisk = _jv_uint(v, "total_disk_mb", 0);
+    var adisk = _jv_uint(v, "available_disk_mb", 0);
+    if (adisk > tdisk) { adisk = tdisk; }
+    NodeCapacity_set_total_disk_mb(p, tdisk);
+    NodeCapacity_set_available_disk_mb(p, adisk);
     NodeCapacity_set_running_tasks(p, _jv_uint(v, "running_tasks", 0));
     var profs = vec_new();
     var arr = bayan_json_v_obj_get(v, "accel_profiles");
@@ -360,9 +500,14 @@ fn cron_entry_from_jsonv(v): i64 {
     if (name == 0) { return 0; }
     if (expr == 0) { return 0; }
     if (tmpl == 0) { return 0; }
+    # Both public add paths reject an empty name (src/cron.cyr); restore
+    # writes the map directly, so it has to enforce the same invariant.
+    if (str_len(name) == 0) { return 0; }
     var mp = _jv_int(v, "missed_policy", CRON_CATCHUP);
     if (mp != CRON_SKIP) { mp = CRON_CATCHUP; }
-    var e = cron_entry_new(name, expr, tmpl, _jv_int(v, "enabled", 1), mp);
+    # `enabled` is compared with `== 1`, so a truthy-but-not-1 value would
+    # leave the entry permanently dormant while reporting as enabled.
+    var e = cron_entry_new(name, expr, tmpl, _jv_bool01(v, "enabled", 1), mp);
     CronEntry_set_last_fired(e, _jv_uint(v, "last_fired", 0));
     return e;
 }

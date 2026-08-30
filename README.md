@@ -5,7 +5,7 @@ accelerator-conscious** task placement. Cyrius port of the original Rust library
 
 - **Language**: Cyrius (toolchain 6.5.36) · **License**: GPL-3.0-only
 - **Consumers**: daimon (task scheduling), kavach (sandboxed execution)
-- **Status**: **v1.0.2** — Rust→Cyrius port complete: real cron, ai-hwaccel placement, JSON snapshot/restore, deterministic scheduling, security-audited restore, both downstream consumers (kavach, daimon) integrated
+- **Status**: **v1.0.3** — Rust→Cyrius port complete and P-1 audited: real cron (Vixie DOM/DOW), ai-hwaccel placement, JSON snapshot/restore, deterministic scheduling, fail-closed restore, conserved node capacity, both downstream consumers (kavach, daimon) integrated
 
 ## What it does
 
@@ -28,7 +28,7 @@ accelerator-conscious** task placement. Cyrius port of the original Rust library
 cyrius deps                          # resolve stdlib + ai-hwaccel into lib/
 cyrius build src/main.cyr build/samay
 ./build/samay                        # runnable demo
-cyrius test  tests/samay.tcyr        # 296/296 assertions
+cyrius test  tests/samay.tcyr        # 406/406 assertions
 cyrius bench tests/samay.bcyr
 ```
 
@@ -39,7 +39,7 @@ Consumers declare the dep and include the committed bundle:
 ```toml
 [deps.samay]
 git = "https://github.com/MacCracken/samay.git"
-tag = "1.0.2"
+tag = "1.0.3"
 modules = ["dist/samay.cyr"]
 ```
 
@@ -56,6 +56,12 @@ task_scheduler_submit_task(s, scheduled_task_new("job", "desc", "agent", 7,
     resource_req_new(f64_from(2), 4096, REQ_GPU, 0, 0, 1024)));
 var decisions = task_scheduler_schedule_pending(s);
 
+# Finish a task and hand its capacity back to the node. Do NOT drive a task
+# terminal with scheduled_task_transition alone and expect the node to
+# recover immediately -- schedule_pending reconciles it, but this is the
+# intended path (ADR-0007).
+task_scheduler_complete_task(s, task_id, TASK_COMPLETED);
+
 # recurring: 03:30 on weekdays, catching up anything missed after downtime
 var cron = cron_scheduler_new();
 var tmpl = cron_task_template_new("backup", "nightly", "agent", 5, resource_req_default());
@@ -67,7 +73,7 @@ See `src/main.cyr` for a worked demo and `tests/samay.tcyr` for the full API in 
 
 ## Layout
 
-- `src/{uuid,types,scheduler,cronexpr,cron,training}.cyr` — domain modules
+- `src/{uuid,types,scheduler,cronexpr,cron,training,json}.cyr` — domain modules
 - `src/lib.cyr` — aggregation header · `dist/samay.cyr` — bundled distributable
 - `rust-old/` — the frozen Rust reference (parity oracle; do not edit)
 - `docs/` — architecture, ADRs, roadmap, benchmarks

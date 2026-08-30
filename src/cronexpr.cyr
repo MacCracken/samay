@@ -7,9 +7,12 @@
 # time (Err on any malformed field), never at execution time.
 #
 # Each field is stored as an i64 bitmask of allowed values. The DOM/DOW
-# "star" flags implement the Vixie/crontab(5) rule: when neither DOM nor DOW
-# is `*`, a day matches if EITHER field matches; otherwise the non-`*` field
-# governs.
+# "star" flags implement the Vixie/crontab(5) rule (cron.c): when NEITHER
+# field starts with `*`, a day matches if EITHER mask matches (OR); when
+# either field starts with `*`, BOTH masks must match (AND). A bare `*`
+# expands to an all-ones mask, so AND-ing it is the identity — which is why
+# the starred field's mask must still be applied, not discarded: `*/N` also
+# sets the star flag and its mask is NOT all-ones.
 #
 # Requires: str, string, alloc, chrono (epoch_to_date), result.
 
@@ -167,15 +170,31 @@ fn cron_expr_parse(s): i64 {
     # buffer to a 5-field literal (every expansion is exactly 9 bytes).
     var expr_str = str_data(s);
     var len = str_len(s);
+    # Trim surrounding space/tab up front. The 5-field path already tolerates
+    # it via _cron_skip_ws, but the @shortcut dispatch below compares the
+    # whole string, so "@daily " used to be an Err while "0 0 * * * " was Ok.
+    # Vixie accepts both.
+    while (len > 0) {
+        var c0 = load8(expr_str);
+        if (c0 != 32) { if (c0 != 9) { break; } }
+        expr_str = expr_str + 1;
+        len = len - 1;
+    }
+    while (len > 0) {
+        var cl = load8(expr_str + len - 1);
+        if (cl != 32) { if (cl != 9) { break; } }
+        len = len - 1;
+    }
     if (len > 0) {
         if (load8(expr_str) == 64) {
-            if (str_eq_cstr(s, "@yearly") == 1) { expr_str = "0 0 1 1 *"; len = 9; }
-            elif (str_eq_cstr(s, "@annually") == 1) { expr_str = "0 0 1 1 *"; len = 9; }
-            elif (str_eq_cstr(s, "@monthly") == 1) { expr_str = "0 0 1 * *"; len = 9; }
-            elif (str_eq_cstr(s, "@weekly") == 1) { expr_str = "0 0 * * 0"; len = 9; }
-            elif (str_eq_cstr(s, "@daily") == 1) { expr_str = "0 0 * * *"; len = 9; }
-            elif (str_eq_cstr(s, "@midnight") == 1) { expr_str = "0 0 * * *"; len = 9; }
-            elif (str_eq_cstr(s, "@hourly") == 1) { expr_str = "0 * * * *"; len = 9; }
+            var sh = str_from_buf(expr_str, len);
+            if (str_eq_cstr(sh, "@yearly") == 1) { expr_str = "0 0 1 1 *"; len = 9; }
+            elif (str_eq_cstr(sh, "@annually") == 1) { expr_str = "0 0 1 1 *"; len = 9; }
+            elif (str_eq_cstr(sh, "@monthly") == 1) { expr_str = "0 0 1 * *"; len = 9; }
+            elif (str_eq_cstr(sh, "@weekly") == 1) { expr_str = "0 0 * * 0"; len = 9; }
+            elif (str_eq_cstr(sh, "@daily") == 1) { expr_str = "0 0 * * *"; len = 9; }
+            elif (str_eq_cstr(sh, "@midnight") == 1) { expr_str = "0 0 * * *"; len = 9; }
+            elif (str_eq_cstr(sh, "@hourly") == 1) { expr_str = "0 * * * *"; len = 9; }
             else { return Err(1); }
         }
     }
@@ -257,29 +276,44 @@ fn _cron_dow(epoch_secs): i64 {
 # avoids a `1 << -1` on epoch_to_date's unguarded negative decomposition).
 fn cron_expr_matches(expr, epoch_secs): i64 {
     if (epoch_secs < 0) { return 0; }
+
+    # Alloc-free prefilter. epoch_to_date() allocates 48 bytes through a bump
+    # allocator that never frees, and walks year-by-year from 1970, so the
+    # common miss path must not reach it — a catch-up window scan calls this
+    # once per minute. These two identities are exact for epoch_secs >= 0
+    # (UTC, no leap seconds); see lib/chrono.cyr:216-221. Every test here is a
+    # side-effect-free conjunctive filter, so reordering them changes only
+    # which one short-circuits, never the result.
+    var minute = (epoch_secs / 60) % 60;
+    if ((CronExpr_minute_mask(expr) & (1 << minute)) == 0) { return 0; }
+    var hour = (epoch_secs / 3600) % 24;
+    if ((CronExpr_hour_mask(expr) & (1 << hour)) == 0) { return 0; }
+
+    # _cron_dow is alloc-free too, so day-of-week also stays ahead of the
+    # calendar decomposition. Under the Vixie AND branch a DOW miss settles
+    # the result; under the OR branch it does NOT (DOM may still match), so
+    # this early exit is guarded on either_star.
+    var dow = _cron_dow(epoch_secs);
+    var dow_ok = 0;
+    if ((CronExpr_dow_mask(expr) & (1 << dow)) != 0) { dow_ok = 1; }
+    var either_star = 0;
+    if (CronExpr_dom_star(expr) == 1) { either_star = 1; }
+    if (CronExpr_dow_star(expr) == 1) { either_star = 1; }
+    if (either_star == 1) { if (dow_ok == 0) { return 0; } }
+
+    # Only now is the calendar decomposition unavoidable (day + month).
     var dt = epoch_to_date(epoch_secs);
-    var minute = load64(dt + 32);
-    var hour = load64(dt + 24);
     var day = load64(dt + 16);
     var month = load64(dt + 8);
-    var dow = _cron_dow(epoch_secs);
-
-    if ((CronExpr_minute_mask(expr) & (1 << minute)) == 0) { return 0; }
-    if ((CronExpr_hour_mask(expr) & (1 << hour)) == 0) { return 0; }
     if ((CronExpr_month_mask(expr) & (1 << month)) == 0) { return 0; }
 
     var dom_ok = 0;
     if ((CronExpr_dom_mask(expr) & (1 << day)) != 0) { dom_ok = 1; }
-    var dow_ok = 0;
-    if ((CronExpr_dow_mask(expr) & (1 << dow)) != 0) { dow_ok = 1; }
 
-    var dom_star = CronExpr_dom_star(expr);
-    var dow_star = CronExpr_dow_star(expr);
-    if (dom_star == 1) {
-        if (dow_star == 1) { return 1; }
-        return dow_ok;
-    }
-    if (dow_star == 1) { return dom_ok; }
+    # Vixie combination rule — see the module header. Star => AND, else OR.
+    # Both masks are always applied; a starred field is never discarded. In
+    # the AND branch dow_ok is already known to be 1 (guarded above).
+    if (either_star == 1) { return dom_ok; }
     if (dom_ok == 1) { return 1; }
     return dow_ok;
 }

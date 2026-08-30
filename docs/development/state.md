@@ -5,16 +5,20 @@
 
 ## Version
 
-**1.0.2** — maintenance release: toolchain 6.4.69→6.5.36, ai-hwaccel 2.3.15→2.3.19,
-and bayan moved from the vendored stdlib monolith to the focused `bayan-json` sublib
-(1.5.2) to clear 27 last-def-wins symbol collisions. Also restores the benchmark
-suite, dead since the v0.5.0 `Str` migration. All v1.0 criteria remain met:
-security-audited restore (ADR-0005) + deterministic scheduling (ADR-0004) + full JSON
-snapshot/restore (v0.5.0) + ai-hwaccel placement + real cron. Both downstream consumers
-(kavach 3.8.0, daimon 2.0.0) integrated. `NodeCapacity` holds real ai-hwaccel
-accelerator profiles; `can_fit` delegates to `requirement_satisfied()` (ADR-0002).
-Built on M2 cron correctness (0.3.0) and the 0.2.0 Rust→Cyrius parity port (Rust
-reference frozen at `rust-old/`).
+**1.0.3** — P-1 audit/hardening sweep. Two correctness defects fixed that no test
+covered: node capacity was returned only on cancel, so an 8-core node was permanently
+retired after two ordinary completions ([ADR-0007](../adr/0007-reservation-lifecycle.md),
+a deliberate divergence — the Rust oracle has the same defect); and `*/N` in cron DOM/DOW
+was silently discarded, so `0 0 */2 * *` fired daily
+([ADR-0006](../adr/0006-cron-expression-model.md)). ADR-0005's "or the wrong type" half is
+now actually implemented — the nested-leaf `#derive` bridges could not fail, so every
+`req == 0` guard was dead code. `cron_expr_matches` is 12× faster and alloc-free on the
+miss path. 406 assertions (was 296); CI now gates fmt/lint/dist-sync/bench. Toolchain
+6.5.36, ai-hwaccel 2.3.19, bayan-json 1.5.2. Both downstream consumers (kavach 3.8.0,
+daimon 2.0.0) integrated; no migration needed for either. `NodeCapacity` holds real
+ai-hwaccel accelerator profiles; `can_fit` delegates to `requirement_satisfied()`
+([ADR-0002](../adr/0002-ai-hwaccel-profile-placement.md)). Built on M2 cron correctness
+(0.3.0) and the 0.2.0 Rust→Cyrius parity port (Rust reference frozen at `rust-old/`).
 
 ## Toolchain
 
@@ -22,8 +26,9 @@ reference frozen at `rust-old/`).
 
 ## Source
 
-- `src/{uuid,types,scheduler,cronexpr,cron,training}.cyr` + `src/lib.cyr`
-  aggregation header + `src/main.cyr` demo (~1000 lines Cyrius).
+- `src/{uuid,types,scheduler,cronexpr,cron,training,json}.cyr` + `src/lib.cyr`
+  aggregation header + `src/main.cyr` demo. The seven `[lib].modules` bundle to
+  2,288 lines in `dist/samay.cyr` (as `cyrius distlib` reports it); `json.cyr` is the largest module.
 - **Strings are `Str` (ptr+len), not cstr** as of the unreleased M4 groundwork
   ([ADR-0003](../adr/0003-str-string-representation.md)) — required because
   `#derive(Serialize)` core dumps on a cstr in a `Str`-typed field.
@@ -32,16 +37,18 @@ reference frozen at `rust-old/`).
 
 ## Tests
 
-- `tests/samay.tcyr` — **296/296 assertions passing** (`cyrius test`). Includes
-  cron regression (v0.3.0), accelerator-placement (v0.4.0), the M4 JSON roundtrip +
-  snapshot/restore suite (v0.5.0), 7 M5 determinism guards incl. a self-validating
-  hash-collision case (v0.6.0), and 13 security regression guards for fail-closed
-  restore validation (v0.7.0).
-- `tests/samay.bcyr` — benchmarks, all 5 green (see `docs/benchmarks.md`). Dead
-  from v0.5.0 to v1.0.1: the `Str` migration (ADR-0003) left it passing bare
-  cstring literals into `Str`-taking APIs, so it segfaulted in `cron_expr_parse`.
-- Gates: `cyrius fmt <file> --check` clean, `cyrius lint <file>` 0 warnings
-  (both take a file argument; `cyrius audit` runs the project-wide sweep).
+- `tests/samay.tcyr` — **406/406 assertions passing** (`cyrius test`), up from 296 in
+  v1.0.2. Includes the v1.0.3 additions: the capacity-conservation invariant (the
+  assertion whose absence let ADR-0007's defect ship), a cron differential guard pinning
+  the optimised matcher to an in-test reference implementation, back-compat snapshot
+  restore, wrong-typed nested-leaf rejection, and the parser features that previously had
+  **zero** coverage (every `@shortcut` expansion, month/day names, DOW `7`→Sunday).
+- `tests/samay.bcyr` — 5 benchmarks, all green (see `docs/benchmarks.md`). Was dead
+  (SIGSEGV) from v0.5.0 to v1.0.1: the `Str` migration left it passing bare cstring
+  literals into `Str`-taking APIs. Now run by CI so it cannot rot silently again.
+- Gates: `cyrius fmt <file> --check` clean, `cyrius lint <file>` 0 warnings and 0
+  untracked deferrals, `cyrius distlib --check` in sync. **All four now run in CI** —
+  note `fmt`/`lint` take a file argument, so a bare `cyrius fmt --check` gates nothing.
 
 ## Dependencies
 
@@ -67,30 +74,47 @@ reference frozen at `rust-old/`).
 - **daimon 2.0.0** — integrated: deleted its duplicated `scheduler.cyr`/`cron.cyr` and
   consumes samay as the single scheduler source of truth (api_sched rewired; 215 assertions).
   The migration surfaced + fixed the `uuid_v4`↔libro collision (samay 1.0.1).
-- zugot has a placeholder marketplace recipe expecting a GH release.
+- Neither consumer calls samay's cron or JSON API today, so v1.0.3's restore-validation
+  tightening and cron semantics changes have zero downstream blast radius. Both pin
+  `tag = "1.0.1"` and should move to `1.0.3`.
+- zugot's marketplace recipe is stale: it still describes samay as a Rust crate at v0.1.0
+  (cargo build, `Cargo.toml`, `runtime = "rust-crate"`). Needs a rewrite for Cyrius.
 
 ## Next
 
-See [`roadmap.md`](roadmap.md). M0–M4 done (M4 = full JSON Serialize/Deserialize, cut as
-**v0.5.0**). **M5 (v0.6.0 → v1.0)** in progress; deterministic scheduling shipped in
-**v0.6.0**:
+See [`roadmap.md`](roadmap.md). M0–M5 complete; v1.0 shipped, and v1.0.3 closes the P-1
+sweep. Open items are tracked under "Post-1.0 tracked follow-ups" in the roadmap:
 
-- ✅ **Deterministic scheduling** (v0.6.0) — every ordering-sensitive path breaks ties on a
-  unique key (`task_id`/`node_id`/entry `name`) via the shared `samay_str_lt`, instead of
-  hashmap iteration order ([ADR-0004](../adr/0004-deterministic-tie-breaks.md)). Intentional
-  divergence from Rust (which left ties to randomized `HashMap` order). Verified by a
-  6-probe insertion-order fuzz pass (0 residual gaps across all 10 `map_values` sites) plus
-  a self-validating hash-collision guard.
-- ✅ **Security audit** (v0.7.0) — [`docs/audit/2026-07-21-audit.md`](../audit/2026-07-21-audit.md):
-  multi-lens code review + adversarial PoC + live CVE/0day research. 10 findings, all
-  snapshot-restore DoS (no Critical/High/RCE); parser boundaries and the 2024–2026
-  cron/JSON CVE classes found closed. Crash-class remediated with fail-closed restore
-  validation ([ADR-0005](../adr/0005-restore-input-validation.md)); 13 regression guards.
-- ✅ **Consumer integration** (kavach 3.8.0) — kavach consumes `dist/samay.cyr` to size
-  sandboxes from a task's `ResourceReq`. This was the last open v1.0 criterion — **all v1.0
-  criteria are now met; samay is v1.0-ready.** daimon followed in its own 2.0.0 major
-  migration, which surfaced and fixed the `uuid_v4`↔libro collision (v1.0.1).
-- ⏭ **Audit follow-ups (Rec 3–5, non-blocking):** stable O(n log n) sort + terminal-task
-  pruning (F5); cron aggregate-work budget (F8/F9); upstream stdlib hash seeding (F4).
+- ⏭ **F5** — stable O(n log n) sort + terminal-task pruning. Four insertion sorts remain,
+  ~85× slower than merge sort at n=8000. Held out of v1.0.3 deliberately: ADR-0004's
+  determinism guarantee rides on those comparators and the release was already cron- and
+  JSON-heavy. Consolidate the four into one shared comparator first.
+- ⏭ **F8/F9** — cron cross-entry aggregate work budget. v1.0.3's prefilter cut the cost
+  ~12× and removed the heap growth, so this is now a policy question (any exhaustion rule
+  collides with "missed schedules are never silently skipped"), not an availability one.
+- ⏭ **F4** — upstream stdlib hash seeding; in `lib/`, off-limits to samay. v1.0.3's NaN
+  guard removed the last path by which bucket order could reach a documented-deterministic
+  decision.
+- ⏭ **Write-side codec** — `_rr_node`/`_ce_node` still serialize-then-reparse (~68% of
+  `scheduled_task_to_jsonv`). Held back so v1.0.3's emitted bytes are provably unchanged.
+- ⏭ **`node_preference` split** into user-preference vs current-assignment
+  ([ADR-0007](../adr/0007-reservation-lifecycle.md) Consequences). Needs a minor release.
 
-Also queued: alloc-free cron matching (perf item deferred from M2).
+**Not covered by any audit to date — treat as unretired risk:**
+
+- **Concurrency.** No lens has ever examined `TaskScheduler`/`CronScheduler` for thread
+  safety. `lib/alloc.cyr` no-ops its lock while single-threaded, so every heap and timing
+  figure on record is a single-threaded best case. If a consumer plans to call samay from
+  more than one thread, that is unknown territory, not a clean bill.
+- **The accelerator placement path.** Every `can_fit`/`_best_fit_node` measurement used
+  `REQ_NONE`, which short-circuits before touching profiles. ai-hwaccel's
+  `find_satisfying_profile` has never been benchmarked inside the placement loop — the
+  numbers understate exactly the workload the domain principles are about.
+- **Test correctness, as distinct from coverage.** v1.0.3 found one test that asserted a
+  defect and stated the wrong rule in its own comment. Nothing establishes it was the only
+  one.
+- **Non-x86_64 targets.** No aarch64 or agnos measurements; the new NaN/Inf handling is
+  the part most likely to differ.
+- **Fuzzing.** All restore probing has been hand-crafted against specific hypotheses. A
+  structure-aware fuzzer over `task_scheduler_from_json_str` is the obvious next
+  instrument, and v1.0.3's validation is what it should be pointed at.

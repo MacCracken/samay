@@ -73,6 +73,19 @@ fn _train_desc(method, model): Str {
 }
 
 # Build a High-priority (6) ScheduledTask from this template.
+# An absurd max_duration_secs was reduced rather than allowed to wrap.
+fn _log_deadline_clamp(model, requested): i64 {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "training '");
+    str_builder_add(sb, model);
+    str_builder_add_cstr(sb, "': max_duration_secs ");
+    str_builder_add_int(sb, requested);
+    str_builder_add_cstr(sb, " would overflow the deadline; clamped");
+    var msg = str_builder_build(sb);
+    sakshi_warn(str_data(msg), str_len(msg));
+    return 0;
+}
+
 fn training_job_to_scheduled_task(job, agent_id): i64 {
     var method = TrainingJobTemplate_method(job);
     var model = TrainingJobTemplate_model_id(job);
@@ -80,7 +93,16 @@ fn training_job_to_scheduled_task(job, agent_id): i64 {
     var task = scheduled_task_new(_train_name(method, model), _train_desc(method, model), agent_id, 6, req);
     var max = TrainingJobTemplate_max_duration_secs(job);
     if (max > 0) {
-        ScheduledTask_set_deadline(task, dt_add(dt_now(), dur_seconds(max)));
+        # dur_seconds() multiplies by 1e9, so above ~9.2e9 seconds the product
+        # overflows i64 and the deadline lands in the PAST while still passing
+        # the `max > 0` guard. Clamp to the headroom actually available.
+        var now = dt_now();
+        var headroom = (9223372036854775807 - now) / 1000000000;
+        if (max > headroom) {
+            _log_deadline_clamp(TrainingJobTemplate_model_id(job), max);
+            max = headroom;
+        }
+        ScheduledTask_set_deadline(task, dt_add(now, dur_seconds(max)));
     } else {
         ScheduledTask_set_deadline(task, 0);
     }

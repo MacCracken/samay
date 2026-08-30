@@ -382,6 +382,157 @@ fn test_schedule_transitions() {
 
 # --- scheduler: cancel ---
 
+# --- v1.0.3: node-capacity reservation lifecycle (ADR-0007) ---
+
+fn _cpu_milli(node) { return f64_to(f64_mul(NodeCapacity_available_cpu(node), f64_from(1000))); }
+
+fn _sched_one(s, node_cpu, node_mem) {
+    task_scheduler_register_node(s, make_node("n1", f64_from(node_cpu), node_mem));
+    return 0;
+}
+
+fn test_complete_releases() {
+    test_group("complete_releases");
+    # The headline v1.0.2 defect: capacity was returned only on cancel, so an
+    # ordinary completion retired the node's share forever.
+    var s = task_scheduler_new();
+    var node = make_node("n1", f64_from(8), 8192);
+    task_scheduler_register_node(s, node);
+    var id = result_unwrap(task_scheduler_submit_task(s, make_task("t1", 5)));
+    task_scheduler_schedule_pending(s);
+    var t = task_scheduler_get_task(s, id);
+    scheduled_task_transition(t, TASK_RUNNING);
+    assert_eq(is_ok(task_scheduler_complete_task(s, id, TASK_COMPLETED)), 1, "complete ok");
+    assert_eq(_cpu_milli(node), 8000, "cpu fully returned on completion");
+    assert_eq(NodeCapacity_available_memory_mb(node), 8192, "memory fully returned");
+    assert_eq(NodeCapacity_running_tasks(node), 0, "running_tasks back to zero");
+    return 0;
+}
+
+fn test_fail_releases() {
+    test_group("fail_releases");
+    var s = task_scheduler_new();
+    var node = make_node("n1", f64_from(8), 8192);
+    task_scheduler_register_node(s, node);
+    var id = result_unwrap(task_scheduler_submit_task(s, make_task("t1", 5)));
+    task_scheduler_schedule_pending(s);
+    scheduled_task_transition(task_scheduler_get_task(s, id), TASK_RUNNING);
+    assert_eq(is_ok(task_scheduler_complete_task(s, id, TASK_FAILED)), 1, "fail ok");
+    assert_eq(_cpu_milli(node), 8000, "cpu returned on failure");
+    assert_eq(NodeCapacity_running_tasks(node), 0, "running_tasks back to zero");
+    # A non-terminal final status is rejected outright.
+    var id2 = result_unwrap(task_scheduler_submit_task(s, make_task("t2", 5)));
+    assert_eq(is_err_result(task_scheduler_complete_task(s, id2, TASK_RUNNING)), 1, "non-terminal rejected");
+    return 0;
+}
+
+fn test_transition_reconciled() {
+    test_group("transition_reconciled");
+    # scheduled_task_transition is public, so a consumer can drive a task
+    # terminal without any scheduler call. Reconciliation must still recover
+    # the capacity on the next scheduling pass.
+    var s = task_scheduler_new();
+    var node = make_node("n1", f64_from(8), 8192);
+    task_scheduler_register_node(s, node);
+    var id = result_unwrap(task_scheduler_submit_task(s, make_task("t1", 5)));
+    task_scheduler_schedule_pending(s);
+    var t = task_scheduler_get_task(s, id);
+    scheduled_task_transition(t, TASK_RUNNING);
+    scheduled_task_transition(t, TASK_COMPLETED);
+    assert_eq(_cpu_milli(node), 7000, "still held immediately after a raw transition");
+    task_scheduler_schedule_pending(s);
+    assert_eq(_cpu_milli(node), 8000, "reconciled on the next scheduling pass");
+    assert_eq(NodeCapacity_running_tasks(node), 0, "running_tasks reconciled too");
+    return 0;
+}
+
+fn test_requeue_releases() {
+    test_group("requeue_releases");
+    # SCHEDULED -> QUEUED previously left the reservation held AND took a
+    # second one on re-placement, double-charging the node.
+    var s = task_scheduler_new();
+    var node = make_node("n1", f64_from(8), 8192);
+    task_scheduler_register_node(s, node);
+    var id = result_unwrap(task_scheduler_submit_task(s, make_task("t1", 5)));
+    task_scheduler_schedule_pending(s);
+    assert_eq(_cpu_milli(node), 7000, "one reservation after first placement");
+    scheduled_task_transition(task_scheduler_get_task(s, id), TASK_QUEUED);
+    task_scheduler_schedule_pending(s);
+    assert_eq(_cpu_milli(node), 7000, "still exactly one reservation after requeue");
+    assert_eq(NodeCapacity_running_tasks(node), 1, "running_tasks not double-counted");
+    return 0;
+}
+
+fn test_capacity_conservation() {
+    test_group("capacity_conservation");
+    # The invariant that would have caught the v1.0.2 defect: once no task is
+    # SCHEDULED or RUNNING, every node must be back to full capacity.
+    var s = task_scheduler_new();
+    var n1 = make_node("n1", f64_from(8), 8192);
+    var n2 = make_node("n2", f64_from(8), 8192);
+    task_scheduler_register_node(s, n1);
+    task_scheduler_register_node(s, n2);
+    var ids = vec_new();
+    var i = 0;
+    while (i < 8) {
+        vec_push(ids, result_unwrap(task_scheduler_submit_task(s, make_task("t", 5))));
+        i = i + 1;
+    }
+    task_scheduler_schedule_pending(s);
+    # Drive a mixed set of exits: complete, fail, cancel, requeue-then-complete.
+    var k = 0;
+    while (k < 8) {
+        var id = vec_get(ids, k);
+        var t = task_scheduler_get_task(s, id);
+        if (k % 4 == 0) {
+            scheduled_task_transition(t, TASK_RUNNING);
+            task_scheduler_complete_task(s, id, TASK_COMPLETED);
+        }
+        if (k % 4 == 1) {
+            scheduled_task_transition(t, TASK_RUNNING);
+            task_scheduler_complete_task(s, id, TASK_FAILED);
+        }
+        if (k % 4 == 2) { task_scheduler_cancel_task(s, id); }
+        if (k % 4 == 3) {
+            scheduled_task_transition(t, TASK_QUEUED);
+            scheduled_task_transition(t, TASK_CANCELLED);
+        }
+        k = k + 1;
+    }
+    task_scheduler_schedule_pending(s);
+    assert_eq(_cpu_milli(n1), 8000, "n1 fully restored");
+    assert_eq(NodeCapacity_available_memory_mb(n1), 8192, "n1 memory fully restored");
+    assert_eq(NodeCapacity_running_tasks(n1), 0, "n1 running_tasks zero");
+    assert_eq(_cpu_milli(n2), 8000, "n2 fully restored");
+    assert_eq(NodeCapacity_available_memory_mb(n2), 8192, "n2 memory fully restored");
+    assert_eq(NodeCapacity_running_tasks(n2), 0, "n2 running_tasks zero");
+    return 0;
+}
+
+fn test_reserved_on_roundtrip() {
+    test_group("reserved_on_roundtrip");
+    var s = task_scheduler_new();
+    task_scheduler_register_node(s, make_node("n1", f64_from(8), 8192));
+    var id = result_unwrap(task_scheduler_submit_task(s, make_task("t1", 5)));
+    task_scheduler_schedule_pending(s);
+    var t = task_scheduler_get_task(s, id);
+    assert_eq(str_eq(ScheduledTask_reserved_on(t), str_from("n1")), 1, "reservation recorded");
+    var back = scheduled_task_from_json_str(scheduled_task_to_json_str(t));
+    assert_eq(str_eq(ScheduledTask_reserved_on(back), str_from("n1")), 1, "reserved_on survives the wire");
+
+    # Back-compat: a pre-1.0.3 snapshot carries no `reserved_on`. A SCHEDULED
+    # task did hold one, on the node schedule_pending wrote into
+    # node_preference; a terminal task did not.
+    var legacy = "{\"task_id\":\"x\",\"name\":\"n\",\"description\":\"d\",\"agent_id\":\"a\",\"priority\":5,\"resource_requirements\":{\"cpu_cores\":1.0,\"memory_mb\":256,\"accel_req\":0,\"accel_min_chips\":0,\"network\":0,\"disk_mb\":0},\"status\":1,\"fail_reason\":null,\"created_at\":0,\"scheduled_at\":0,\"started_at\":0,\"completed_at\":0,\"deadline\":0,\"node_preference\":\"n9\"}";
+    var old = scheduled_task_from_json_str(str_from(legacy));
+    assert_eq(str_eq(ScheduledTask_reserved_on(old), str_from("n9")), 1, "legacy SCHEDULED task holds its node");
+
+    var legacy_done = "{\"task_id\":\"y\",\"name\":\"n\",\"description\":\"d\",\"agent_id\":\"a\",\"priority\":5,\"resource_requirements\":{\"cpu_cores\":1.0,\"memory_mb\":256,\"accel_req\":0,\"accel_min_chips\":0,\"network\":0,\"disk_mb\":0},\"status\":3,\"fail_reason\":null,\"created_at\":0,\"scheduled_at\":0,\"started_at\":0,\"completed_at\":0,\"deadline\":0,\"node_preference\":\"n9\"}";
+    var old_done = scheduled_task_from_json_str(str_from(legacy_done));
+    assert_eq(ScheduledTask_reserved_on(old_done), 0, "legacy COMPLETED task holds nothing");
+    return 0;
+}
+
 fn test_cancel_queued() {
     test_group("cancel_queued");
     var s = task_scheduler_new();
@@ -521,6 +672,43 @@ fn test_cron_first_eval_nomatch() {
     assert_eq(vec_len(cron_scheduler_check_due_at(c, at_ns(2026, 7, 18, 3, 45))), 0, "no fire at 3:45");
     return 0;
 }
+fn test_cron_clock_regression() {
+    test_group("cron_clock_regression");
+    # A backward clock step must hold the watermark, not rewind it. Before
+    # v1.0.3 last_fired was stored unconditionally, so stepping back and
+    # forward again re-fired the whole intervening interval.
+    var c = mk_cron("* * * * *", CRON_CATCHUP);
+    cron_scheduler_check_due_at(c, at_ns(2026, 7, 18, 10, 0));
+    var a = cron_scheduler_check_due_at(c, at_ns(2026, 7, 18, 10, 5));
+    assert_eq(vec_len(a), 5, "forward step fires the 5 missed minutes");
+    var b = cron_scheduler_check_due_at(c, at_ns(2026, 7, 18, 10, 2));
+    assert_eq(vec_len(b), 0, "backward step fires nothing");
+    var d = cron_scheduler_check_due_at(c, at_ns(2026, 7, 18, 10, 5));
+    assert_eq(vec_len(d), 0, "returning to the old instant does not re-fire");
+    var e = cron_scheduler_check_due_at(c, at_ns(2026, 7, 18, 10, 7));
+    assert_eq(vec_len(e), 2, "progress past the watermark fires only the new minutes");
+    return 0;
+}
+
+fn test_cron_disabled_no_debt() {
+    test_group("cron_disabled_no_debt");
+    # A disabled entry tracks the clock instead of freezing its watermark, so
+    # re-enabling does not fire a burst for the disabled interval (ADR-0007).
+    # Before v1.0.3 a 30-day disable of `0 * * * *` fired 720 tasks, silently.
+    var c = mk_cron("0 * * * *", CRON_CATCHUP);
+    cron_scheduler_check_due_at(c, at_ns(2026, 7, 1, 0, 0));
+    var entry = vec_get(cron_scheduler_list_entries(c), 0);
+    CronEntry_set_enabled(entry, 0);
+    var off = cron_scheduler_check_due_at(c, at_ns(2026, 7, 15, 0, 0));
+    assert_eq(vec_len(off), 0, "disabled entry fires nothing");
+    CronEntry_set_enabled(entry, 1);
+    var back = cron_scheduler_check_due_at(c, at_ns(2026, 7, 15, 0, 30));
+    assert_eq(vec_len(back), 0, "re-enable does not replay the disabled interval");
+    var next = cron_scheduler_check_due_at(c, at_ns(2026, 7, 15, 1, 30));
+    assert_eq(vec_len(next), 1, "normal firing resumes after re-enable");
+    return 0;
+}
+
 fn test_cron_catchup() {
     test_group("cron_catchup");
     var c = mk_cron("* * * * *", CRON_CATCHUP);
@@ -558,12 +746,215 @@ fn test_cron_star_list() {
 }
 fn test_cron_step_star_dom() {
     test_group("cron_step_star");
-    # "*/2" in DOM begins with '*' -> DOM starred -> DOW (Monday) governs (Vixie).
+    # Vixie (cron.c): when EITHER field starts with `*` the two masks are
+    # AND-ed. `*/2` sets the star flag but its mask is NOT all-ones -- over
+    # DOM 1-31 it is the ODD days -- so `0 0 */2 * 1` means "odd-numbered
+    # Mondays", not "every Monday". The starred field's mask still applies.
     var e = result_unwrap(cron_expr_parse(str_from("0 0 */2 * 1")));
-    assert_eq(cron_expr_matches(e, at_ns(2026, 7, 20, 0, 0) / 1000000000), 1, "Monday (even day) fires");
-    assert_eq(cron_expr_matches(e, at_ns(2026, 7, 21, 0, 0) / 1000000000), 0, "Tuesday (odd day) no fire");
+    assert_eq(cron_expr_matches(e, at_ns(2026, 7, 13, 0, 0) / 1000000000), 1, "odd-numbered Monday fires");
+    assert_eq(cron_expr_matches(e, at_ns(2026, 7, 27, 0, 0) / 1000000000), 1, "odd-numbered Monday fires (2)");
+    assert_eq(cron_expr_matches(e, at_ns(2026, 7, 20, 0, 0) / 1000000000), 0, "even-numbered Monday no fire");
+    assert_eq(cron_expr_matches(e, at_ns(2026, 7, 6, 0, 0) / 1000000000), 0, "even-numbered Monday no fire (2)");
+    assert_eq(cron_expr_matches(e, at_ns(2026, 7, 21, 0, 0) / 1000000000), 0, "Tuesday no fire");
+
+    # `*/2` in DOM against a bare `*` DOW: AND with an all-ones DOW mask,
+    # so the DOM step governs -- odd days only, every weekday.
+    var e2 = result_unwrap(cron_expr_parse(str_from("0 0 */2 * *")));
+    assert_eq(cron_expr_matches(e2, at_ns(2026, 7, 1, 0, 0) / 1000000000), 1, "odd day fires");
+    assert_eq(cron_expr_matches(e2, at_ns(2026, 7, 3, 0, 0) / 1000000000), 1, "odd day fires (2)");
+    assert_eq(cron_expr_matches(e2, at_ns(2026, 7, 2, 0, 0) / 1000000000), 0, "even day no fire");
+    assert_eq(cron_expr_matches(e2, at_ns(2026, 7, 8, 0, 0) / 1000000000), 0, "even day no fire (2)");
+
+    # `*/2` in DOW: Sun(0), Tue(2), Thu(4), Sat(6) only.
+    var e3 = result_unwrap(cron_expr_parse(str_from("0 0 * * */2")));
+    assert_eq(cron_expr_matches(e3, at_ns(2026, 7, 5, 0, 0) / 1000000000), 1, "Sunday fires");
+    assert_eq(cron_expr_matches(e3, at_ns(2026, 7, 7, 0, 0) / 1000000000), 1, "Tuesday fires");
+    assert_eq(cron_expr_matches(e3, at_ns(2026, 7, 6, 0, 0) / 1000000000), 0, "Monday no fire");
+    assert_eq(cron_expr_matches(e3, at_ns(2026, 7, 8, 0, 0) / 1000000000), 0, "Wednesday no fire");
+
+    # Regression guard: a bare `*` mask IS all-ones, so AND-ing it is the
+    # identity -- these shapes must be untouched by the combination rule.
+    var e4 = result_unwrap(cron_expr_parse(str_from("0 0 15 * *")));
+    assert_eq(cron_expr_matches(e4, at_ns(2026, 7, 15, 0, 0) / 1000000000), 1, "bare-star DOW: day 15 fires");
+    assert_eq(cron_expr_matches(e4, at_ns(2026, 7, 16, 0, 0) / 1000000000), 0, "bare-star DOW: day 16 no fire");
+    var e5 = result_unwrap(cron_expr_parse(str_from("0 0 * * 1")));
+    assert_eq(cron_expr_matches(e5, at_ns(2026, 7, 20, 0, 0) / 1000000000), 1, "bare-star DOM: Monday fires");
+    assert_eq(cron_expr_matches(e5, at_ns(2026, 7, 21, 0, 0) / 1000000000), 0, "bare-star DOM: Tuesday no fire");
+    # Neither starred -> OR rule: day 15 OR Monday.
+    var e6 = result_unwrap(cron_expr_parse(str_from("0 0 15 * 1")));
+    assert_eq(cron_expr_matches(e6, at_ns(2026, 7, 15, 0, 0) / 1000000000), 1, "OR rule: day 15 (Wed) fires");
+    assert_eq(cron_expr_matches(e6, at_ns(2026, 7, 20, 0, 0) / 1000000000), 1, "OR rule: Monday (day 20) fires");
+    assert_eq(cron_expr_matches(e6, at_ns(2026, 7, 16, 0, 0) / 1000000000), 0, "OR rule: neither no fire");
     return 0;
 }
+# Reference matcher: the Vixie semantics written the slow, obvious way (full
+# calendar decomposition up front, no prefilter, no early exits). Kept here
+# deliberately so the optimised cron_expr_matches in src/cronexpr.cyr has an
+# independent oracle to be differentially checked against -- v1.0.3 reordered
+# that function to keep epoch_to_date off the miss path, and the guarantee it
+# must hold is "behaviour-identical", which only a differential can show.
+fn _ref_matches(expr, epoch_secs) {
+    if (epoch_secs < 0) { return 0; }
+    var dt = epoch_to_date(epoch_secs);
+    var minute = load64(dt + 32);
+    var hour = load64(dt + 24);
+    var day = load64(dt + 16);
+    var month = load64(dt + 8);
+    var dow = _cron_dow(epoch_secs);
+    if ((CronExpr_minute_mask(expr) & (1 << minute)) == 0) { return 0; }
+    if ((CronExpr_hour_mask(expr) & (1 << hour)) == 0) { return 0; }
+    if ((CronExpr_month_mask(expr) & (1 << month)) == 0) { return 0; }
+    var dom_ok = 0;
+    if ((CronExpr_dom_mask(expr) & (1 << day)) != 0) { dom_ok = 1; }
+    var dow_ok = 0;
+    if ((CronExpr_dow_mask(expr) & (1 << dow)) != 0) { dow_ok = 1; }
+    var either = 0;
+    if (CronExpr_dom_star(expr) == 1) { either = 1; }
+    if (CronExpr_dow_star(expr) == 1) { either = 1; }
+    if (either == 1) {
+        if (dom_ok == 1) { if (dow_ok == 1) { return 1; } }
+        return 0;
+    }
+    if (dom_ok == 1) { return 1; }
+    return dow_ok;
+}
+
+fn _diff_add(v, e) { vec_push(v, result_unwrap(cron_expr_parse(str_from(e)))); return 0; }
+
+fn test_cron_matcher_differential() {
+    test_group("cron_matcher_differential");
+    var v = vec_new();
+    _diff_add(v, "* * * * *");    _diff_add(v, "@hourly");      _diff_add(v, "@daily");
+    _diff_add(v, "@weekly");      _diff_add(v, "@monthly");     _diff_add(v, "@yearly");
+    _diff_add(v, "0 0 */2 * *");  _diff_add(v, "0 0 * * */2");  _diff_add(v, "0 0 */2 * 1");
+    _diff_add(v, "0 0 15 * *");   _diff_add(v, "0 0 * * 1");    _diff_add(v, "0 0 15 * 1");
+    _diff_add(v, "0 0 15,* * 1"); _diff_add(v, "0 12 29 2 *");  _diff_add(v, "0 0 30 2 *");
+    _diff_add(v, "5 0-6/2 * JAN-MAR MON-WED");                  _diff_add(v, "*/7 */3 */5 */2 */2");
+    _diff_add(v, "0 0 * * 7");    _diff_add(v, "30 3 * * 1-5"); _diff_add(v, "*/15 3,15 * * 1-5");
+    var ne = vec_len(v);
+
+    # Minute-by-minute sweep, plus boundary instants (epoch 0, negatives, leap
+    # day, century non-leap, year end). Counts hits too: a differential that
+    # only ever compares 0 == 0 proves nothing.
+    var mism = 0;
+    var hits = 0;
+    var base = _chrono_ymd_to_epoch_secs(2024, 1, 1, 0, 0, 0);
+    var step = 0;
+    while (step < 3000) {
+        var t = base + step * 60;
+        var i = 0;
+        while (i < ne) {
+            var e = vec_get(v, i);
+            var b = _ref_matches(e, t);
+            if (cron_expr_matches(e, t) != b) { mism = mism + 1; }
+            if (b == 1) { hits = hits + 1; }
+            i = i + 1;
+        }
+        step = step + 1;
+    }
+    var probes = vec_new();
+    vec_push(probes, 0); vec_push(probes, 0 - 1); vec_push(probes, 0 - 86400);
+    vec_push(probes, 59); vec_push(probes, 60); vec_push(probes, 86399);
+    vec_push(probes, _chrono_ymd_to_epoch_secs(2024, 2, 29, 12, 0, 0));
+    vec_push(probes, _chrono_ymd_to_epoch_secs(2100, 2, 28, 0, 0, 0));
+    vec_push(probes, _chrono_ymd_to_epoch_secs(2000, 2, 29, 0, 0, 0));
+    vec_push(probes, _chrono_ymd_to_epoch_secs(2050, 12, 31, 23, 59, 0));
+    var pi = 0;
+    while (pi < vec_len(probes)) {
+        var t2 = vec_get(probes, pi);
+        var j = 0;
+        while (j < ne) {
+            var e2 = vec_get(v, j);
+            if (cron_expr_matches(e2, t2) != _ref_matches(e2, t2)) { mism = mism + 1; }
+            j = j + 1;
+        }
+        pi = pi + 1;
+    }
+    assert_eq(mism, 0, "optimised matcher agrees with reference on every pair");
+    assert_eq(hits > 1000, 1, "differential actually exercised the match path");
+
+    # The prefilter's reason for existing: epoch_to_date allocates 48 bytes
+    # with no free, so a miss must not reach it. 20k misses used to cost
+    # ~960 KB; the ceiling here is deliberately far below that.
+    var em = result_unwrap(cron_expr_parse(str_from("0 0 1 1 *")));
+    var t0 = _chrono_ymd_to_epoch_secs(2026, 7, 18, 3, 15, 0);
+    var before = alloc_used();
+    var k = 0;
+    while (k < 20000) { cron_expr_matches(em, t0 + k * 60); k = k + 1; }
+    assert_eq((alloc_used() - before) < 40000, 1, "miss path stays off epoch_to_date");
+    return 0;
+}
+
+# --- v1.0.3: parser features that had zero assertions before the sweep ---
+
+fn _m(expr_str, y, mo, d, h, mi) {
+    var e = result_unwrap(cron_expr_parse(str_from(expr_str)));
+    return cron_expr_matches(e, at_ns(y, mo, d, h, mi) / 1000000000);
+}
+
+fn test_cron_shortcut_semantics() {
+    test_group("cron_shortcut_semantics");
+    # Every @shortcut expansion was previously unasserted: swapping the
+    # @monthly and @weekly literals in src/cronexpr.cyr left the whole suite
+    # green. These pin the actual expansion, not merely that it parses.
+    assert_eq(_m("@yearly", 2026, 1, 1, 0, 0), 1, "@yearly fires Jan 1 00:00");
+    assert_eq(_m("@yearly", 2026, 2, 1, 0, 0), 0, "@yearly not Feb 1");
+    assert_eq(_m("@yearly", 2026, 1, 1, 1, 0), 0, "@yearly not 01:00");
+    assert_eq(_m("@annually", 2026, 1, 1, 0, 0), 1, "@annually aliases @yearly");
+    assert_eq(_m("@monthly", 2026, 7, 1, 0, 0), 1, "@monthly fires on the 1st");
+    assert_eq(_m("@monthly", 2026, 7, 2, 0, 0), 0, "@monthly not the 2nd");
+    # 2026-07-05 is a Sunday.
+    assert_eq(_m("@weekly", 2026, 7, 5, 0, 0), 1, "@weekly fires Sunday");
+    assert_eq(_m("@weekly", 2026, 7, 6, 0, 0), 0, "@weekly not Monday");
+    assert_eq(_m("@daily", 2026, 7, 6, 0, 0), 1, "@daily fires at midnight");
+    assert_eq(_m("@daily", 2026, 7, 6, 0, 1), 0, "@daily not 00:01");
+    assert_eq(_m("@midnight", 2026, 7, 6, 0, 0), 1, "@midnight aliases @daily");
+    assert_eq(_m("@hourly", 2026, 7, 6, 13, 0), 1, "@hourly fires on the hour");
+    assert_eq(_m("@hourly", 2026, 7, 6, 13, 1), 0, "@hourly not past the hour");
+    assert_eq(is_err_result(cron_expr_parse(str_from("@bogus"))), 1, "unknown shortcut rejected");
+    assert_eq(is_err_result(cron_expr_parse(str_from("@reboot"))), 1, "@reboot unsupported");
+    # v1.0.3: surrounding whitespace is tolerated, matching the 5-field path.
+    assert_eq(is_ok(cron_expr_parse(str_from("@daily "))), 1, "trailing space accepted");
+    assert_eq(is_ok(cron_expr_parse(str_from(" @daily"))), 1, "leading space accepted");
+    assert_eq(_m("  @daily  ", 2026, 7, 6, 0, 0), 1, "padded shortcut still expands correctly");
+    return 0;
+}
+
+fn test_cron_name_parsing() {
+    test_group("cron_name_parsing");
+    # Month and day NAMES had zero assertions in the suite.
+    assert_eq(_m("0 0 15 JUL *", 2026, 7, 15, 0, 0), 1, "JUL month name matches");
+    assert_eq(_m("0 0 15 JUL *", 2026, 8, 15, 0, 0), 0, "JUL excludes August");
+    assert_eq(_m("0 0 * * MON", 2026, 7, 6, 0, 0), 1, "MON day name matches");
+    assert_eq(_m("0 0 * * MON", 2026, 7, 7, 0, 0), 0, "MON excludes Tuesday");
+    assert_eq(_m("0 0 * JAN-MAR *", 2026, 2, 10, 0, 0), 1, "JAN-MAR range matches Feb");
+    assert_eq(_m("0 0 * JAN-MAR *", 2026, 7, 10, 0, 0), 0, "JAN-MAR excludes July");
+    assert_eq(_m("0 0 * * MON-WED", 2026, 7, 8, 0, 0), 1, "MON-WED matches Wednesday");
+    assert_eq(_m("0 0 * * MON-WED", 2026, 7, 9, 0, 0), 0, "MON-WED excludes Thursday");
+    # day-of-week 7 folds to Sunday (0).
+    assert_eq(_m("0 0 * * 7", 2026, 7, 5, 0, 0), 1, "DOW 7 folds to Sunday");
+    assert_eq(_m("0 0 * * 7", 2026, 7, 6, 0, 0), 0, "DOW 7 excludes Monday");
+    # step forms over an explicit range
+    assert_eq(_m("0 0-6/2 * * *", 2026, 7, 6, 4, 0), 1, "N-M/S step matches");
+    assert_eq(_m("0 0-6/2 * * *", 2026, 7, 6, 5, 0), 0, "N-M/S step excludes odd hour");
+    return 0;
+}
+
+fn test_training_deadline_clamp() {
+    test_group("training_deadline_clamp");
+    # dur_seconds multiplies by 1e9; an absurd max_duration_secs used to wrap
+    # i64 and land the deadline in the PAST while still passing `max > 0`.
+    var job = training_job_template_new(str_from("m"), TM_LORA, str_from("d"), 0,
+      9223372036854775807, 0);
+    var t = training_job_to_scheduled_task(job, str_from("agent"));
+    assert_eq(ScheduledTask_deadline(t) > dt_now(), 1, "clamped deadline is still in the future");
+    # An ordinary duration is untouched.
+    var job2 = training_job_template_new(str_from("m"), TM_LORA, str_from("d"), 0, 3600, 0);
+    var t2 = training_job_to_scheduled_task(job2, str_from("agent"));
+    assert_eq(ScheduledTask_deadline(t2) > dt_now(), 1, "normal deadline in the future");
+    return 0;
+}
+
 fn test_cron_trailing_comma() {
     test_group("cron_trailing_comma");
     assert_eq(is_err_result(cron_expr_parse(str_from("0,30, 12 1 1 *"))), 1, "trailing comma rejected");
@@ -1207,6 +1598,82 @@ fn _task_json_full() {
 
 # Missing required fields must reject (return 0), not produce a poisoned struct
 # that SIGSEGVs on later use.
+# --- v1.0.3: the "or the wrong type" half of ADR-0005's contract ---
+
+fn test_sec_nested_wrong_type() {
+    test_group("sec_nested_wrong_type");
+    # Before v1.0.3 the nested leaves bridged through their #derive codec,
+    # which cannot fail -- every one of these produced a NON-ZERO all-zero
+    # ResourceReq (which fits any node) and the `req == 0` guard never fired.
+    assert_eq(scheduled_task_from_json_str(str_from("{\"task_id\":\"t\",\"name\":\"n\",\"description\":\"d\",\"agent_id\":\"a\",\"priority\":5,\"resource_requirements\":\"nope\",\"status\":0}")), 0, "req as string -> rejected");
+    assert_eq(scheduled_task_from_json_str(str_from("{\"task_id\":\"t\",\"name\":\"n\",\"description\":\"d\",\"agent_id\":\"a\",\"priority\":5,\"resource_requirements\":7,\"status\":0}")), 0, "req as int -> rejected");
+    assert_eq(scheduled_task_from_json_str(str_from("{\"task_id\":\"t\",\"name\":\"n\",\"description\":\"d\",\"agent_id\":\"a\",\"priority\":5,\"resource_requirements\":[],\"status\":0}")), 0, "req as array -> rejected");
+    assert_eq(scheduled_task_from_json_str(str_from("{\"task_id\":\"t\",\"name\":\"n\",\"description\":\"d\",\"agent_id\":\"a\",\"priority\":5,\"resource_requirements\":null,\"status\":0}")), 0, "req as null -> rejected");
+    assert_eq(scheduled_task_from_json_str(str_from("{\"task_id\":\"t\",\"name\":\"n\",\"description\":\"d\",\"agent_id\":\"a\",\"priority\":5,\"resource_requirements\":{},\"status\":0}")), 0, "req as empty object -> rejected");
+    # A well-formed one still restores.
+    assert_eq(scheduled_task_from_json_str(str_from("{\"task_id\":\"t\",\"name\":\"n\",\"description\":\"d\",\"agent_id\":\"a\",\"priority\":5,\"resource_requirements\":{\"cpu_cores\":1.0,\"memory_mb\":256,\"accel_req\":0,\"accel_min_chips\":0,\"network\":0,\"disk_mb\":0},\"status\":0}")) != 0, 1, "well-formed req restores");
+    return 0;
+}
+
+fn test_sec_resource_req_domain() {
+    test_group("sec_rr_domain");
+    # Negative requirements ran backwards through node_capacity_reserve,
+    # which computes `available - required` and so ADDED capacity.
+    var t = scheduled_task_from_json_str(str_from("{\"task_id\":\"t\",\"name\":\"n\",\"description\":\"d\",\"agent_id\":\"a\",\"priority\":5,\"resource_requirements\":{\"cpu_cores\":-4.0,\"memory_mb\":-1000,\"accel_req\":99,\"accel_min_chips\":0,\"network\":5,\"disk_mb\":-7},\"status\":0}"));
+    assert_eq(t != 0, 1, "restored");
+    var r = ScheduledTask_resource_requirements(t);
+    assert_eq(f64_to(ResourceReq_cpu_cores(r)), 0, "negative cpu_cores clamped to 0");
+    assert_eq(ResourceReq_memory_mb(r), 0, "negative memory_mb clamped to 0");
+    assert_eq(ResourceReq_disk_mb(r), 0, "negative disk_mb clamped to 0");
+    assert_eq(ResourceReq_accel_req(r), REQ_NONE, "out-of-range accel_req clamped");
+    assert_eq(ResourceReq_network(r), 1, "truthy network normalised to 1");
+    return 0;
+}
+
+fn test_sec_node_capacity_invariants() {
+    test_group("sec_node_invariants");
+    # available > total drove utilization hugely negative, and that node then
+    # won every _best_fit_node argmin forever.
+    var n = node_capacity_from_json_str(str_from("{\"node_id\":\"n\",\"total_cpu\":1.0,\"available_cpu\":1e18,\"total_memory_mb\":100,\"available_memory_mb\":999999,\"total_disk_mb\":10,\"available_disk_mb\":999}"));
+    assert_eq(n != 0, 1, "restored");
+    assert_eq(f64_to(NodeCapacity_available_cpu(n)), 1, "available_cpu clamped to total");
+    assert_eq(NodeCapacity_available_memory_mb(n), 100, "available_memory clamped to total");
+    assert_eq(NodeCapacity_available_disk_mb(n), 10, "available_disk clamped to total");
+    # bayan maps an overflowing exponent to +Inf; a non-finite capacity makes
+    # utilization NaN, which defeats the ADR-0004 tie-break.
+    var inf = node_capacity_from_json_str(str_from("{\"node_id\":\"n\",\"total_cpu\":1e400,\"available_cpu\":1e400}"));
+    assert_eq(inf != 0, 1, "restored");
+    assert_eq(_f64_is_finite(NodeCapacity_total_cpu(inf)), 1, "non-finite total_cpu rejected");
+    assert_eq(_f64_is_finite(node_capacity_utilization(inf)), 1, "utilization stays finite");
+    # An empty node_id is a map key collision waiting to happen.
+    assert_eq(node_capacity_from_json_str(str_from("{\"node_id\":\"\"}")), 0, "empty node_id rejected");
+    return 0;
+}
+
+fn test_sec_identity_and_flags() {
+    test_group("sec_identity_flags");
+    assert_eq(scheduled_task_from_json_str(str_from("{\"task_id\":\"\",\"name\":\"n\",\"description\":\"d\",\"agent_id\":\"a\",\"priority\":5,\"resource_requirements\":{\"cpu_cores\":1.0,\"memory_mb\":256,\"accel_req\":0,\"accel_min_chips\":0,\"network\":0,\"disk_mb\":0},\"status\":0}")), 0, "empty task_id rejected");
+    # `enabled` is compared with `== 1`, so a truthy non-1 value would leave
+    # the entry dormant while reporting as enabled.
+    var tmpl = "{\"name\":\"c\",\"description\":\"d\",\"agent_id\":\"a\",\"priority\":5,\"resource_requirements\":{\"cpu_cores\":1.0,\"memory_mb\":256,\"accel_req\":0,\"accel_min_chips\":0,\"network\":0,\"disk_mb\":0}}";
+    var ce = "{\"minute_mask\":1,\"hour_mask\":1,\"dom_mask\":1,\"month_mask\":1,\"dow_mask\":1,\"dom_star\":7,\"dow_star\":0}";
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"name\":\"e\",\"expr\":");
+    str_builder_add_cstr(sb, ce);
+    str_builder_add_cstr(sb, ",\"task_template\":");
+    str_builder_add_cstr(sb, tmpl);
+    str_builder_add_cstr(sb, ",\"enabled\":99,\"missed_policy\":0,\"last_fired\":0}");
+    var e = cron_entry_from_json_str(str_builder_build(sb));
+    assert_eq(e != 0, 1, "entry restored");
+    assert_eq(CronEntry_enabled(e), 1, "truthy enabled normalised to 1");
+    assert_eq(CronExpr_dom_star(CronEntry_expr(e)), 1, "truthy dom_star normalised to 1");
+    # An out-of-range training method must land back in the enum.
+    var tj = training_job_template_from_json_str(str_from("{\"model_id\":\"m\",\"dataset\":\"d\",\"method\":424242}"));
+    assert_eq(tj != 0, 1, "training restored");
+    assert_eq(TrainingJobTemplate_method(tj), TM_LORA, "out-of-range method clamped");
+    return 0;
+}
+
 fn test_sec_reject_missing_required() {
     test_group("sec_reject_missing");
     # training: missing model_id
@@ -1291,6 +1758,12 @@ fn main() {
     test_schedule_prefers_preference();
     test_schedule_fallback_when_full();
     test_schedule_transitions();
+    test_complete_releases();
+    test_fail_releases();
+    test_transition_reconciled();
+    test_requeue_releases();
+    test_capacity_conservation();
+    test_reserved_on_roundtrip();
     test_cancel_queued();
     test_cancel_nonexistent();
     test_stats_empty();
@@ -1307,11 +1780,17 @@ fn main() {
     test_cron_disabled();
     test_cron_first_eval_match();
     test_cron_first_eval_nomatch();
+    test_cron_clock_regression();
+    test_cron_disabled_no_debt();
     test_cron_catchup();
     test_cron_skip();
     test_cron_step_expr();
     test_cron_star_list();
     test_cron_step_star_dom();
+    test_cron_matcher_differential();
+    test_cron_shortcut_semantics();
+    test_cron_name_parsing();
+    test_training_deadline_clamp();
     test_cron_trailing_comma();
     test_cron_overflow_field();
     test_cron_negative_epoch();
@@ -1347,6 +1826,10 @@ fn main() {
     test_det_schedule_colliding();
     test_det_preempt_tie();
     test_det_cron_list_rehash();
+    test_sec_nested_wrong_type();
+    test_sec_resource_req_domain();
+    test_sec_node_capacity_invariants();
+    test_sec_identity_and_flags();
     test_sec_reject_missing_required();
     test_sec_container_drops_bad();
     test_sec_clamp_priority();

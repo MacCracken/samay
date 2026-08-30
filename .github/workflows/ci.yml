@@ -48,3 +48,37 @@ jobs:
         # stub didn't exist (Issue 1) and also wouldn't ever exercise
         # tests/${proj}.tcyr.
         run: cyrius test
+
+      - name: Format + lint
+        # `cyrius fmt` and `cyrius lint` take a FILE argument. A bare
+        # `cyrius fmt --check` just prints usage and exits 0, so a gate
+        # written that way silently checks nothing — loop over the files.
+        run: |
+          fail=0
+          for f in src/*.cyr tests/*.tcyr tests/*.bcyr; do
+            if [ -n "$(cyrius fmt "$f" --check 2>&1)" ]; then
+              echo "::error file=$f::not canonically formatted (fix: cyrius fmt $f)"
+              fail=1
+            fi
+          done
+          for f in src/*.cyr; do
+            out="$(cyrius lint "$f" 2>&1)"
+            if echo "$out" | grep -qE "^[1-9][0-9]* (warnings|untracked)"; then
+              echo "::error file=$f::lint not clean"
+              echo "$out"
+              fail=1
+            fi
+          done
+          exit $fail
+
+      - name: dist bundle in sync
+        # dist/samay.cyr is the ONLY artifact consumers compile, and until
+        # v1.0.3 nothing in CI ever looked at it: a source change that forgot
+        # `cyrius distlib` shipped a stale bundle. --check exits 1 on drift.
+        run: cyrius distlib --check
+
+      - name: Benchmarks
+        # Run, but do not gate on timings — the point is that the harness
+        # still executes. tests/samay.bcyr was dead (SIGSEGV) from v0.5.0 to
+        # v1.0.1 precisely because nothing ever ran it.
+        run: cyrius bench tests/samay.bcyr
