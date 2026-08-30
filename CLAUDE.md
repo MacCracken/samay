@@ -61,9 +61,20 @@ cyrius test                              # run tests/*.tcyr
 
 ## Cleanliness gate (run before claiming done)
 
-`cyrius fmt --check` · `cyrius lint` (0 warnings) · `cyrius test` (all pass) ·
-`cyrius bench` · regenerate `dist/samay.cyr` via `cyrius distlib` · keep
-`VERSION` + `cyrius.cyml` + the zugot recipe in sync.
+**`fmt` and `lint` take a FILE argument.** A bare `cyrius fmt --check` prints
+usage and exits 0 — a gate written that way checks nothing. Loop:
+
+```sh
+for f in src/*.cyr tests/*.tcyr tests/*.bcyr; do cyrius fmt "$f" --check; done
+for f in src/*.cyr; do cyrius lint "$f"; done   # 0 warnings AND 0 untracked deferrals
+cyrius test                                     # all pass
+cyrius bench tests/samay.bcyr                   # 5/5 report
+cyrius distlib                                  # regenerate dist/samay.cyr
+cyrius distlib --check                          # exits 1 if the bundle is stale
+```
+
+Then: scan new public symbols against the vendored deps for collisions, and keep
+`VERSION` + `cyrius.cyml` + the zugot recipe in sync. CI runs all of the above.
 
 ## Rules (Hard Constraints)
 

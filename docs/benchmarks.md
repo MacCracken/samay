@@ -1,7 +1,10 @@
 # samay benchmarks
 
 x86_64 Linux · cyrius 6.5.36 · `cyrius bench tests/samay.bcyr`.
-Baseline refreshed 2026-08-29 (v1.0.3).
+Baseline refreshed 2026-08-29 (v1.0.3); **re-run and confirmed unchanged at
+v1.0.4** (2026-08-30) — that release added only `samay_init()`, a one-time
+pre-warm off every hot path, and re-measured within noise of the table below
+(28 / 4 / 628 ns, 2.14 µs, 23 ns).
 
 | Op                      | avg      | v1.0.2   | notes                              |
 |-------------------------|----------|----------|------------------------------------|

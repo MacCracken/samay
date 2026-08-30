@@ -1,3 +1,25 @@
+> **ARCHIVED 2026-08-30 — RESOLVED upstream.** Both filed defects are fixed:
+> `fmt_float_buf`'s 6-decimal cap was replaced by a Grisu2 shortest-representation
+> emitter, and `#derive(Serialize)`'s second, divergent parser was reconciled with
+> a correctly-rounded one. Landed at cyrius **6.4.67 / 6.4.69**; samay's M4 shipped
+> on that basis as **v0.5.0**.
+>
+> **Re-verified on the current pin (6.5.36) before archiving**, through samay's own
+> container codec rather than by reading the upstream changelog:
+>
+> | check | result |
+> |---|---|
+> | `1/3` survives `to_json_str` → `from_json_str` **bit-exactly** | YES |
+> | `1e-9` survives (does not flush to `0`) | YES |
+> | emitted text re-parses as a JSON object | YES |
+> | emitted `cpu_cores` | `0.3333333333333333` (17 sig digits, shortest form) |
+>
+> The `Status: OPEN — samay M4 blocked` line below is the original filing and is
+> **no longer true**; it sat stale from v0.5.0 through v1.0.4. Body kept verbatim
+> as the record of what was filed.
+
+---
+
 # f64 JSON roundtrip is lossy — M4 blocker (upstream: cyrius)
 
 **Status:** OPEN — filed upstream, samay M4 blocked on the fix.

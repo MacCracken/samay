@@ -5,7 +5,10 @@ accelerator-conscious** task placement. Cyrius port of the original Rust library
 
 - **Language**: Cyrius (toolchain 6.5.36) · **License**: GPL-3.0-only
 - **Consumers**: daimon (task scheduling), kavach (sandboxed execution)
-- **Status**: **v1.0.4** — Rust→Cyrius port complete and P-1 and concurrency audited: real cron (Vixie DOM/DOW), ai-hwaccel placement, JSON snapshot/restore, deterministic scheduling, fail-closed restore, conserved node capacity, both downstream consumers (kavach, daimon) integrated
+- **Status**: **v1.0.4** — port complete, P-1 and concurrency audited. Real cron
+  (Vixie DOM/DOW), ai-hwaccel placement, JSON snapshot/restore, deterministic
+  scheduling, fail-closed restore, conserved node capacity. Both downstream
+  consumers (kavach 3.8.0, daimon 2.0.0) integrated.
 
 ## What it does
 
@@ -46,28 +49,42 @@ modules = ["dist/samay.cyr"]
 Then call the API — e.g. register an accelerator node, schedule a GPU job, and a
 weekday cron with catch-up:
 
+> Every string argument is a `Str`, not a bare cstring — wrap literals in
+> `str_from(...)` ([ADR-0003](docs/adr/0003-str-string-representation.md)).
+> Passing a literal directly compiles and then segfaults, because `str_data`
+> reads it as a ptr+len header.
+
 ```
 var s = task_scheduler_new();
 task_scheduler_register_node(s,
-    node_capacity_add_accel(node_capacity_new("tpu-1", f64_from(8), 16384, 102400, 0),
-                            profile_tpu(0, 8, TPU_V5P)));
+  node_capacity_add_accel(
+    node_capacity_new(str_from("tpu-1"), f64_from(8), 16384, 102400, 0),
+    profile_tpu(0, 8, TPU_V5P)));
 
-task_scheduler_submit_task(s, scheduled_task_new("job", "desc", "agent", 7,
-    resource_req_new(f64_from(2), 4096, REQ_GPU, 0, 0, 1024)));
+# 4 TPU chips: this places on tpu-1. Ask for REQ_GPU instead and it is
+# deliberately NOT placed -- an accelerator task never lands on a node with no
+# matching device (ADR-0002), and the attempt is logged.
+var task_id = result_unwrap(task_scheduler_submit_task(s,
+  scheduled_task_new(str_from("job"), str_from("desc"), str_from("agent"), 7,
+    resource_req_new(f64_from(2), 4096, REQ_TPU, 4, 0, 1024))));
 var decisions = task_scheduler_schedule_pending(s);
 
-# Finish a task and hand its capacity back to the node. Do NOT drive a task
-# terminal with scheduled_task_transition alone and expect the node to
-# recover immediately -- schedule_pending reconciles it, but this is the
-# intended path (ADR-0007).
+# Finish a task and hand its capacity back to the node. Driving a task terminal
+# with scheduled_task_transition alone does NOT release immediately -- the next
+# schedule_pending reconciles it -- but this is the intended path (ADR-0007).
+scheduled_task_transition(task_scheduler_get_task(s, task_id), TASK_RUNNING);
 task_scheduler_complete_task(s, task_id, TASK_COMPLETED);
 
 # recurring: 03:30 on weekdays, catching up anything missed after downtime
 var cron = cron_scheduler_new();
-var tmpl = cron_task_template_new("backup", "nightly", "agent", 5, resource_req_default());
-cron_scheduler_add(cron, "nightly", "30 3 * * 1-5", tmpl, 1, CRON_CATCHUP);
+var tmpl = cron_task_template_new(str_from("backup"), str_from("nightly"),
+  str_from("agent"), 5, resource_req_default());
+cron_scheduler_add(cron, str_from("nightly"), str_from("30 3 * * 1-5"), tmpl, 1, CRON_CATCHUP);
 var due = cron_scheduler_check_due(cron);
 ```
+
+The snippet above is compiled and run as written before each release — it
+yields `decisions=1`.
 
 See `src/main.cyr` for a worked demo and `tests/samay.tcyr` for the full API in use.
 

@@ -19,7 +19,11 @@ outside; both constructors call it. Verified safe by measurement: the allocator 
 overlapping blocks in 80,000), `samay_uuid_v4` (0 duplicates in 200,000), and v1.0.3's
 reconciliation. 416 assertions. Toolchain 6.5.36, ai-hwaccel 2.3.19, bayan-json 1.5.2.
 Both consumers (kavach 3.8.0, daimon 2.0.0) integrated and unaffected — neither is
-multi-threaded. `NodeCapacity` holds real
+multi-threaded. `NodeCapacity` holds real ai-hwaccel accelerator profiles; `can_fit`
+delegates to `requirement_satisfied()`
+([ADR-0002](../adr/0002-ai-hwaccel-profile-placement.md)). Built on M2 cron correctness
+(0.3.0) and the 0.2.0 Rust→Cyrius parity port (Rust reference frozen at `rust-old/`).
+
 ## Toolchain
 
 - **Cyrius pin**: `6.5.36` (in `cyrius.cyml [package].cyrius`)
@@ -29,9 +33,12 @@ multi-threaded. `NodeCapacity` holds real
 - `src/{uuid,types,scheduler,cronexpr,cron,training,json}.cyr` + `src/lib.cyr`
   aggregation header + `src/main.cyr` demo. The seven `[lib].modules` bundle to
   2,331 lines in `dist/samay.cyr` (as `cyrius distlib` reports it); `json.cyr` is the largest module.
-- **Strings are `Str` (ptr+len), not cstr** as of the unreleased M4 groundwork
+- **Strings are `Str` (ptr+len), not cstr** since **v0.5.0**
   ([ADR-0003](../adr/0003-str-string-representation.md)) — required because
-  `#derive(Serialize)` core dumps on a cstr in a `Str`-typed field.
+  `#derive(Serialize)` core dumps on a cstr in a `Str`-typed field. Passing a
+  bare literal where a `Str` is expected compiles and then segfaults, which is
+  how the benchmark suite sat dead from v0.5.0 to v1.0.1 and how the README's
+  own example was broken until v1.0.4. Wrap literals in `str_from(...)`.
 - Bundle: `dist/samay.cyr` (regenerate with `cyrius distlib` after any src change).
 - Rust reference: 1479 lines at `rust-old/` (frozen, do not edit).
 

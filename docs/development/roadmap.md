@@ -1,105 +1,122 @@
 # samay — Roadmap
 
-> Milestone plan through v1.0. State lives in [`state.md`](state.md);
-> this file is the sequencing — what ships, in what order, against
-> what dependency gates.
+> **Last refreshed**: 2026-08-30 (v1.0.4)
+>
+> **Forward-looking only.** Nothing shipped belongs here — per-release detail
+> lives in [`../../CHANGELOG.md`](../../CHANGELOG.md) (complete from 0.1.0), the
+> decisions in [`../adr/`](../adr/), and live state in [`state.md`](state.md).
+> The v1.0 criteria checklist and the M0–M5 milestone narrative were removed at
+> this refresh: every item was `[x]`, and a roadmap that is mostly a trophy case
+> stops being read.
 
-## v1.0 criteria
+> **Current**: **v1.0.4**, cyrius pin **6.5.36**, deps ai-hwaccel **2.3.19** +
+> bayan-json **1.5.2**. Gates green: **416 assertions**, **5/5 benchmarks**,
+> lint 0-warn / 0 untracked deferrals, fmt clean, `dist/` in sync (2,331 lines),
+> 0 symbol collisions against the vendored deps. `src/` is 9 modules / 2,404
+> lines against the frozen 1,479-line Rust oracle.
+>
+> v1.0 shipped at 1.0.0 (2026-07-21). The 1.0.2–1.0.4 arc was dependency
+> currency, a P-1 audit sweep, and a concurrency audit — recorded in the
+> CHANGELOG and in ADRs [0006](../adr/0006-cron-expression-model.md),
+> [0007](../adr/0007-reservation-lifecycle.md) and
+> [0008](../adr/0008-threading-contract.md), not here.
 
-- [x] Rust → Cyrius surface parity verified against `rust-old/` (v0.2.0)
-- [x] Test coverage mirrors the Rust suite + feature tests (296/296 assertions)
-- [x] Benchmarks captured (`docs/benchmarks.md`)
-- [x] Real cron-expression parsing + parse-time validation (v0.3.0)
-- [x] Missed-schedule policy (catch-up vs skip), explicit + logged (v0.3.0)
-- [x] Resource-aware placement wired through ai-hwaccel `requirement_satisfied()`/profiles (v0.4.0)
-- [x] JSON `Serialize` + `Deserialize` with roundtrip tests for every public type (leaf types via `#derive(Serialize)`; container types via bayan `json_v` in `src/json.cyr`; 6.4.69 Grisu2 f64 is bit-exact)
-- [x] Determinism guarantees (same schedule + same time → same decisions), tested — explicit tie-breaks on unique keys ([ADR-0004](../adr/0004-deterministic-tie-breaks.md))
-- [x] At least one downstream consumer green against `dist/samay.cyr` — **kavach 3.8.0**
-  sizes its sandboxes from a samay `ResourceReq` (`src/samay_bridge.cyr`), 436 assertions
-  green. (daimon deferred: samay is the extraction of daimon's own scheduler — 3 symbol
-  collisions — so its integration is a breaking major migration, not a minor.)
-- [x] CHANGELOG complete from v0.2.0 onward (every release 0.2.0 → 0.7.0 documented)
-- [x] Security audit pass ([`docs/audit/2026-07-21-audit.md`](../audit/2026-07-21-audit.md)) — 10 findings, crash-class remediated ([ADR-0005](../adr/0005-restore-input-validation.md))
+## Open — tracked follow-ups
 
-## Milestones
+Carried from [`../audit/2026-07-21-audit.md`](../audit/2026-07-21-audit.md) and
+the 2026-08-29 P-1 sweep. Referenced by ID from the source comments that defer to
+them, so `cyrius lint` can see each deferral is tracked — do not renumber.
 
-### M0 — Port scaffold (v0.1.0 tree) — ✅ 2026-07-18
-`cyrius port` scaffold; Rust moved to `rust-old/`; doc tree established.
-
-### M1 — Surface parity (v0.2.0) — ✅ 2026-07-18
-All Rust types/functions ported across `src/*.cyr`; 108/108 assertions;
-`dist/samay.cyr` bundle; lint/fmt clean; demo binary runs.
-
-### M2 — Cron correctness (v0.3.0) — ✅ 2026-07-18
-Real 5-field cron expressions (`src/cronexpr.cyr`) with parse-time validation,
-Vixie DOM/DOW rule, names + `@shortcuts`; missed-schedule catch-up/skip policy,
-always logged. Hardened via a 4-lens adversarial review (7 findings fixed).
-Follow-up perf item: alloc-free `cron_expr_matches` (currently ~298 ns/call via
-`epoch_to_date`).
-
-### M3 — Resource-aware placement v2 (v0.4.0) — ✅ 2026-07-18
-`NodeCapacity` holds real ai-hwaccel accelerator profiles; `can_fit` places via
-`find_satisfying_profile()`/`requirement_satisfied()` — an accelerator task never
-fits a node without a matching profile (fixes the Rust port's `_ => true` stub;
-[ADR-0002](../adr/0002-ai-hwaccel-profile-placement.md)). Focused adversarial
-review: 0 findings. Utilization/scoring refinements deferred.
-
-### M4 — Serialization + persistence (v0.5.0) — ✅ 2026-07-21
-Full JSON `Serialize`/`Deserialize` for every public type with roundtrip tests
-(closes the `Deserialize` gap deferred in ADR-0001). Leaf types (all-scalar/all-`Str`)
-via `#derive(Serialize)`; container types (pointer/vec/map fields) via bayan's `json_v`
-value-tree API in `src/json.cyr`. `TaskScheduler_to_json_str`/`_from_json_str` is the
-scheduler+cron snapshot/restore: `snapshot → restore → re-serialize` is byte-identical,
-maps serialize as key-sorted arrays (deterministic), and a restored node still satisfies
-the same ai-hwaccel placement (2.3.15 lossless profile codec). Hardened by a 6-lens
-adversarial verification pass (escaping, determinism-under-reorder, empty collections,
-malformed input, behavior parity, boundaries): 0 codec bugs, 5 regression guards added.
-Bit-exact f64 depends on toolchain ≥6.4.69 (Grisu2 JSON codec).
-
-### M5 — Determinism + hardening (v0.6.0 → v1.0) — in progress
-- [x] Deterministic scheduling order (v0.6.0) — stable tie-breaks on unique keys, independent
-  of hashmap iteration ([ADR-0004](../adr/0004-deterministic-tie-breaks.md)); tested by
-  opposite-insertion-order equality.
-- [x] Security audit (v0.7.0) — [`docs/audit/2026-07-21-audit.md`](../audit/2026-07-21-audit.md):
-  multi-lens review + adversarial PoC + live CVE/0day research; 10 findings (all
-  snapshot-restore DoS, no Critical/High), crash-class remediated with fail-closed input
-  validation ([ADR-0005](../adr/0005-restore-input-validation.md)).
-- [x] Fuzz harnesses — insertion-order permutation fuzz (M5 determinism) + adversarial
-  malformed-snapshot probing (security audit); in-suite regression guards.
-- [x] Consumer integration — **kavach 3.8.0** green against `dist/samay.cyr` (sandbox
-  sizing from `ResourceReq`). daimon deferred to a dedicated major migration (samay is
-  its scheduler; symbol collisions).
-- [x] Consumer integration — **daimon 2.0.0** followed in its own major migration,
-  consuming samay as the single scheduler source of truth.
-
-## Post-1.0 tracked follow-ups
-
-Carried from [`docs/audit/2026-07-21-audit.md`](../audit/2026-07-21-audit.md) and the
-2026-08-29 P-1 sweep. Referenced by ID from the source comments that defer to them, so
-`cyrius lint` can see the deferral is tracked.
-
-- [ ] **F4 — upstream stdlib hash seeding.** `lib/hashmap.cyr` uses an unseeded FNV-1a;
-  samay cannot fix a vendored module. v1.0.3 removed the one path by which bucket order
-  could still leak into a documented-deterministic decision (the NaN-utilization
-  fall-through in `_best_fit_node`), so this is no longer reachable from samay's own
-  guarantees.
-- [ ] **F5 — stable O(n log n) sort + terminal-task pruning.** Four insertion sorts remain
-  (`src/scheduler.cyr`, `src/cron.cyr`, `src/json.cyr`); measured ~85× slower than a merge
-  sort at n=8000. Consolidate the four into one shared `samay_sort_by_key` first, then
-  replace the algorithm once. Deliberately held out of v1.0.3: ADR-0004's determinism
-  guarantee rides on those comparators, and that release was already cron- and JSON-heavy.
-  Terminal tasks also accumulate in `TaskScheduler.tasks` with no removal API.
+- [ ] **F5 — stable O(n log n) sort + terminal-task pruning.** Four insertion
+  sorts remain (`src/scheduler.cyr` ×2, `src/cron.cyr`, `src/json.cyr`); measured
+  ~85× slower than a merge sort at n=8000. Consolidate the four into one shared
+  `samay_sort_by_key` **first**, then replace the algorithm once — two of them are
+  already exact `_sort_by_key` specialisations. Held out of 1.0.3 deliberately:
+  ADR-0004's determinism guarantee rides on those comparators and that release
+  was already cron- and JSON-heavy. Terminal tasks also accumulate in
+  `TaskScheduler.tasks` with no removal API, so every subsequent sort and
+  snapshot grows without bound. *Trigger*: a consumer with a long-lived scheduler
+  or >1k concurrent tasks. *Medium.*
 - [ ] **F8/F9 — cron aggregate-work budget.** Per-entry catch-up is bounded
-  (`CRON_SCAN_WINDOW_SECS`, `CRON_MAX_COUNT`, `CRON_CATCHUP_CAP`) but the aggregate across
-  many entries in one `check_due_at` is not. v1.0.3's alloc-free matcher prefilter cut the
-  cost ~12× and removed the heap growth entirely, so this is a policy question now rather
-  than an availability one: any budget needs an exhaustion rule, and every candidate
-  collides with "missed schedules are never silently skipped". Lands in `_cron_check_entry`.
-- [ ] **Wire-side write optimisation.** `_rr_node`/`_ce_node` still serialize-then-reparse
-  through the `#derive` codec (~68% of `scheduled_task_to_jsonv`). Held back so v1.0.3's
-  emitted bytes are provably unchanged; needs a byte-equality corpus before landing.
+  (`CRON_SCAN_WINDOW_SECS`, `CRON_MAX_COUNT`, `CRON_CATCHUP_CAP`); the aggregate
+  across many entries in one `check_due_at` is not. 1.0.3's alloc-free prefilter
+  cut the cost ~12× and removed the heap growth entirely, so this is now a
+  **policy** question rather than an availability one: any budget needs an
+  exhaustion rule, and every candidate collides with "missed schedules are never
+  silently skipped". Lands in `_cron_check_entry`, which 1.0.3 extracted for
+  exactly this. *Trigger*: a consumer running many cron entries across a long
+  outage. *Medium.*
+- [ ] **Wire-side write optimisation.** `_rr_node` / `_ce_node` still
+  serialize-then-reparse through the `#derive` codec (~68% of
+  `scheduled_task_to_jsonv`; measured 3.14 µs → 695 ns for a direct builder).
+  The read side moved to hand-written codecs in 1.0.3; the write side was held
+  back so that release's emitted bytes were provably unchanged. *Trigger*: needs
+  a byte-equality corpus over ≥500 `ResourceReq` values before landing — it is
+  the one change that can silently alter the wire. *Medium.*
+- [ ] **F4 — upstream stdlib hash seeding.** `lib/hashmap.cyr` uses an unseeded
+  FNV-1a. samay cannot fix a vendored module, and 1.0.3 removed the one path by
+  which bucket order could still reach a documented-deterministic decision (the
+  NaN-utilization fall-through in `_best_fit_node`). Retained only so the
+  deferral in `src/json.cyr` stays tracked. *Trigger*: upstream, not ours.
 
-## Out of scope (for v1.0)
+## Open — from the 1.0.4 concurrency audit
+
+See [ADR-0008](../adr/0008-threading-contract.md) for the measurements.
+
+- [ ] **Upstream: `lib/chrono.cyr` publishes `_chrono_mdays` before filling it.**
+  A racing thread reads an all-zero month table and `epoch_to_date` returns month
+  13 — a silently wrong date, reachable from `cron_expr_matches`. samay closes the
+  window from outside with `samay_init()`, but the fix belongs upstream. **Filed**
+  2026-08-30 at `cyrius/docs/development/proposals/2026-08-30-lazy-init-publish-before-fill.md`.
+  Drop `samay_init`'s chrono pre-warm only once that ships *and* the pin moves
+  past it. *Trigger*: upstream release.
+- [ ] **Opt-in concurrent-entry detector.** A debug mode that notices two threads
+  inside one scheduler and aborts or warns, so a consumer catches a contract
+  violation immediately instead of via corrupted capacity. Considered during the
+  audit and deliberately not built — no consumer is multi-threaded today.
+  *Trigger*: any consumer adopting a threaded shape. *Medium.*
+
+## Deferred — no trigger has fired
+
+- [ ] **Split `node_preference` into user-preference and current-assignment.**
+  `schedule_pending` overwrites the caller's requested node with the chosen one,
+  which destroys the accurate "preferred node" decision reason. ADR-0007 balanced
+  the accounting with a separate `reserved_on` instead; this is the cleaner model
+  but changes the meaning of a shipped field. Achievable without a wire break if
+  the new field is nullable and defaulted. *Trigger*: a minor release, with its
+  own ADR. *Medium.*
+- [ ] **Benchmark the accelerator placement path.** Every `can_fit` /
+  `_best_fit_node` number on record used `REQ_NONE`, which short-circuits before
+  touching profiles — so the figures understate exactly the workload samay's
+  domain principles are written about. ai-hwaccel's `find_satisfying_profile` has
+  never been measured inside the placement loop. *Trigger*: before any placement
+  perf claim. *Low.*
+- [ ] **Structure-aware fuzzing over `task_scheduler_from_json_str`.** All restore
+  probing to date has been hand-crafted against specific hypotheses. 1.0.3's
+  fail-closed validation is exactly what a fuzzer should be pointed at.
+  *Trigger*: any new restore-path finding, or a consumer accepting snapshots
+  across a trust boundary. *Medium.*
+- [ ] **Non-x86_64 verification.** No aarch64 or agnos measurements exist. The
+  NaN/Inf handling added in 1.0.3 is the part most likely to differ.
+  *Trigger*: an aarch64 or agnos consumer. *Medium.*
+- [ ] **Audit test *correctness*, not just coverage.** The P-1 sweep found one
+  test asserting a defect as intended behaviour, with the wrong rule restated in
+  its own comment; it had passed for four releases. Nothing establishes it was the
+  only one. *Trigger*: fold into the next audit pass rather than scheduling
+  separately. *Low.*
+
+> **Trigger discipline.** Every item above names an event that actually occurs.
+> Self-referential triggers ("at the next rewrite") never arrive. When a trigger
+> fires, check first whether the item has already shipped — that check is what
+> catches a completed item sitting on a deferred list for releases.
+
+## Out of scope
 
 - Distributed consensus / multi-scheduler coordination (single-scheduler only).
-- Live task execution (samay decides placement; kavach executes).
+- Live task execution — samay decides placement; kavach executes.
+- Timezone / DST support. Everything is UTC; adding a timezone changes the
+  on-the-wire JSON and the whole cron model
+  ([ADR-0006](../adr/0006-cron-expression-model.md)).
+- Making samay thread-safe. It is single-threaded **by contract**, and an
+  internal lock would be false safety while the query API returns interior
+  pointers ([ADR-0008](../adr/0008-threading-contract.md)).
