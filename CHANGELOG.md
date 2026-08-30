@@ -4,6 +4,44 @@ All notable changes to Samay are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.0.2] — 2026-08-29
+
+**Maintenance: toolchain 6.5.36, ai-hwaccel 2.3.19, bayan on the focused JSON sublib.**
+No behavior change to the scheduler; 296/296 assertions still green.
+
+### Changed
+- **Toolchain** pinned to Cyrius **6.5.36** (was 6.4.69). CI reads the pin from
+  `cyrius.cyml`, so no workflow edit was needed.
+- **ai-hwaccel** 2.3.15 → **2.3.19**.
+- **bayan** now consumed as a git dependency at **1.5.2**, taking `dist/bayan-json.cyr`
+  — the focused JSON sublib — instead of the vendored 641 KB stdlib monolith
+  (`lib/` drops from 641 KB to 100 KB for this dependency). bayan graduated out of
+  the stdlib snapshot in 1.5.2 and ai-hwaccel 2.3.19 pulls the sublib transitively;
+  keeping the monolith alongside it vendored **both** files and produced 27
+  duplicate JSON definitions resolved by last-def-wins — precisely the silent-bug
+  class samay's own symbol-hygiene principle forbids.
+- **`src/json.cyr` now calls the fully-qualified `bayan_json_v_*` spelling.** The
+  short `json_v_*` aliases live only in bayan's monolith, not the sublib. The
+  qualified names exist in *both* packagings, so this is strictly more portable:
+  consumers of `dist/samay.cyr` may vendor either bayan module. No signature or
+  behavior change — the aliases were one-line forwarders.
+
+### Fixed
+- **`json_v_parse_str` no longer exists in bayan** — renamed upstream to
+  `json_v_parse_buf` (`_str` is a Cyrius dispatch suffix and collided with
+  `X_str` routing). samay's `_parse` helper called it, so the build emitted
+  `undefined function 'json_v_parse_str'`. Now calls `bayan_json_v_parse_buf`,
+  which is the same function body under the new name.
+- **Benchmark suite restored — it had been segfaulting since v0.5.0.**
+  `tests/samay.bcyr` passed bare cstring literals to APIs that became `Str`-taking
+  in the ADR-0003 migration; `cron_expr_parse` then ran `str_data` over a cstring
+  and died (SIGSEGV, exit 139) before reporting the last benchmark. Literals are
+  now wrapped in `str_from`, hoisted outside the timed loops so the 16-byte header
+  allocation is not folded into the reported figures. All 5 benchmarks report
+  again; `docs/benchmarks.md` refreshed with the first numbers since v0.4.0.
+- Reformatted `src/main.cyr` and `tests/samay.tcyr` for the 6.5.36 formatter's
+  canonical continuation indent (whitespace only).
+
 ## [1.0.1] — 2026-07-21
 
 **Symbol-hygiene fix — `uuid_v4` → `samay_uuid_v4`.** samay's `uuid_v4` collided with

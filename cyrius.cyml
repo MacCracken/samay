@@ -5,7 +5,7 @@ description = "Samay — task scheduler for AGNOS (cron, resource-aware scheduli
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/samay"
 language = "cyrius"
-cyrius = "6.4.69"
+cyrius = "6.5.36"
 
 [build]
 entry = "src/main.cyr"
@@ -36,9 +36,10 @@ modules = [
 # needs (chrono/random/result/hashmap/bayan/math/…) and what the ai-hwaccel
 # dist bundle forward-references (sakshi/thread/process/fs/… — its own
 # [deps].stdlib).
-#   bayan — JSON/YAML/TOML/cyml/CSV/base64/u128. JSON lives here; there is
-#           no module named "json".
 #   math  — f64_parse, needed by #derive(Serialize)'s f64 deserialize path.
+# NOTE: bayan is NOT in this list. As of bayan 1.5.2 it ships focused
+# sublibs, and samay consumes `dist/bayan-json.cyr` via [deps.bayan]
+# below — see that block for why.
 [deps]
 stdlib = [
     "syscalls",
@@ -53,7 +54,6 @@ stdlib = [
     "chrono",
     "random",
     "result",
-    "bayan",
     "math",
     "tagged",
     "fnptr",
@@ -67,10 +67,24 @@ stdlib = [
     "bench",
 ]
 
+# JSON value-tree API (`bayan_json_v_*`) behind src/json.cyr, plus
+# `bayan_f64_to_json` for lib/fmt.cyr. bayan 1.5.2 split the 641 KB monolith
+# into focused sublibs; samay uses only the JSON surface, so it takes
+# `dist/bayan-json.cyr` — the same module ai-hwaccel pulls. Taking the
+# monolith here instead would vendor BOTH files and collide on 27 JSON
+# symbols under last-def-wins (the hazard samay's own symbol-hygiene
+# principle forbids). The sublib omits the short `json_v_*` aliases, so
+# samay calls the fully-qualified `bayan_json_v_*` spelling, which resolves
+# under either bayan packaging.
+[deps.bayan]
+git = "https://github.com/MacCracken/bayan.git"
+tag = "1.5.2"
+modules = ["dist/bayan-json.cyr"]
+
 # AcceleratorRequirement (REQ_* enum) + resource-aware placement API.
 # The Rust crate did `use ai_hwaccel::AcceleratorRequirement;` — the Cyrius
 # port consumes the same type from ai-hwaccel's committed dist bundle.
 [deps.ai-hwaccel]
 git = "https://github.com/MacCracken/ai-hwaccel.git"
-tag = "2.3.15"
+tag = "2.3.19"
 modules = ["dist/ai-hwaccel.cyr"]

@@ -19,11 +19,11 @@ fn make_node(id, cpu, mem) {
 }
 fn make_task(name, priority) {
     return scheduled_task_new(str_from(name), str_from("test task"),
-        str_from("agent-1"), priority, make_req(f64_from(1), 256));
+      str_from("agent-1"), priority, make_req(f64_from(1), 256));
 }
 fn make_template() {
     return cron_task_template_new(str_from("cron-job"), str_from("recurring"),
-        str_from("agent-1"), 5, make_req(f64_from(1), 128));
+      str_from("agent-1"), 5, make_req(f64_from(1), 128));
 }
 fn at_ns(y, mo, d, h, mi) {
     return _chrono_ymd_to_epoch_secs(y, mo, d, h, mi, 0) * 1000000000;
@@ -666,7 +666,7 @@ fn test_json_resource_req_default() {
 fn test_json_scheduling_decision() {
     test_group("json_sched_decision");
     var d = scheduling_decision_new(str_from("task-abc"), str_from("node-1"),
-        str_from("best-fit selection"), f64_div(f64_from(2), f64_from(3)));
+      str_from("best-fit selection"), f64_div(f64_from(2), f64_from(3)));
     var sb = str_builder_new();
     SchedulingDecision_to_json(d, sb);
     var d2 = SchedulingDecision_from_json(bayan_json_parse(str_builder_build(sb)));
@@ -681,7 +681,7 @@ fn test_json_scheduling_decision() {
 fn test_json_preemption_action() {
     test_group("json_preemption");
     var a = preemption_action_new(str_from("victim"), str_from("aggressor"),
-        str_from("priority 10 preempts priority 2 task"));
+      str_from("priority 10 preempts priority 2 task"));
     var sb = str_builder_new();
     PreemptionAction_to_json(a, sb);
     var a2 = PreemptionAction_from_json(bayan_json_parse(str_builder_build(sb)));
@@ -757,7 +757,7 @@ fn test_json_training_template() {
     test_group("json_training_tmpl");
     # target_node set
     var j = training_job_template_new(str_from("meta/llama"), TM_QLORA, str_from("/d.jsonl"),
-        str_from("gpu-7"), 3600, 300);
+      str_from("gpu-7"), 3600, 300);
     var j2 = training_job_template_from_json_str(training_job_template_to_json_str(j));
     assert_eq(str_eq(TrainingJobTemplate_model_id(j2), str_from("meta/llama")), 1, "tjt model");
     assert_eq(TrainingJobTemplate_method(j2), TM_QLORA, "tjt method");
@@ -821,8 +821,8 @@ fn test_json_scheduled_task_null_fields() {
 fn test_json_node_capacity() {
     test_group("json_node_capacity");
     var node = node_capacity_add_accel(
-        node_capacity_new(str_from("tpu-node"), f64_from(8), 16384, 102400, 0),
-        profile_tpu(0, 8, TPU_V5P));
+      node_capacity_new(str_from("tpu-node"), f64_from(8), 16384, 102400, 0),
+      profile_tpu(0, 8, TPU_V5P));
     node_capacity_reserve(node, resource_req_new(f64_from(2), 2048, REQ_NONE, 0, 0, 1024));
     var n2 = node_capacity_from_json_str(node_capacity_to_json_str(node));
     assert_eq(str_eq(NodeCapacity_node_id(n2), str_from("tpu-node")), 1, "nc node_id");
@@ -896,7 +896,7 @@ fn test_json_task_scheduler_snapshot() {
     assert_eq(str_eq(task_scheduler_to_json_str(s2), snap1), 1, "snapshot round-trip identical");
     # stats over the restored scheduler match the original
     assert_eq(SchedulerStats_total_tasks(task_scheduler_stats(s2)),
-        SchedulerStats_total_tasks(task_scheduler_stats(s)), "restored stats total match");
+      SchedulerStats_total_tasks(task_scheduler_stats(s)), "restored stats total match");
     return 0;
 }
 
@@ -925,7 +925,7 @@ fn test_json_string_fidelity() {
     var node = node_capacity_new(nasty, f64_from(1), 128, 256, 0);
     var njs = node_capacity_to_json_str(node);
     # emitted JSON must be valid (re-parseable as an object)
-    assert_eq(json_v_is_obj(json_v_parse_str(str_data(njs), str_len(njs))), 1, "node json valid");
+    assert_eq(bayan_json_v_is_obj(bayan_json_v_parse_buf(str_data(njs), str_len(njs))), 1, "node json valid");
     var n2 = node_capacity_from_json_str(njs);
     assert_eq(str_eq(NodeCapacity_node_id(n2), nasty), 1, "node_id byte-identical");
     var t = scheduled_task_new(str_from("t"), str_from("d"), str_from("a"), 5, resource_req_default());
@@ -955,7 +955,7 @@ fn test_json_determinism_reorder() {
     task_scheduler_submit_task(b, _mk_task_id("zebra", 5));
     task_scheduler_submit_task(b, _mk_task_id("alpha", 5));
     assert_eq(str_eq(task_scheduler_to_json_str(a), task_scheduler_to_json_str(b)), 1,
-        "same tasks, different insert order -> identical JSON");
+      "same tasks, different insert order -> identical JSON");
     return 0;
 }
 
@@ -1009,7 +1009,7 @@ fn test_json_parity_boundaries() {
     assert_eq(ScheduledTask_scheduled_at(t2), 9223372036854775807, "i64-max timestamp exact");
     # chip-count-exact placement boundary through a restored node
     var node = node_capacity_add_accel(
-        node_capacity_new(str_from("tpu"), f64_from(8), 4096, 8192, 0), profile_tpu(0, 8, TPU_V4));
+      node_capacity_new(str_from("tpu"), f64_from(8), 4096, 8192, 0), profile_tpu(0, 8, TPU_V4));
     var node2 = node_capacity_from_json_str(node_capacity_to_json_str(node));
     assert_eq(node_capacity_can_fit(node2, resource_req_new(f64_from(1), 1, REQ_TPU, 8, 0, 0)), 1, "restored fits TPU(8)");
     assert_eq(node_capacity_can_fit(node2, resource_req_new(f64_from(1), 1, REQ_TPU, 9, 0, 0)), 0, "restored rejects TPU(9)");
@@ -1114,7 +1114,7 @@ fn test_det_schedule_colliding() {
     var ra = map_values(TaskScheduler_tasks(a));
     var rb = map_values(TaskScheduler_tasks(b));
     assert_eq(str_eq(ScheduledTask_task_id(vec_get(ra, 0)), ScheduledTask_task_id(vec_get(rb, 0))), 0,
-        "raw map order differs (test is non-vacuous)");
+      "raw map order differs (test is non-vacuous)");
     # despite that, scheduling decisions are byte-identical
     var da = task_scheduler_schedule_pending(a);
     var db = task_scheduler_schedule_pending(b);
@@ -1201,7 +1201,7 @@ fn test_det_cron_list() {
 # A valid ScheduledTask snapshot, minus whichever required field the caller omits.
 fn _task_json_full() {
     var t = scheduled_task_new(str_from("t"), str_from("n"), str_from("a"), 5,
-        resource_req_new(f64_from(1), 256, REQ_NONE, 0, 0, 0));
+      resource_req_new(f64_from(1), 256, REQ_NONE, 0, 0, 0));
     return scheduled_task_to_json_str(t);
 }
 

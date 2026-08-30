@@ -7,7 +7,14 @@ fn main(): i64 {
     alloc_init();
 
     var req = resource_req_new(f64_from(2), 4096, REQ_NONE, 0, 0, 0);
-    var node = node_capacity_new("n1", f64_from(8), 8192, 10240, 0);
+    var node = node_capacity_new(str_from("n1"), f64_from(8), 8192, 10240, 0);
+
+    # Str args are built once, outside every timed loop: str_from allocates a
+    # 16-byte header, so building them inline would fold that cost into the
+    # figure each bench claims to report.
+    var t_name = str_from("t");
+    var t_desc = str_from("d");
+    var t_agent = str_from("a");
 
     # can_fit: pure, no allocation — the inner loop of best_fit_node.
     var b1 = bench_new("node_can_fit");
@@ -37,12 +44,12 @@ fn main(): i64 {
     var b4 = bench_new("scheduled_task_new");
     bench_batch_start(b4);
     i = 0;
-    while (i < 50000) { scheduled_task_new("t", "d", "a", 5, req); i = i + 1; }
+    while (i < 50000) { scheduled_task_new(t_name, t_desc, t_agent, 5, req); i = i + 1; }
     bench_batch_stop(b4, 50000);
     bench_report(b4);
 
     # cron_expr_matches: the check_due inner loop (epoch_to_date + bitmask tests).
-    var expr = result_unwrap(cron_expr_parse("*/15 3,15 * * 1-5"));
+    var expr = result_unwrap(cron_expr_parse(str_from("*/15 3,15 * * 1-5")));
     var ct = _chrono_ymd_to_epoch_secs(2026, 7, 18, 3, 15, 0);
     var b5 = bench_new("cron_expr_matches");
     bench_batch_start(b5);
