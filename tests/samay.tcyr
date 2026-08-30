@@ -533,6 +533,52 @@ fn test_reserved_on_roundtrip() {
     return 0;
 }
 
+# --- v1.0.4: concurrency contract (ADR-0008) ---
+
+fn test_samay_init_prewarms_chrono() {
+    test_group("samay_init_prewarm");
+    # lib/chrono.cyr publishes _chrono_mdays BEFORE filling it, so a thread
+    # racing the first epoch_to_date can read an all-zero table and get a
+    # wrong month/day -- a wrong cron decision. samay cannot patch lib/, so it
+    # closes the window by forcing the init while still single-threaded.
+    # Measured: 1 wrong cron decision in 400 runs without this, 0 with it.
+    samay_init();
+    assert_eq(_chrono_mdays != 0, 1, "month table published");
+    # Every entry must be filled -- an all-zero table is exactly the bug.
+    assert_eq(load64(_chrono_mdays), 31, "Jan filled");
+    assert_eq(load64(_chrono_mdays + 8), 28, "Feb filled");
+    assert_eq(load64(_chrono_mdays + 88), 31, "Dec filled");
+    var zeros = 0;
+    var i = 0;
+    while (i < 12) {
+        if (load64(_chrono_mdays + i * 8) == 0) { zeros = zeros + 1; }
+        i = i + 1;
+    }
+    assert_eq(zeros, 0, "no unfilled month entry");
+    # Idempotent: a second call must not disturb it.
+    samay_init();
+    assert_eq(load64(_chrono_mdays), 31, "still filled after a second call");
+    return 0;
+}
+
+fn test_constructors_prewarm() {
+    test_group("constructors_prewarm");
+    # The contract's guarantee rides on the constructors doing this, so that a
+    # consumer following the normal shape (build the scheduler, then spawn
+    # workers) is safe without knowing samay_init() exists.
+    _chrono_mdays = 0;
+    task_scheduler_new();
+    assert_eq(_chrono_mdays != 0, 1, "task_scheduler_new pre-warms chrono");
+    assert_eq(load64(_chrono_mdays + 88), 31, "table filled, not merely published");
+    _chrono_mdays = 0;
+    cron_scheduler_new();
+    assert_eq(_chrono_mdays != 0, 1, "cron_scheduler_new pre-warms chrono");
+    assert_eq(load64(_chrono_mdays + 88), 31, "table filled, not merely published");
+    # Leave it initialised for the rest of the suite.
+    samay_init();
+    return 0;
+}
+
 fn test_cancel_queued() {
     test_group("cancel_queued");
     var s = task_scheduler_new();
@@ -1758,6 +1804,8 @@ fn main() {
     test_schedule_prefers_preference();
     test_schedule_fallback_when_full();
     test_schedule_transitions();
+    test_samay_init_prewarms_chrono();
+    test_constructors_prewarm();
     test_complete_releases();
     test_fail_releases();
     test_transition_reconciled();

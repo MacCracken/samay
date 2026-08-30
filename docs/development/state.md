@@ -5,21 +5,21 @@
 
 ## Version
 
-**1.0.3** — P-1 audit/hardening sweep. Two correctness defects fixed that no test
-covered: node capacity was returned only on cancel, so an 8-core node was permanently
-retired after two ordinary completions ([ADR-0007](../adr/0007-reservation-lifecycle.md),
-a deliberate divergence — the Rust oracle has the same defect); and `*/N` in cron DOM/DOW
-was silently discarded, so `0 0 */2 * *` fired daily
-([ADR-0006](../adr/0006-cron-expression-model.md)). ADR-0005's "or the wrong type" half is
-now actually implemented — the nested-leaf `#derive` bridges could not fail, so every
-`req == 0` guard was dead code. `cron_expr_matches` is 12× faster and alloc-free on the
-miss path. 406 assertions (was 296); CI now gates fmt/lint/dist-sync/bench. Toolchain
-6.5.36, ai-hwaccel 2.3.19, bayan-json 1.5.2. Both downstream consumers (kavach 3.8.0,
-daimon 2.0.0) integrated; no migration needed for either. `NodeCapacity` holds real
-ai-hwaccel accelerator profiles; `can_fit` delegates to `requirement_satisfied()`
-([ADR-0002](../adr/0002-ai-hwaccel-profile-placement.md)). Built on M2 cron correctness
-(0.3.0) and the 0.2.0 Rust→Cyrius parity port (Rust reference frozen at `rust-old/`).
-
+**1.0.4** — concurrency audit; retires the risk v1.0.3 left explicitly open.
+**samay is not thread-safe, by contract** ([ADR-0008](../adr/0008-threading-contract.md)):
+one scheduler per thread, serialise externally. Deliberately no internal lock — the query
+functions return raw pointers into scheduler-owned structs, so a mutex would look safe,
+invite the assumption, and still corrupt. Measured under 8 threads sharing one scheduler:
+73% of node reservations lost (towards **over-admission**), and the tasks hashmap's size
+field left disagreeing with its contents. One race IS fixed, because it breaks callers who
+honour the contract: `lib/chrono.cyr` publishes its month table before filling it, so
+racing threads — even with separate schedulers — could evaluate cron against the wrong
+date (1/400 through samay's public API). New additive `samay_init()` closes it from
+outside; both constructors call it. Verified safe by measurement: the allocator (0
+overlapping blocks in 80,000), `samay_uuid_v4` (0 duplicates in 200,000), and v1.0.3's
+reconciliation. 416 assertions. Toolchain 6.5.36, ai-hwaccel 2.3.19, bayan-json 1.5.2.
+Both consumers (kavach 3.8.0, daimon 2.0.0) integrated and unaffected — neither is
+multi-threaded. `NodeCapacity` holds real
 ## Toolchain
 
 - **Cyrius pin**: `6.5.36` (in `cyrius.cyml [package].cyrius`)
@@ -28,7 +28,7 @@ ai-hwaccel accelerator profiles; `can_fit` delegates to `requirement_satisfied()
 
 - `src/{uuid,types,scheduler,cronexpr,cron,training,json}.cyr` + `src/lib.cyr`
   aggregation header + `src/main.cyr` demo. The seven `[lib].modules` bundle to
-  2,288 lines in `dist/samay.cyr` (as `cyrius distlib` reports it); `json.cyr` is the largest module.
+  2,331 lines in `dist/samay.cyr` (as `cyrius distlib` reports it); `json.cyr` is the largest module.
 - **Strings are `Str` (ptr+len), not cstr** as of the unreleased M4 groundwork
   ([ADR-0003](../adr/0003-str-string-representation.md)) — required because
   `#derive(Serialize)` core dumps on a cstr in a `Str`-typed field.
@@ -37,12 +37,14 @@ ai-hwaccel accelerator profiles; `can_fit` delegates to `requirement_satisfied()
 
 ## Tests
 
-- `tests/samay.tcyr` — **406/406 assertions passing** (`cyrius test`), up from 296 in
+- `tests/samay.tcyr` — **416/416 assertions passing** (`cyrius test`), up from 296 in
   v1.0.2. Includes the v1.0.3 additions: the capacity-conservation invariant (the
   assertion whose absence let ADR-0007's defect ship), a cron differential guard pinning
   the optimised matcher to an in-test reference implementation, back-compat snapshot
   restore, wrong-typed nested-leaf rejection, and the parser features that previously had
   **zero** coverage (every `@shortcut` expansion, month/day names, DOW `7`→Sunday).
+  v1.0.4 adds the `samay_init()` pre-warm guards (that the chrono month table is
+  *filled*, not merely published, after each constructor).
 - `tests/samay.bcyr` — 5 benchmarks, all green (see `docs/benchmarks.md`). Was dead
   (SIGSEGV) from v0.5.0 to v1.0.1: the `Str` migration left it passing bare cstring
   literals into `Str`-taking APIs. Now run by CI so it cannot rot silently again.
@@ -100,12 +102,15 @@ sweep. Open items are tracked under "Post-1.0 tracked follow-ups" in the roadmap
 - ⏭ **`node_preference` split** into user-preference vs current-assignment
   ([ADR-0007](../adr/0007-reservation-lifecycle.md) Consequences). Needs a minor release.
 
-**Not covered by any audit to date — treat as unretired risk:**
+**Concurrency — audited in v1.0.4, see [ADR-0008](../adr/0008-threading-contract.md).**
+Retired as an unknown; now a stated contract with measured backing. Open items from it:
+the `lib/chrono.cyr` publish-before-fill ordering is an **upstream ask** filed against
+cyrius (samay only closes the window from outside); `lib/sakshi.cyr`'s unsynchronised ring
+indices and span depth can interleave log output under concurrent use (observability
+only, and outside the contract); and an opt-in debug mode that *detects* concurrent entry
+was considered and not built — worth revisiting if any consumer adopts a threaded shape.
 
-- **Concurrency.** No lens has ever examined `TaskScheduler`/`CronScheduler` for thread
-  safety. `lib/alloc.cyr` no-ops its lock while single-threaded, so every heap and timing
-  figure on record is a single-threaded best case. If a consumer plans to call samay from
-  more than one thread, that is unknown territory, not a clean bill.
+**Not covered by any audit to date — treat as unretired risk:**
 - **The accelerator placement path.** Every `can_fit`/`_best_fit_node` measurement used
   `REQ_NONE`, which short-circuits before touching profiles. ai-hwaccel's
   `find_satisfying_profile` has never been benchmarked inside the placement loop — the

@@ -5,7 +5,7 @@ accelerator-conscious** task placement. Cyrius port of the original Rust library
 
 - **Language**: Cyrius (toolchain 6.5.36) · **License**: GPL-3.0-only
 - **Consumers**: daimon (task scheduling), kavach (sandboxed execution)
-- **Status**: **v1.0.3** — Rust→Cyrius port complete and P-1 audited: real cron (Vixie DOM/DOW), ai-hwaccel placement, JSON snapshot/restore, deterministic scheduling, fail-closed restore, conserved node capacity, both downstream consumers (kavach, daimon) integrated
+- **Status**: **v1.0.4** — Rust→Cyrius port complete and P-1 and concurrency audited: real cron (Vixie DOM/DOW), ai-hwaccel placement, JSON snapshot/restore, deterministic scheduling, fail-closed restore, conserved node capacity, both downstream consumers (kavach, daimon) integrated
 
 ## What it does
 
@@ -28,7 +28,7 @@ accelerator-conscious** task placement. Cyrius port of the original Rust library
 cyrius deps                          # resolve stdlib + ai-hwaccel into lib/
 cyrius build src/main.cyr build/samay
 ./build/samay                        # runnable demo
-cyrius test  tests/samay.tcyr        # 406/406 assertions
+cyrius test  tests/samay.tcyr        # 416/416 assertions
 cyrius bench tests/samay.bcyr
 ```
 
@@ -39,7 +39,7 @@ Consumers declare the dep and include the committed bundle:
 ```toml
 [deps.samay]
 git = "https://github.com/MacCracken/samay.git"
-tag = "1.0.3"
+tag = "1.0.4"
 modules = ["dist/samay.cyr"]
 ```
 
@@ -70,6 +70,29 @@ var due = cron_scheduler_check_due(cron);
 ```
 
 See `src/main.cyr` for a worked demo and `tests/samay.tcyr` for the full API in use.
+
+## Thread safety
+
+**samay is not thread-safe.** One `TaskScheduler` / `CronScheduler` is owned by one
+thread at a time; serialise externally if you need concurrent access. This is a
+deliberate contract, not an oversight — the query functions return raw pointers into
+scheduler-owned structs, so an internal lock could not make sharing safe. See
+[ADR-0008](docs/adr/0008-threading-contract.md) for the measurements and the reasoning.
+
+If your process has more than one thread — even with a *separate* scheduler per thread —
+call `samay_init()` once before spawning them:
+
+```
+samay_init();            # then spawn
+```
+
+`task_scheduler_new()` and `cron_scheduler_new()` already do this, so the ordinary shape
+(build the scheduler, then spawn workers) needs nothing extra. The explicit call matters
+only if you use the free functions (`cron_expr_parse`, `cron_expr_matches`,
+`training_job_to_scheduled_task`) with no scheduler. It forces a process-global lazy
+initialiser in the vendored `chrono` module to run while you are still single-threaded;
+without it, racing threads can read a half-published month table and evaluate a cron
+expression against the wrong date.
 
 ## Layout
 

@@ -4,6 +4,70 @@ All notable changes to Samay are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.0.4] — 2026-08-30
+
+**Concurrency audit — the risk v1.0.3 left explicitly unretired.** samay now states a
+threading contract, and closes the one race that could bite a caller who honours it.
+416 assertions (was 406). No public signature changed; one additive function.
+
+Everything below was measured on x86_64 with threaded harnesses, not reasoned about.
+
+### Added
+- **`samay_init()`** — additive, public. Forces the process-global lazy initialisers
+  samay depends on to run while the caller is still single-threaded.
+  `task_scheduler_new()` and `cron_scheduler_new()` call it, so the ordinary shape
+  (build, then spawn) is covered automatically.
+- **[ADR-0008](docs/adr/0008-threading-contract.md)** — the contract, the measurements,
+  and why samay deliberately does *not* take an internal lock.
+
+### Fixed
+- **A racing thread could evaluate a cron expression against the wrong date.**
+  `lib/chrono.cyr`'s `_chrono_init_mdays` publishes the month-length table pointer
+  *before* filling it, so a second thread sees non-zero, skips the init, and reads an
+  all-zero table — `epoch_to_date`'s month loop then never breaks and reports month 13.
+  **This needs no shared state**: two threads with entirely separate schedulers still
+  share that global, so it breaks callers who are honouring the single-threaded contract.
+  Measured 14/200 process runs with threads tightly synchronised, and 1/400 through
+  samay's own public API in the worst realistic shape; 0 with the pre-warm.
+  The defect is in `lib/`, which samay must not modify, so this closes the window from
+  outside. Upstream ask filed: `_chrono_init_mdays` should fill a local and publish last,
+  the order `bayan-json`'s `_d_init_tables` already uses correctly.
+
+### Documented — not fixed, deliberately
+Sharing one scheduler across threads corrupts it. This is now stated in the README, both
+module headers, and ADR-0008 rather than papered over with a lock:
+- **Node reservations are lost, towards over-admission.** 8 threads × 160,000 reserves on
+  one node: `running_tasks` 43,299 against 160,000 expected, and `available_cpu` *higher*
+  than the truth — samay would place work on a node with no room, the exact failure the
+  resource-aware-placement principle exists to prevent.
+- **The tasks hashmap corrupts its own bookkeeping.** 8 threads submitting 8,000 tasks:
+  one lost outright, and the map's internal count read 7,911 against 7,999 occupied slots.
+- **`lib/sakshi.cyr` has unsynchronised global state** (ring indices, span depth, trace
+  ids); concurrent logging can interleave output. Observability only.
+
+**Why no internal lock:** `task_scheduler_get_task`, `pending_tasks`, `tasks_for_node`
+and `cron_scheduler_list_entries` all return **raw pointers** into scheduler-owned
+structs. A mutex would protect the lookup and release before the caller touches what it
+was handed — an object that looks safe, invites the assumption, and still corrupts. That
+is worse than an honest contract. Making the API lockable means not returning interior
+pointers: a redesign, not a patch.
+
+### Verified safe (measured negatives worth recording)
+- **The allocator.** `lib/thread.cyr` arms the shared-heap lock *before* the clone, and it
+  is a real atomic CAS with fences — no startup window. 8 threads, 80,000 allocations,
+  0 overlapping blocks. Every samay operation allocates, so this was the load-bearing one.
+- **`samay_uuid_v4`.** 200,000 uuids across 8 threads, 0 duplicates — `task_id`
+  uniqueness, which ADR-0004 depends on, holds under concurrency.
+- **bayan's decimal tables** fill then publish; correct as written.
+- **v1.0.3's `_reconcile_reservations`** held up under a completer/reconciler race with no
+  phantom capacity.
+
+### Parity note
+The Rust oracle enforced this statically: `&mut self` on every mutating method meant the
+compiler rejected concurrent mutation outright. Cyrius cannot express that, so a
+compile-time guarantee has become a documented runtime one. Recorded in ADR-0008 rather
+than left implicit.
+
 ## [1.0.3] — 2026-08-29
 
 **P-1 audit sweep: two correctness defects fixed, ADR-0005's contract completed, and the

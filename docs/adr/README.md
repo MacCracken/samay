@@ -28,3 +28,4 @@ Decisions about samay — what we chose, the context, and the consequences we ac
 | [0005](0005-restore-input-validation.md) | Input validation on snapshot restore | Accepted (v0.7.0) — fail-closed deserialization (security audit) |
 | [0006](0006-cron-expression-model.md) | Cron expression model and missed-schedule semantics | Accepted (v1.0.3) — records the v0.3.0 divergence from the oracle's interval model; Vixie DOM/DOW correction |
 | [0007](0007-reservation-lifecycle.md) | Node capacity returned on every exit from the running set | Accepted (v1.0.3) — intentional divergence from Rust (the oracle leaks capacity too) |
+| [0008](0008-threading-contract.md) | samay is single-threaded by contract | Accepted (v1.0.4) — measured; no internal lock, deliberately |

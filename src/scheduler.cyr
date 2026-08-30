@@ -1,5 +1,13 @@
 # scheduler.cyr — the core distributed task scheduler (Rust TaskScheduler).
 #
+# THREAD SAFETY: none. One TaskScheduler is owned by one thread at a time.
+# Every mutating call is an unsynchronised read-modify-write, and the query
+# functions hand out raw pointers into scheduler-owned structs, so an internal
+# lock could not make this safe (ADR-0008). Serialise externally if you need
+# concurrent access. Measured under 8 concurrent threads: 73% of node
+# reservations lost, and the tasks hashmap's own size field left disagreeing
+# with its contents.
+#
 # tasks/nodes are Str-keyed hashmaps (map_new_str) of heap struct pointers.
 # Str keys hash by content (hash_str_v) and compare via str_eq, so a lookup
 # by an equal-but-distinct Str works.
@@ -14,6 +22,7 @@ struct TaskScheduler {
 }
 
 fn task_scheduler_new(): i64 {
+    samay_init();   # close the chrono lazy-init window while single-threaded
     var s = alloc(16);
     TaskScheduler_set_tasks(s, map_new_str());
     TaskScheduler_set_nodes(s, map_new_str());

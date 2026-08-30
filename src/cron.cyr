@@ -1,5 +1,9 @@
 # cron.cyr — cron-like recurring task triggers (cron-expression driven).
 #
+# THREAD SAFETY: none — one CronScheduler per thread (ADR-0008). check_due_at
+# is a read-modify-write on each entry's last_fired watermark, so two threads
+# sharing a scheduler will duplicate fired tasks.
+#
 # v0.3.0 replaces the interval+hour/minute model with real cron expressions
 # (src/cronexpr.cyr) and an explicit missed-schedule policy: when the
 # scheduler was down across one or more fire times, an entry either fires
@@ -62,6 +66,7 @@ struct CronScheduler {
 }
 
 fn cron_scheduler_new(): i64 {
+    samay_init();   # close the chrono lazy-init window while single-threaded
     var c = alloc(8);
     CronScheduler_set_entries(c, map_new_str());
     return c;

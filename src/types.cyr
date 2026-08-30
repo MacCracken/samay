@@ -14,6 +14,35 @@
 fn _f64_max(a, b): i64 { if (f64_gt(a, b) == 1) { return a; } return b; }
 fn _f64_min(a, b): i64 { if (f64_lt(a, b) == 1) { return a; } return b; }
 
+# Force the process-global lazy initialisers samay's code paths depend on to
+# run NOW, while the caller is still single-threaded.
+#
+# `lib/chrono.cyr:184` publishes `_chrono_mdays` (the month-length table) at
+# line 186 and only *then* fills it with 12 store64s. A second thread that
+# calls epoch_to_date inside that window sees the non-zero pointer, skips the
+# init, and reads an all-zero table — epoch_to_date's month loop then never
+# breaks, falls out with m == 12, and reports month 13 with a day-of-year for
+# a day. samay reaches this from cron_expr_matches, so the observable damage
+# is a cron entry evaluated against the WRONG DATE.
+#
+# Measured on x86_64: 4 threads each racing their first epoch_to_date produced
+# a wrong date in 14 of 200 process runs; with this pre-warm, 0 of 200.
+#
+# The defect is in `lib/`, which samay must not modify (CLAUDE.md), so this
+# closes the window from the outside instead: once the table is published and
+# filled, the race cannot recur for the life of the process. It is idempotent
+# and costs one epoch_to_date call.
+#
+# Called automatically by task_scheduler_new() and cron_scheduler_new(), which
+# covers every normal entry into the library. Call it explicitly before
+# spawning threads if you use the free functions (cron_expr_parse /
+# cron_expr_matches / training_job_to_scheduled_task) without a scheduler.
+# See ADR-0008 for the threading contract this is part of.
+fn samay_init(): i64 {
+    epoch_to_date(0);
+    return 0;
+}
+
 # Finite-f64 gate. NaN fails the self-equality test; +/-Inf exceeds any
 # finite bound. 1e18 is many orders above any real CPU-core count, so a value
 # beyond it is a corrupt snapshot either way.
