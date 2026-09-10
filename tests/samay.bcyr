@@ -49,7 +49,8 @@ fn main(): i64 {
     bench_report(b4);
 
     # cron_expr_matches: the check_due inner loop (epoch_to_date + bitmask tests).
-    var expr = result_unwrap(cron_expr_parse(str_from("*/15 3,15 * * 1-5")));
+    var _expr_t, _expr_v = cron_expr_parse(str_from("*/15 3,15 * * 1-5"));
+    var expr = result_unwrap(_expr_t, _expr_v);
     var ct = _chrono_ymd_to_epoch_secs(2026, 7, 18, 3, 15, 0);
     var b5 = bench_new("cron_expr_matches");
     bench_batch_start(b5);

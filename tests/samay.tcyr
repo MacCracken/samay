@@ -249,7 +249,8 @@ fn test_priority_clamped() {
 fn test_submit_task() {
     test_group("submit_task");
     var s = task_scheduler_new();
-    var id = result_unwrap(task_scheduler_submit_task(s, make_task("t1", 5)));
+    var _id_t, _id_v = task_scheduler_submit_task(s, make_task("t1", 5));
+    var id = result_unwrap(_id_t, _id_v);
     assert_eq(task_scheduler_get_task(s, id) != 0, 1, "task present");
     assert_eq(ScheduledTask_status(task_scheduler_get_task(s, id)), TASK_QUEUED, "initial queued");
     return 0;
@@ -257,8 +258,10 @@ fn test_submit_task() {
 fn test_submit_multiple() {
     test_group("submit_multiple");
     var s = task_scheduler_new();
-    var id1 = result_unwrap(task_scheduler_submit_task(s, make_task("t1", 3)));
-    var id2 = result_unwrap(task_scheduler_submit_task(s, make_task("t2", 7)));
+    var _id1_t, _id1_v = task_scheduler_submit_task(s, make_task("t1", 3));
+    var id1 = result_unwrap(_id1_t, _id1_v);
+    var _id2_t, _id2_v = task_scheduler_submit_task(s, make_task("t2", 7));
+    var id2 = result_unwrap(_id2_t, _id2_v);
     assert_eq(str_eq_cstr(id1, id2), 0, "ids differ");
     assert_eq(SchedulerStats_total_tasks(task_scheduler_stats(s)), 2, "total 2");
     return 0;
@@ -374,7 +377,8 @@ fn test_schedule_transitions() {
     test_group("schedule_transitions");
     var s = task_scheduler_new();
     task_scheduler_register_node(s, make_node("n1", f64_from(4), 4096));
-    var id = result_unwrap(task_scheduler_submit_task(s, make_task("t1", 5)));
+    var _id_t, _id_v = task_scheduler_submit_task(s, make_task("t1", 5));
+    var id = result_unwrap(_id_t, _id_v);
     task_scheduler_schedule_pending(s);
     assert_eq(ScheduledTask_status(task_scheduler_get_task(s, id)), TASK_SCHEDULED, "scheduled");
     return 0;
@@ -398,7 +402,8 @@ fn test_complete_releases() {
     var s = task_scheduler_new();
     var node = make_node("n1", f64_from(8), 8192);
     task_scheduler_register_node(s, node);
-    var id = result_unwrap(task_scheduler_submit_task(s, make_task("t1", 5)));
+    var _id_t, _id_v = task_scheduler_submit_task(s, make_task("t1", 5));
+    var id = result_unwrap(_id_t, _id_v);
     task_scheduler_schedule_pending(s);
     var t = task_scheduler_get_task(s, id);
     scheduled_task_transition(t, TASK_RUNNING);
@@ -414,14 +419,16 @@ fn test_fail_releases() {
     var s = task_scheduler_new();
     var node = make_node("n1", f64_from(8), 8192);
     task_scheduler_register_node(s, node);
-    var id = result_unwrap(task_scheduler_submit_task(s, make_task("t1", 5)));
+    var _id_t, _id_v = task_scheduler_submit_task(s, make_task("t1", 5));
+    var id = result_unwrap(_id_t, _id_v);
     task_scheduler_schedule_pending(s);
     scheduled_task_transition(task_scheduler_get_task(s, id), TASK_RUNNING);
     assert_eq(is_ok(task_scheduler_complete_task(s, id, TASK_FAILED)), 1, "fail ok");
     assert_eq(_cpu_milli(node), 8000, "cpu returned on failure");
     assert_eq(NodeCapacity_running_tasks(node), 0, "running_tasks back to zero");
     # A non-terminal final status is rejected outright.
-    var id2 = result_unwrap(task_scheduler_submit_task(s, make_task("t2", 5)));
+    var _id2_t, _id2_v = task_scheduler_submit_task(s, make_task("t2", 5));
+    var id2 = result_unwrap(_id2_t, _id2_v);
     assert_eq(is_err_result(task_scheduler_complete_task(s, id2, TASK_RUNNING)), 1, "non-terminal rejected");
     return 0;
 }
@@ -434,7 +441,8 @@ fn test_transition_reconciled() {
     var s = task_scheduler_new();
     var node = make_node("n1", f64_from(8), 8192);
     task_scheduler_register_node(s, node);
-    var id = result_unwrap(task_scheduler_submit_task(s, make_task("t1", 5)));
+    var _id_t, _id_v = task_scheduler_submit_task(s, make_task("t1", 5));
+    var id = result_unwrap(_id_t, _id_v);
     task_scheduler_schedule_pending(s);
     var t = task_scheduler_get_task(s, id);
     scheduled_task_transition(t, TASK_RUNNING);
@@ -453,7 +461,8 @@ fn test_requeue_releases() {
     var s = task_scheduler_new();
     var node = make_node("n1", f64_from(8), 8192);
     task_scheduler_register_node(s, node);
-    var id = result_unwrap(task_scheduler_submit_task(s, make_task("t1", 5)));
+    var _id_t, _id_v = task_scheduler_submit_task(s, make_task("t1", 5));
+    var id = result_unwrap(_id_t, _id_v);
     task_scheduler_schedule_pending(s);
     assert_eq(_cpu_milli(node), 7000, "one reservation after first placement");
     scheduled_task_transition(task_scheduler_get_task(s, id), TASK_QUEUED);
@@ -475,7 +484,8 @@ fn test_capacity_conservation() {
     var ids = vec_new();
     var i = 0;
     while (i < 8) {
-        vec_push(ids, result_unwrap(task_scheduler_submit_task(s, make_task("t", 5))));
+        var _pt, _pv = task_scheduler_submit_task(s, make_task("t", 5));
+        vec_push(ids, result_unwrap(_pt, _pv));
         i = i + 1;
     }
     task_scheduler_schedule_pending(s);
@@ -513,7 +523,8 @@ fn test_reserved_on_roundtrip() {
     test_group("reserved_on_roundtrip");
     var s = task_scheduler_new();
     task_scheduler_register_node(s, make_node("n1", f64_from(8), 8192));
-    var id = result_unwrap(task_scheduler_submit_task(s, make_task("t1", 5)));
+    var _id_t, _id_v = task_scheduler_submit_task(s, make_task("t1", 5));
+    var id = result_unwrap(_id_t, _id_v);
     task_scheduler_schedule_pending(s);
     var t = task_scheduler_get_task(s, id);
     assert_eq(str_eq(ScheduledTask_reserved_on(t), str_from("n1")), 1, "reservation recorded");
@@ -567,7 +578,8 @@ fn test_no_null_fields_from_constructors() {
     assert_eq(CronScheduler_entries(c) != 0, 1, "entries map non-null");
     assert_eq(cron_scheduler_check_due_at(c, at_ns(2026, 8, 30, 12, 0)) != 0, 1, "check_due_at returns a vec, not 0");
 
-    var e = result_unwrap(cron_expr_parse(str_from("0 3 * * *")));
+    var _e_t, _e_v = cron_expr_parse(str_from("0 3 * * *"));
+    var e = result_unwrap(_e_t, _e_v);
     assert_eq(e != 0, 1, "parsed CronExpr non-null");
     var tj = training_job_template_new(str_from("m"), TM_LORA, str_from("d"), 0, 60, 0);
     assert_eq(tj != 0, 1, "training template non-null");
@@ -624,7 +636,8 @@ fn test_constructors_prewarm() {
 fn test_cancel_queued() {
     test_group("cancel_queued");
     var s = task_scheduler_new();
-    var id = result_unwrap(task_scheduler_submit_task(s, make_task("t1", 5)));
+    var _id_t, _id_v = task_scheduler_submit_task(s, make_task("t1", 5));
+    var id = result_unwrap(_id_t, _id_v);
     assert_eq(is_ok(task_scheduler_cancel_task(s, id)), 1, "cancel ok");
     assert_eq(ScheduledTask_status(task_scheduler_get_task(s, id)), TASK_CANCELLED, "cancelled");
     return 0;
@@ -776,7 +789,8 @@ fn test_cron_count_capped_flag() {
     var clamped = 0;
     var capped = 0;
 
-    var every = result_unwrap(cron_expr_parse(str_from("* * * * *")));
+    var _every_t, _every_v = cron_expr_parse(str_from("* * * * *"));
+    var every = result_unwrap(_every_t, _every_v);
     var n = _cron_count_due(every, old_s, now_s, &clamped, &capped);
     assert_eq(capped, 1, "per-minute expression trips the count cap");
     assert_eq(n, CRON_MAX_COUNT, "capped count returns exactly the cap");
@@ -785,7 +799,8 @@ fn test_cron_count_capped_flag() {
 
     # A daily expression scans the same window without ever reaching the cap,
     # so its count is exact and must NOT be flagged as a floor.
-    var daily = result_unwrap(cron_expr_parse(str_from("0 3 * * *")));
+    var _daily_t, _daily_v = cron_expr_parse(str_from("0 3 * * *"));
+    var daily = result_unwrap(_daily_t, _daily_v);
     var clamped2 = 0;
     var capped2 = 0;
     var n2 = _cron_count_due(daily, old_s, now_s, &clamped2, &capped2);
@@ -886,7 +901,8 @@ fn test_cron_star_list() {
     test_group("cron_star_list");
     # "15,*" in DOM begins with '1' -> NOT a star; neither DOM nor DOW is star
     # -> OR rule; DOM covers all days -> fires every day, not only Mondays.
-    var e = result_unwrap(cron_expr_parse(str_from("0 0 15,* * 1")));
+    var _e_t, _e_v = cron_expr_parse(str_from("0 0 15,* * 1"));
+    var e = result_unwrap(_e_t, _e_v);
     assert_eq(cron_expr_matches(e, at_ns(2026, 7, 21, 0, 0) / 1000000000), 1, "fires on a Tuesday");
     return 0;
 }
@@ -896,7 +912,8 @@ fn test_cron_step_star_dom() {
     # AND-ed. `*/2` sets the star flag but its mask is NOT all-ones -- over
     # DOM 1-31 it is the ODD days -- so `0 0 */2 * 1` means "odd-numbered
     # Mondays", not "every Monday". The starred field's mask still applies.
-    var e = result_unwrap(cron_expr_parse(str_from("0 0 */2 * 1")));
+    var _e_t, _e_v = cron_expr_parse(str_from("0 0 */2 * 1"));
+    var e = result_unwrap(_e_t, _e_v);
     assert_eq(cron_expr_matches(e, at_ns(2026, 7, 13, 0, 0) / 1000000000), 1, "odd-numbered Monday fires");
     assert_eq(cron_expr_matches(e, at_ns(2026, 7, 27, 0, 0) / 1000000000), 1, "odd-numbered Monday fires (2)");
     assert_eq(cron_expr_matches(e, at_ns(2026, 7, 20, 0, 0) / 1000000000), 0, "even-numbered Monday no fire");
@@ -905,14 +922,16 @@ fn test_cron_step_star_dom() {
 
     # `*/2` in DOM against a bare `*` DOW: AND with an all-ones DOW mask,
     # so the DOM step governs -- odd days only, every weekday.
-    var e2 = result_unwrap(cron_expr_parse(str_from("0 0 */2 * *")));
+    var _e2_t, _e2_v = cron_expr_parse(str_from("0 0 */2 * *"));
+    var e2 = result_unwrap(_e2_t, _e2_v);
     assert_eq(cron_expr_matches(e2, at_ns(2026, 7, 1, 0, 0) / 1000000000), 1, "odd day fires");
     assert_eq(cron_expr_matches(e2, at_ns(2026, 7, 3, 0, 0) / 1000000000), 1, "odd day fires (2)");
     assert_eq(cron_expr_matches(e2, at_ns(2026, 7, 2, 0, 0) / 1000000000), 0, "even day no fire");
     assert_eq(cron_expr_matches(e2, at_ns(2026, 7, 8, 0, 0) / 1000000000), 0, "even day no fire (2)");
 
     # `*/2` in DOW: Sun(0), Tue(2), Thu(4), Sat(6) only.
-    var e3 = result_unwrap(cron_expr_parse(str_from("0 0 * * */2")));
+    var _e3_t, _e3_v = cron_expr_parse(str_from("0 0 * * */2"));
+    var e3 = result_unwrap(_e3_t, _e3_v);
     assert_eq(cron_expr_matches(e3, at_ns(2026, 7, 5, 0, 0) / 1000000000), 1, "Sunday fires");
     assert_eq(cron_expr_matches(e3, at_ns(2026, 7, 7, 0, 0) / 1000000000), 1, "Tuesday fires");
     assert_eq(cron_expr_matches(e3, at_ns(2026, 7, 6, 0, 0) / 1000000000), 0, "Monday no fire");
@@ -920,14 +939,17 @@ fn test_cron_step_star_dom() {
 
     # Regression guard: a bare `*` mask IS all-ones, so AND-ing it is the
     # identity -- these shapes must be untouched by the combination rule.
-    var e4 = result_unwrap(cron_expr_parse(str_from("0 0 15 * *")));
+    var _e4_t, _e4_v = cron_expr_parse(str_from("0 0 15 * *"));
+    var e4 = result_unwrap(_e4_t, _e4_v);
     assert_eq(cron_expr_matches(e4, at_ns(2026, 7, 15, 0, 0) / 1000000000), 1, "bare-star DOW: day 15 fires");
     assert_eq(cron_expr_matches(e4, at_ns(2026, 7, 16, 0, 0) / 1000000000), 0, "bare-star DOW: day 16 no fire");
-    var e5 = result_unwrap(cron_expr_parse(str_from("0 0 * * 1")));
+    var _e5_t, _e5_v = cron_expr_parse(str_from("0 0 * * 1"));
+    var e5 = result_unwrap(_e5_t, _e5_v);
     assert_eq(cron_expr_matches(e5, at_ns(2026, 7, 20, 0, 0) / 1000000000), 1, "bare-star DOM: Monday fires");
     assert_eq(cron_expr_matches(e5, at_ns(2026, 7, 21, 0, 0) / 1000000000), 0, "bare-star DOM: Tuesday no fire");
     # Neither starred -> OR rule: day 15 OR Monday.
-    var e6 = result_unwrap(cron_expr_parse(str_from("0 0 15 * 1")));
+    var _e6_t, _e6_v = cron_expr_parse(str_from("0 0 15 * 1"));
+    var e6 = result_unwrap(_e6_t, _e6_v);
     assert_eq(cron_expr_matches(e6, at_ns(2026, 7, 15, 0, 0) / 1000000000), 1, "OR rule: day 15 (Wed) fires");
     assert_eq(cron_expr_matches(e6, at_ns(2026, 7, 20, 0, 0) / 1000000000), 1, "OR rule: Monday (day 20) fires");
     assert_eq(cron_expr_matches(e6, at_ns(2026, 7, 16, 0, 0) / 1000000000), 0, "OR rule: neither no fire");
@@ -965,7 +987,11 @@ fn _ref_matches(expr, epoch_secs) {
     return dow_ok;
 }
 
-fn _diff_add(v, e) { vec_push(v, result_unwrap(cron_expr_parse(str_from(e)))); return 0; }
+fn _diff_add(v, e) {
+    var _dt, _dv = cron_expr_parse(str_from(e));
+    vec_push(v, result_unwrap(_dt, _dv));
+    return 0;
+}
 
 fn test_cron_matcher_differential() {
     test_group("cron_matcher_differential");
@@ -1022,7 +1048,8 @@ fn test_cron_matcher_differential() {
     # The prefilter's reason for existing: epoch_to_date allocates 48 bytes
     # with no free, so a miss must not reach it. 20k misses used to cost
     # ~960 KB; the ceiling here is deliberately far below that.
-    var em = result_unwrap(cron_expr_parse(str_from("0 0 1 1 *")));
+    var _em_t, _em_v = cron_expr_parse(str_from("0 0 1 1 *"));
+    var em = result_unwrap(_em_t, _em_v);
     var t0 = _chrono_ymd_to_epoch_secs(2026, 7, 18, 3, 15, 0);
     var before = alloc_used();
     var k = 0;
@@ -1034,7 +1061,8 @@ fn test_cron_matcher_differential() {
 # --- v1.0.3: parser features that had zero assertions before the sweep ---
 
 fn _m(expr_str, y, mo, d, h, mi) {
-    var e = result_unwrap(cron_expr_parse(str_from(expr_str)));
+    var _e_t, _e_v = cron_expr_parse(str_from(expr_str));
+    var e = result_unwrap(_e_t, _e_v);
     return cron_expr_matches(e, at_ns(y, mo, d, h, mi) / 1000000000);
 }
 
@@ -1113,7 +1141,8 @@ fn test_cron_overflow_field() {
 }
 fn test_cron_negative_epoch() {
     test_group("cron_neg_epoch");
-    assert_eq(cron_expr_matches(result_unwrap(cron_expr_parse(str_from("@hourly"))), 0 - 3600), 0, "negative epoch no match");
+    var _ht, _hv = cron_expr_parse(str_from("@hourly"));
+    assert_eq(cron_expr_matches(result_unwrap(_ht, _hv), 0 - 3600), 0, "negative epoch no match");
     return 0;
 }
 fn test_cron_catchup_cap() {
@@ -1255,9 +1284,9 @@ fn test_json_scheduler_stats() {
 
 fn test_json_cron_expr() {
     test_group("json_cron_expr");
-    var r = cron_expr_parse(str_from("*/15 9 * * 1"));
-    assert_eq(is_err_result(r), 0, "expr parsed");
-    var e = result_unwrap(r);
+    var r_t, r_v = cron_expr_parse(str_from("*/15 9 * * 1"));
+    assert_eq(is_err_result(r_t), 0, "expr parsed");
+    var e = result_unwrap(r_t, r_v);
     var sb = str_builder_new();
     CronExpr_to_json(e, sb);
     var e2 = CronExpr_from_json(bayan_json_parse(str_builder_build(sb)));
@@ -1275,7 +1304,8 @@ fn test_json_cron_expr() {
 # A deserialized CronExpr must still match the same instants as the original.
 fn test_json_cron_expr_semantic() {
     test_group("json_cron_semantic");
-    var e = result_unwrap(cron_expr_parse(str_from("*/15 9 * * 1")));
+    var _e_t, _e_v = cron_expr_parse(str_from("*/15 9 * * 1"));
+    var e = result_unwrap(_e_t, _e_v);
     var sb = str_builder_new();
     CronExpr_to_json(e, sb);
     var e2 = CronExpr_from_json(bayan_json_parse(str_builder_build(sb)));
@@ -1380,7 +1410,8 @@ fn test_json_cron_entry() {
     test_group("json_cron_entry");
     var req = make_req(f64_from(1), 128);
     var tmpl = cron_task_template_new(str_from("job"), str_from("recurring"), str_from("agent-1"), 5, req);
-    var expr = result_unwrap(cron_expr_parse(str_from("0 2 * * *")));
+    var _expr_t, _expr_v = cron_expr_parse(str_from("0 2 * * *"));
+    var expr = result_unwrap(_expr_t, _expr_v);
     var e = cron_entry_new(str_from("backup"), expr, tmpl, 1, CRON_SKIP);
     CronEntry_set_last_fired(e, 1700000000);
     var e2 = cron_entry_from_json_str(cron_entry_to_json_str(e));
@@ -1647,12 +1678,28 @@ fn test_det_schedule_colliding() {
     task_scheduler_submit_task(b, _det_task("task-20", 5, 100));
     task_scheduler_submit_task(b, _det_task("task-15", 5, 100));
     task_scheduler_submit_task(b, _det_task("task-0", 5, 100));
-    # non-vacuity: raw bucket order must differ between the two insertion orders
+    # ⚠ THE OLD NON-VACUITY GUARD IS GONE, AND NEITHER DIRECTION CAN REPLACE IT.
+    #
+    # It asserted that the two insertion orders produce DIFFERENT raw `map_values`
+    # order. cyrius 6.6.x added `lib/hashseed.cyr` — per-process seeded hashing, a
+    # security fix closing a measured 934x hash-flooding DoS — so bucket index now
+    # depends on a seed drawn fresh in every process.
+    #
+    # With linear probing, insertion order changes iteration order ONLY when two
+    # keys land in the same bucket, and whether these four ids collide is a property
+    # of the seed. So across runs the old assertion holds sometimes and fails
+    # sometimes; asserting the OPPOSITE is flaky for exactly the same reason
+    # (measured: 1 failure in 3 runs, then 1 in 12). A seed-dependent fact is not
+    # assertable in either direction.
+    #
+    # ⭐ So non-vacuity moves to the FULL sorted sequence below, which is stronger
+    # than the guard it replaces: raw map order is now random per process, so a
+    # scheduler that failed to apply the `samay_str_lt` tie-break would emit that
+    # random order and fail on almost every run. The test still cannot pass
+    # vacuously — it just proves it by construction instead of by assertion.
     var ra = map_values(TaskScheduler_tasks(a));
-    var rb = map_values(TaskScheduler_tasks(b));
-    assert_eq(str_eq(ScheduledTask_task_id(vec_get(ra, 0)), ScheduledTask_task_id(vec_get(rb, 0))), 0,
-      "raw map order differs (test is non-vacuous)");
-    # despite that, scheduling decisions are byte-identical
+    assert_eq(vec_len(ra), 4, "raw map holds all 4");
+    # and scheduling decisions are byte-identical
     var da = task_scheduler_schedule_pending(a);
     var db = task_scheduler_schedule_pending(b);
     assert_eq(vec_len(da), 4, "4 decisions");
@@ -1662,7 +1709,10 @@ fn test_det_schedule_colliding() {
         i = i + 1;
     }
     # and pending order is task_id-sorted: task-0 < task-15 < task-20 < task-33
+    # ALL FOUR positions — this is the non-vacuity guard now (see above).
     assert_eq(str_eq_cstr(SchedulingDecision_task_id(vec_get(da, 0)), "task-0"), 1, "sorted[0]=task-0");
+    assert_eq(str_eq_cstr(SchedulingDecision_task_id(vec_get(da, 1)), "task-15"), 1, "sorted[1]=task-15");
+    assert_eq(str_eq_cstr(SchedulingDecision_task_id(vec_get(da, 2)), "task-20"), 1, "sorted[2]=task-20");
     assert_eq(str_eq_cstr(SchedulingDecision_task_id(vec_get(da, 3)), "task-33"), 1, "sorted[3]=task-33");
     return 0;
 }

@@ -4,6 +4,52 @@ All notable changes to Samay are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.1.2] - 2026-09-10
+
+**Migrated to the cyrius 6.6.x value form.** Unblocks kavach, which vendors samay.
+
+### Changed — cyrius pin 6.5.36 → **6.6.2**
+
+cyrius 6.6.0 flipped `Result`/`Option`/`Either` declared `: stack` to a value form — a payload
+variant returns a `(tag, payload)` REGISTER PAIR and allocates nothing; `payload()` is gone.
+
+- `src/scheduler.cyr` — 2 sites, both the **propagation trap**: `if (is_err_result(r) == 1)
+  { return r; }` returns the payload alone, so `Err(1)` from a rejected state transition would
+  reach the caller as `tag=1`, `is_err_result == 0` — a refused cancel/complete reading as
+  SUCCESS, and capacity released for a task still using it. Now `return Err(r_v);`.
+- `src/cron.cyr` — 1 site.
+- `tests/samay.tcyr` — 29 sites, `tests/samay.bcyr` — 1.
+
+### Changed — dependency pins
+
+| dep | from | to |
+|---|---|---|
+| `bayan` | 1.5.2 | **1.5.5** |
+| `ai-hwaccel` | 2.3.19 | **2.3.22** |
+
+⚠ The `bayan` bump was **required, not hygiene**. bayan 1.5.2's `dist/bayan-json.cyr` still reads
+payloads the boxed way (`var fd = load64(fd_r + 8);`), which the value form rejects outright.
+bayan migrated its own source and shipped it in 1.5.5; samay was simply pinned behind it, and
+propagated the stale bundle to every samay consumer — which is how it surfaced in kavach.
+
+### Fixed — a determinism test whose premise seeded hashing removed
+
+`test_det_schedule_colliding` asserted that two opposite insertion orders produce **different**
+raw `map_values` order, as a self-validating guard that the `samay_str_lt` tie-break is doing real
+work. cyrius 6.6.x added `lib/hashseed.cyr` — per-process seeded hashing, a security fix closing a
+measured **934x** hash-flooding DoS — so bucket index now depends on a seed drawn fresh in every
+process.
+
+With linear probing, insertion order changes iteration order **only when two keys collide**, and
+whether these four ids collide is now a property of the seed. So the assertion holds on some runs
+and fails on others; asserting the opposite is flaky for the identical reason (measured: 1 failure
+in 3 runs, then 1 in 12). **A seed-dependent fact is not assertable in either direction.**
+
+⭐ The guard was **relocated, not deleted**. Non-vacuity now rests on asserting the FULL sorted
+sequence, which is *stronger* than what it replaces: raw map order is random per process, so a
+scheduler that failed to sort would emit that random order and fail on almost every run. Verified
+stable 15/15 runs.
+
 ## [1.1.1] — 2026-08-30
 
 **Two measured wrong-answer paths closed, and a named abort everywhere else an

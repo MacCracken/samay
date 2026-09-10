@@ -162,8 +162,8 @@ fn _reconcile_reservations(s): i64 {
 fn task_scheduler_cancel_task(s, id): i64 {
     var task = map_get(TaskScheduler_tasks(s), id);
     if (task == 0) { return Err(1); }
-    var r = scheduled_task_transition(task, TASK_CANCELLED);
-    if (is_err_result(r) == 1) { return r; }
+    var r_t, r_v = scheduled_task_transition(task, TASK_CANCELLED);
+    if (is_err_result(r_t) == 1) { return Err(r_v); }
     # Release only once the transition is accepted, so a rejected cancel
     # cannot hand back capacity the task is still using.
     _release_task_node(s, task);
@@ -186,8 +186,8 @@ fn task_scheduler_complete_task(s, id, final_status): i64 {
     if (final_status != TASK_COMPLETED) {
         if (final_status != TASK_FAILED) { return Err(2); }
     }
-    var r = scheduled_task_transition(task, final_status);
-    if (is_err_result(r) == 1) { return r; }
+    var r_t, r_v = scheduled_task_transition(task, final_status);
+    if (is_err_result(r_t) == 1) { return Err(r_v); }
     _release_task_node(s, task);
     ScheduledTask_set_completed_at(task, dt_now());
     return Ok(0);

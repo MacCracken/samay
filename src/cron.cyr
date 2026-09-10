@@ -84,9 +84,9 @@ fn cron_scheduler_new(): i64 {
 # (validation happens here, at add time — not at execution).
 fn cron_scheduler_add(c, name, expr_str, task_template, enabled, missed_policy): i64 {
     if (str_len(name) == 0) { return Err(1); }
-    var r = cron_expr_parse(expr_str);
-    if (is_err_result(r) == 1) { return Err(1); }
-    var entry = cron_entry_new(name, result_unwrap(r), task_template, enabled, missed_policy);
+    var r_t, r_v = cron_expr_parse(expr_str);
+    if (is_err_result(r_t) == 1) { return Err(1); }
+    var entry = cron_entry_new(name, result_unwrap(r_t, r_v), task_template, enabled, missed_policy);
     map_set(CronScheduler_entries(c), name, entry);
     return Ok(0);
 }
