@@ -44,9 +44,9 @@ struct TrainingJobTemplate {
 fn training_job_template_new(model_id, method, dataset, target_node, max_duration_secs, checkpoint_interval_secs): i64 {
     var p = alloc(48);
     if (p == 0) { panic("samay: out of memory in training_job_template_new"); }
-    TrainingJobTemplate_set_model_id(p, model_id);
+    TrainingJobTemplate_set_model_id(p, _samay_own(model_id, "samay: out of memory in training_job_template_new"));
     TrainingJobTemplate_set_method(p, method);
-    TrainingJobTemplate_set_dataset(p, dataset);
+    TrainingJobTemplate_set_dataset(p, _samay_own(dataset, "samay: out of memory in training_job_template_new"));
     TrainingJobTemplate_set_target_node(p, target_node);
     TrainingJobTemplate_set_max_duration_secs(p, max_duration_secs);
     TrainingJobTemplate_set_checkpoint_interval_secs(p, checkpoint_interval_secs);

@@ -337,10 +337,10 @@ fn scheduled_task_from_jsonv(v): i64 {
     if (st > TASK_PREEMPTED) { st = TASK_QUEUED; }
     var p = alloc(120);   # 15 fields * 8 — MUST track scheduled_task_new
     if (p == 0) { panic("samay: out of memory in scheduled_task_from_jsonv"); }
-    ScheduledTask_set_task_id(p, tid);
-    ScheduledTask_set_name(p, name);
-    ScheduledTask_set_description(p, desc);
-    ScheduledTask_set_agent_id(p, agent);
+    ScheduledTask_set_task_id(p, _samay_own(tid, "samay: out of memory in scheduled_task_from_jsonv"));
+    ScheduledTask_set_name(p, _samay_own(name, "samay: out of memory in scheduled_task_from_jsonv"));
+    ScheduledTask_set_description(p, _samay_own(desc, "samay: out of memory in scheduled_task_from_jsonv"));
+    ScheduledTask_set_agent_id(p, _samay_own(agent, "samay: out of memory in scheduled_task_from_jsonv"));
     ScheduledTask_set_priority(p, _clamp_i64(_jv_int(v, "priority", 1), 1, 10));
     ScheduledTask_set_resource_requirements(p, req);
     ScheduledTask_set_status(p, st);

@@ -30,9 +30,9 @@ struct CronTaskTemplate {
 fn cron_task_template_new(name, description, agent_id, priority, req): i64 {
     var p = alloc(40);
     if (p == 0) { panic("samay: out of memory in cron_task_template_new"); }
-    CronTaskTemplate_set_name(p, name);
-    CronTaskTemplate_set_description(p, description);
-    CronTaskTemplate_set_agent_id(p, agent_id);
+    CronTaskTemplate_set_name(p, _samay_own(name, "samay: out of memory in cron_task_template_new"));
+    CronTaskTemplate_set_description(p, _samay_own(description, "samay: out of memory in cron_task_template_new"));
+    CronTaskTemplate_set_agent_id(p, _samay_own(agent_id, "samay: out of memory in cron_task_template_new"));
     CronTaskTemplate_set_priority(p, priority);
     CronTaskTemplate_set_resource_requirements(p, req);
     return p;
@@ -53,7 +53,7 @@ struct CronEntry {
 fn cron_entry_new(name, expr, task_template, enabled, missed_policy): i64 {
     var p = alloc(48);
     if (p == 0) { panic("samay: out of memory in cron_entry_new"); }
-    CronEntry_set_name(p, name);
+    CronEntry_set_name(p, _samay_own(name, "samay: out of memory in cron_entry_new"));
     CronEntry_set_expr(p, expr);
     CronEntry_set_task_template(p, task_template);
     CronEntry_set_enabled(p, enabled);

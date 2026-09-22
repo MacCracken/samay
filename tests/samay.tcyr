@@ -1917,6 +1917,94 @@ fn test_sec_clamp_negative_resources() {
     return 0;
 }
 
+# ⛔ 1.1.3 — every constructor must OWN the Strs it retains.
+#
+# Through 1.1.2 they stored the caller's pointer. daimon passes `jget` results —
+# views into an HTTP request buffer its server reuses — and on the live daimon
+# binary a task submitted as "ORIGINAL_TASK_NAME" read back as another client's
+# request bytes after one unrelated request. The shape below is the consumer's:
+# build the input over a MUTABLE heap buffer, construct, overwrite every source
+# byte as a reused buffer would, then assert the record still reads the original.
+fn _own_mut(cstr, n) {
+    var b = alloc(64);
+    memcpy(b, cstr, n);
+    return str_new(b, n);
+}
+fn _own_clobber(st) {
+    memset(str_data(st), 88, str_len(st));   # 'X' over every source byte
+    return 0;
+}
+fn _own_is(got, want) { return str_eq(got, str_from(want)); }
+
+fn test_ownership_retained_strs() {
+    test_group("own_retained_strs");
+
+    # scheduled_task_new — the one daimon reaches live
+    var tn = _own_mut("task-name", 9);
+    var td = _own_mut("task-desc", 9);
+    var ta = _own_mut("agent-one", 9);
+    var t = scheduled_task_new(tn, td, ta, 5, resource_req_default());
+    _own_clobber(tn); _own_clobber(td); _own_clobber(ta);
+    assert_eq(_own_is(ScheduledTask_name(t), "task-name"), 1, "task name owned");
+    assert_eq(_own_is(ScheduledTask_description(t), "task-desc"), 1, "task description owned");
+    assert_eq(_own_is(ScheduledTask_agent_id(t), "agent-one"), 1, "task agent_id owned");
+
+    # node_capacity_new — node_id is also the scheduler's MAP KEY for this node
+    var nid = _own_mut("node-7", 6);
+    var n = node_capacity_new(nid, f64_from(4), 1024, 2048, 0);
+    _own_clobber(nid);
+    assert_eq(_own_is(NodeCapacity_node_id(n), "node-7"), 1, "node_id owned");
+
+    # scheduling_decision_new
+    var dt = _own_mut("tid-1", 5);
+    var dn = _own_mut("node-a", 6);
+    var dr = _own_mut("best-fit", 8);
+    var d = scheduling_decision_new(dt, dn, dr, f64_from(1));
+    _own_clobber(dt); _own_clobber(dn); _own_clobber(dr);
+    assert_eq(_own_is(SchedulingDecision_task_id(d), "tid-1"), 1, "decision task_id owned");
+    assert_eq(_own_is(SchedulingDecision_assigned_node(d), "node-a"), 1, "decision node owned");
+    assert_eq(_own_is(SchedulingDecision_reason(d), "best-fit"), 1, "decision reason owned");
+
+    # preemption_action_new
+    var pa = _own_mut("victim", 6);
+    var pb = _own_mut("winner", 6);
+    var pr = _own_mut("priority", 8);
+    var pre = preemption_action_new(pa, pb, pr);
+    _own_clobber(pa); _own_clobber(pb); _own_clobber(pr);
+    assert_eq(_own_is(PreemptionAction_preempted_task_id(pre), "victim"), 1, "preempted id owned");
+    assert_eq(_own_is(PreemptionAction_preempting_task_id(pre), "winner"), 1, "preempting id owned");
+    assert_eq(_own_is(PreemptionAction_reason(pre), "priority"), 1, "preemption reason owned");
+
+    # cron_task_template_new + cron_entry_new
+    var cn = _own_mut("nightly", 7);
+    var cd = _own_mut("rebuild", 7);
+    var ca = _own_mut("builder", 7);
+    var tmpl = cron_task_template_new(cn, cd, ca, 3, resource_req_default());
+    _own_clobber(cn); _own_clobber(cd); _own_clobber(ca);
+    assert_eq(_own_is(CronTaskTemplate_name(tmpl), "nightly"), 1, "cron template name owned");
+    assert_eq(_own_is(CronTaskTemplate_description(tmpl), "rebuild"), 1, "cron template desc owned");
+    assert_eq(_own_is(CronTaskTemplate_agent_id(tmpl), "builder"), 1, "cron template agent owned");
+    var _ce_t, _ce_v = cron_expr_parse(str_from("0 3 * * *"));
+    var en = _own_mut("entry-1", 7);
+    var ent = cron_entry_new(en, result_unwrap(_ce_t, _ce_v), tmpl, 1, 0);
+    _own_clobber(en);
+    assert_eq(_own_is(CronEntry_name(ent), "entry-1"), 1, "cron entry name owned");
+
+    # training_job_template_new
+    var mm = _own_mut("llama-8b", 8);
+    var md = _own_mut("corpus", 6);
+    var tj = training_job_template_new(mm, TM_LORA, md, 0, 60, 0);
+    _own_clobber(mm); _own_clobber(md);
+    assert_eq(_own_is(TrainingJobTemplate_model_id(tj), "llama-8b"), 1, "training model_id owned");
+    assert_eq(_own_is(TrainingJobTemplate_dataset(tj), "corpus"), 1, "training dataset owned");
+
+    # 0 is the None sentinel for optional Str fields and must pass through
+    # UNCLONED — not crash in str_len(0), and not panic as if it were an OOM.
+    var none = preemption_action_new(str_from("a"), str_from("b"), 0);
+    assert_eq(PreemptionAction_reason(none), 0, "None (0) passes through, not cloned");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_uuid_format();
@@ -2035,6 +2123,7 @@ fn main() {
     test_sec_container_drops_bad();
     test_sec_clamp_priority();
     test_sec_clamp_negative_resources();
+    test_ownership_retained_strs();
     return assert_summary();
 }
 

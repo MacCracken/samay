@@ -14,6 +14,33 @@
 fn _f64_max(a, b): i64 { if (f64_gt(a, b) == 1) { return a; } return b; }
 fn _f64_min(a, b): i64 { if (f64_lt(a, b) == 1) { return a; } return b; }
 
+# Own a caller-supplied Str: copy its bytes into samay's own allocation.
+#
+# ⛔ 1.1.3 — every constructor that RETAINS a caller's Str now goes through here.
+# Through 1.1.2 they stored the pointer they were given, so samay's records held
+# whatever lifetime the CALLER's buffer had. daimon — samay's consumer — hands in
+# `jget` results: VIEWS into an HTTP request buffer that its server REUSES for
+# the next connection. Measured on the live daimon binary:
+#
+#   POST /v1/scheduler/tasks {"name":"ORIGINAL_TASK_NAME"}
+#   (one unrelated request from another client)
+#   GET  /v1/scheduler/tasks/<id>  ->  "name":"ZZZZZZZZZZZZZZZZZZ"
+#
+# i.e. another client's request body, served back as this task's name. The
+# library, not the caller, is the right place for the rule: a constructor that
+# keeps a Str must own it, because it cannot know how long the caller's lives.
+#
+# 0 is samay's None sentinel for optional Str fields (see the header), so a 0
+# input is passed through, never cloned. A non-null input that clones to 0 is an
+# OOM, and per ADR-0009 a null must never leave the function that created it:
+# `who` names the constructor so the panic says where it happened.
+fn _samay_own(s, who): i64 {
+    if (s == 0) { return 0; }
+    var c = str_clone(s);
+    if (c == 0) { panic(who); }
+    return c;
+}
+
 # Force the process-global lazy initialisers samay's code paths depend on to
 # run NOW, while the caller is still single-threaded.
 #
@@ -248,9 +275,9 @@ fn scheduled_task_new(name, description, agent_id, priority, req): i64 {
     if (prio < 1) { prio = 1; }
     if (prio > 10) { prio = 10; }
     ScheduledTask_set_task_id(p, samay_uuid_v4());
-    ScheduledTask_set_name(p, name);
-    ScheduledTask_set_description(p, description);
-    ScheduledTask_set_agent_id(p, agent_id);
+    ScheduledTask_set_name(p, _samay_own(name, "samay: out of memory in scheduled_task_new"));
+    ScheduledTask_set_description(p, _samay_own(description, "samay: out of memory in scheduled_task_new"));
+    ScheduledTask_set_agent_id(p, _samay_own(agent_id, "samay: out of memory in scheduled_task_new"));
     ScheduledTask_set_priority(p, prio);
     ScheduledTask_set_resource_requirements(p, req);
     ScheduledTask_set_status(p, TASK_QUEUED);
@@ -303,7 +330,7 @@ struct NodeCapacity {
 fn node_capacity_new(node_id, total_cpu, total_memory_mb, total_disk_mb, gpu_available): i64 {
     var p = alloc(72);   # 9 fields * 8
     if (p == 0) { panic("samay: out of memory in node_capacity_new"); }
-    NodeCapacity_set_node_id(p, node_id);
+    NodeCapacity_set_node_id(p, _samay_own(node_id, "samay: out of memory in node_capacity_new"));
     NodeCapacity_set_total_cpu(p, total_cpu);
     NodeCapacity_set_available_cpu(p, total_cpu);
     NodeCapacity_set_total_memory_mb(p, total_memory_mb);
@@ -431,9 +458,10 @@ struct SchedulingDecision {
 fn scheduling_decision_new(task_id, assigned_node, reason, score): i64 {
     var p = alloc(32);
     if (p == 0) { panic("samay: out of memory in scheduling_decision_new"); }
-    SchedulingDecision_set_task_id(p, task_id);
-    SchedulingDecision_set_assigned_node(p, assigned_node);
-    SchedulingDecision_set_reason(p, reason);
+    SchedulingDecision_set_task_id(p, _samay_own(task_id, "samay: out of memory in scheduling_decision_new"));
+    SchedulingDecision_set_assigned_node(p,
+        _samay_own(assigned_node, "samay: out of memory in scheduling_decision_new"));
+    SchedulingDecision_set_reason(p, _samay_own(reason, "samay: out of memory in scheduling_decision_new"));
     SchedulingDecision_set_score(p, score);
     return p;
 }
@@ -455,9 +483,11 @@ fn preemption_action_new(preempted_task_id, preempting_task_id, reason): i64 {
     # from "nothing to preempt", and tests/samay.tcyr:319/:328 assert exactly
     # that equality -- so they would PASS on an OOM. See ADR-0009.
     if (p == 0) { panic("samay: out of memory in preemption_action_new"); }
-    PreemptionAction_set_preempted_task_id(p, preempted_task_id);
-    PreemptionAction_set_preempting_task_id(p, preempting_task_id);
-    PreemptionAction_set_reason(p, reason);
+    PreemptionAction_set_preempted_task_id(p,
+        _samay_own(preempted_task_id, "samay: out of memory in preemption_action_new"));
+    PreemptionAction_set_preempting_task_id(p,
+        _samay_own(preempting_task_id, "samay: out of memory in preemption_action_new"));
+    PreemptionAction_set_reason(p, _samay_own(reason, "samay: out of memory in preemption_action_new"));
     return p;
 }
 

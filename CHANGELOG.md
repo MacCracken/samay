@@ -4,6 +4,90 @@ All notable changes to Samay are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.1.3] — 2026-09-22
+
+**samay now owns every Str it retains.** Seven constructors stored the caller's pointer instead of
+a copy, and samay's consumer was serving another client's HTTP request body back as a task name.
+Plus the toolchain move to cyrius 6.6.6. **465 tests** (was 448), all CI gates clean.
+
+### Fixed — constructors retained the caller's Str instead of owning it
+
+Every constructor that keeps a `Str` stored the pointer it was handed, so a samay record lived
+exactly as long as its *caller's* buffer. daimon hands in `jget` results — views into an HTTP
+request buffer its server **reuses** for the next connection. Measured on the live daimon binary:
+
+```
+POST /v1/scheduler/tasks {"name":"ORIGINAL_TASK_NAME"}
+(one unrelated request from another client)
+GET  /v1/scheduler/tasks/<id>  ->  "name":"ZZZZZZZZZZZZZZZZZZ"
+```
+
+Another client's request body, served back as this task's name. The rule belongs in the library,
+not in each caller: **a constructor that keeps a Str must own it, because it cannot know how long
+the caller's lives.** daimon 2.2.1 had to defend at its own boundary; with this release it no
+longer needs to.
+
+The consumer surfaced two sites. A sweep of every constructor found **20 retained Str fields across
+8 functions** — the same class, most never reached by anyone yet:
+
+| function | fields now owned |
+|---|---|
+| `scheduled_task_new` | `name`, `description`, `agent_id` — the live one |
+| `node_capacity_new` | `node_id` — also the scheduler's **map key** for that node |
+| `scheduling_decision_new` | `task_id`, `assigned_node`, `reason` |
+| `preemption_action_new` | `preempted_task_id`, `preempting_task_id`, `reason` |
+| `cron_task_template_new` | `name`, `description`, `agent_id` |
+| `cron_entry_new` | `name` |
+| `training_job_template_new` | `model_id`, `dataset` |
+| `scheduled_task_from_jsonv` | `task_id`, `name`, `description`, `agent_id` |
+
+All 20 route through one helper, `_samay_own(s, who)`, in `src/types.cyr`.
+
+**It honours [ADR-0009](docs/adr/0009-oom-policy.md) rather than just passing its gate.** `str_clone`
+returns 0 on OOM, and the CI regex only matches literal `= alloc(` — so an unguarded clone would
+have been green and wrong, which is precisely the class ADR-0009 names as the dangerous one ("a null
+**escapes as struct data**"). A 0 from the clone panics with `samay: out of memory in <fn>`. A 0
+*input* is different: `0` is samay's None sentinel for optional Str fields, so it passes through
+uncloned — never crashing in `str_len(0)`, never mistaken for an OOM. Both behaviours are asserted.
+
+⚠ **The restore path was not live-broken, and is changed anyway.** `scheduled_task_from_jsonv` gets
+its strings from bayan's parser, which must build fresh buffers because it decodes JSON escapes — so
+they were already owned. It is routed through the helper because it duplicates
+`scheduled_task_new`'s field-setting under a comment reading *"MUST track scheduled_task_new"*: an
+ownership rule that lives in one copy and not the other is exactly the drift that comment exists to
+prevent. A clobber test cannot distinguish fixed from unfixed there, so none is claimed.
+
+**Mutation-proven**: `test_ownership_retained_strs` builds each input over a mutable buffer,
+constructs, overwrites every source byte, and asserts the record still reads the original. With
+`_samay_own` reduced to a pass-through (1.1.2's behaviour), **16 of its 17 assertions fail**; the
+17th is the None-passthrough, which holds either way by design.
+
+### Changed — cyrius pin 6.6.2 → **6.6.6**, dependency pins
+
+| | was | now |
+|---|---|---|
+| cyrius | 6.6.2 | **6.6.6** |
+| bayan | 1.5.5 | **1.5.6** |
+| ai-hwaccel | 2.3.22 | **2.3.23** |
+
+`lib/` is re-vendored from the 6.6.6 snapshot: 23 files updated, one added (`alloc_cx.cyr`, the
+allocator peer for the cx bytecode target, new in cyrius 6.6.5), none removed.
+
+### Performance
+
+`scheduled_task_new`, isolated from the toolchain change by building the same tree twice — once
+with `_samay_own` as a pass-through — and running the two interleaved, 9 pairs:
+
+| | median |
+|---|---:|
+| 1.1.2 behaviour (store caller's pointer) | 2.031 µs |
+| 1.1.3 (own three Strs) | 2.210 µs |
+| **cost of ownership** | **+179 ns (+8.8%)** |
+
+Non-overlapping distributions (2.027–2.047 vs 2.203–2.232 µs). Three short copies per task, paid
+once at submission; nothing on the scheduling hot path (`node_can_fit`, `cron_expr_matches`)
+changes.
+
 ## [1.1.2] - 2026-09-10
 
 **Migrated to the cyrius 6.6.x value form.** Unblocks kavach, which vendors samay.
