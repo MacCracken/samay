@@ -8,6 +8,8 @@ Decisions about samay — what we chose, the context, and the consequences we ac
 - **One decision per ADR.** If a decision supersedes a prior one, add a new ADR and set the old one's status to `Superseded by NNNN`.
 - **Status lifecycle**: `Proposed` → `Accepted` → (optionally) `Superseded` or `Deprecated`.
 - Use [`template.md`](template.md) as the starting point.
+- **Oracle citations** such as `rust-old/src/lib.rs:483` refer to tag `1.1.5`, the last
+  revision that has the Rust oracle. `git show 1.1.5:rust-old/src/lib.rs` reads it.
 
 ## ADR vs. architecture note vs. guide
 

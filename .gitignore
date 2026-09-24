@@ -1,6 +1,5 @@
 # Build output
 /build/
-/rust-old/target/
 
 # IDE
 .idea/

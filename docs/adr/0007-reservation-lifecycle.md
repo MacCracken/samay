@@ -35,10 +35,12 @@ preemption) also never released, *and* `schedule_pending` overwrites `node_prefe
 with the assigned node, so the preferred-node branch re-selected the same node and
 reserved it a second time.
 
-**This is inherited, not a port regression.** `grep -n "\.release(\|\.reserve(" rust-old/src/lib.rs`
-shows the oracle has the identical shape: one `reserve` at :458, one `release` at :383
-inside `cancel_task`. CLAUDE.md sets the correctness bar at "matches what Rust did" and
-requires an ADR to diverge. This is that ADR: the oracle is wrong here, and matching it
+**This is inherited, not a port regression.**
+`git show 1.1.5:rust-old/src/lib.rs | grep -n "\.release(\|\.reserve("` shows the oracle
+has the identical shape: one `reserve` at :458, and one `release` at :383 inside
+`cancel_task`. (The oracle was retired after 1.1.5; that tag is the last revision with
+it.) At the time, CLAUDE.md set the correctness bar at "matches what Rust did" and
+required an ADR to diverge. This is that ADR: the oracle is wrong here, and matching it
 faithfully would ship a scheduler that stops scheduling.
 
 ## Decision

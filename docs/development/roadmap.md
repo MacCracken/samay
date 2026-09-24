@@ -14,8 +14,8 @@
 > bayan-json **1.5.7**. Gates green: **558 assertions**, **5/5 benchmarks**,
 > coverage **79/79** public functions (each called by a test), lint 0-warn / 0
 > untracked deferrals, fmt clean, `dist/` in sync (2,463 lines), 0 symbol collisions
-> against the vendored deps. `src/` is 9 modules against the frozen 1,479-line Rust
-> oracle, which is ready to retire ([`rust-old-removal.md`](rust-old-removal.md)).
+> against the vendored deps. `src/` is 9 modules. The 1,479-line Rust oracle was
+> retired after 1.1.5 ([`rust-old-removal.md`](rust-old-removal.md)).
 
 ## The arc at a glance
 

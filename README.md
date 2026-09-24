@@ -115,7 +115,6 @@ expression against the wrong date.
 
 - `src/{uuid,types,scheduler,cronexpr,cron,training,json}.cyr` — domain modules
 - `src/lib.cyr` — aggregation header · `dist/samay.cyr` — bundled distributable
-- `rust-old/` — the frozen Rust reference (parity oracle; do not edit)
 - `docs/` — architecture, ADRs, roadmap, benchmarks
 
 ## Documentation

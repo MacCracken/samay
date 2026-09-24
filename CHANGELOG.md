@@ -4,6 +4,34 @@ All notable changes to Samay are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Removed — `rust-old/`
+
+The Rust oracle is retired: 7 files, 1,479 lines of `src/lib.rs`.
+[`docs/development/rust-old-removal.md`](docs/development/rust-old-removal.md) holds the audit
+that cleared it. Every public item and all 53 tests are mapped, and everything the port
+dropped is recorded there. 1.1.5 fixed the three blockers that audit found.
+
+- **Anchor:** tag `1.1.5` (`7f39cab`, on GitHub) is the last revision with the tree, and
+  `git show 1.1.5:rust-old/src/lib.rs` reads it. Every `rust-old/src/lib.rs:N` citation
+  in the ADRs, comments and tests refers to that tag. `CLAUDE.md` and the ADR index say so
+  once, rather than each citation being rewritten, so no source file and no test changed.
+- **`CLAUDE.md`:** the "cross-check against `rust-old/`" principle became "divergence needs
+  an ADR", and the "do not modify `rust-old/`" rule was dropped.
+- **Other references:** the README and getting-started layouts, the getting-started
+  workflow step, `state.md`, the roadmap, and the `.gitignore` entry.
+
+No `src/` change. `dist/samay.cyr` is unchanged, and 558/558 tests still pass.
+
+### Upstream — the coverage-tool weakness is filed
+
+The finding behind 1.1.5's strict coverage check is filed against cyrius as
+`docs/development/issues/2026-09-23-samay-coverage-counts-substrings-and-comments-as-references.md`.
+It includes a three-function reproduction that passes `--min 100` with one function
+referenced. Once cyrius matches whole identifiers outside comments, the strict half of CI's
+"Every public function is called by a test" step can be reconsidered.
+
 ## [1.1.5] — 2026-09-23
 
 **Every assertion ported from the Rust oracle can now fail, and every public function has a

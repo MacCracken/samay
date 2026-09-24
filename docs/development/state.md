@@ -12,6 +12,9 @@ oracle's; all are fixed. Every public function is now called by a test (79/79),
 and CI gates on that. ADR-0006's account of the oracle's cron model is corrected.
 558 assertions.
 
+**Unreleased:** `rust-old/` is removed. The tag `1.1.5` is the last revision that has
+it (`git show 1.1.5:rust-old/src/lib.rs`).
+
 Built on **1.1.4** (ai-hwaccel 2.4.0, bayan 1.5.7), **1.1.3** (constructors own
 every `Str` they retain), **1.1.2** (the cyrius 6.6.x `Result` value form),
 **1.1.1** (every allocation checked, [ADR-0009](../adr/0009-oom-policy.md)),
@@ -35,7 +38,9 @@ sweep).
   how the benchmark suite sat dead from v0.5.0 to v1.0.1 and how the README's
   own example was broken until v1.0.4. Wrap literals in `str_from(...)`.
 - Bundle: `dist/samay.cyr` (regenerate with `cyrius distlib` after any src change).
-- Rust reference: 1479 lines at `rust-old/` (frozen, do not edit).
+- Rust reference: retired after 1.1.5. Its 1,479 lines are at tag `1.1.5`
+  (`git show 1.1.5:rust-old/src/lib.rs`). What it did is recorded in the ADRs and
+  [`rust-old-removal.md`](rust-old-removal.md).
 
 ## Tests
 

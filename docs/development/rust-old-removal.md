@@ -2,7 +2,8 @@
 
 > Audited 2026-09-23 against samay 1.1.4 (cyrius 6.6.6), following kavach's
 > `docs/development/rust-old-removal.md`. Updated for 1.1.5, which fixed the three
-> blockers the audit found.
+> blockers the audit found. **`rust-old/` was removed after 1.1.5.** Tag `1.1.5` is the
+> last revision that has it: `git show 1.1.5:rust-old/src/lib.rs`.
 
 This document answers one question: can `rust-old/` be deleted without losing anything the
 Cyrius port has not already captured? Once the oracle is gone, this file and the ADRs are
@@ -10,9 +11,8 @@ the only description of it, so everything the port dropped is written down here.
 
 ## Verdict
 
-**Ready, as of 1.1.5.** What remains is the removal itself: tag the last commit that has
-the tree, delete it, and update the [references](#references-to-update-at-removal) in the
-same change.
+**Removed.** It was ready as of 1.1.5. The tree was deleted in the change after that tag,
+and the [references](#references-to-update-at-removal) were updated in the same change.
 
 Every public item in the Rust crate has a Cyrius equivalent, or an ADR recording what
 replaced it. Every one of the 53 Rust tests has a counterpart. Nothing reads `rust-old/` at
@@ -182,19 +182,19 @@ not the same as being right.
 
 ## References to update at removal
 
-Line numbers move with every edit, so this table names *what* to change, not where.
-`grep -rn rust-old --exclude-dir=lib --exclude-dir=rust-old --exclude-dir=.git .` finds
-every occurrence.
+All updated in the removal change. Line numbers move with every edit, so this table names
+*what* changed, not where. `grep -rn rust-old --exclude-dir=lib --exclude-dir=.git .` finds
+every remaining mention.
 
-| File | What |
+| File | What was done |
 |---|---|
-| `CLAUDE.md` | Project identity, Scaffolding, the "cross-check against `rust-old/`" principle, and the "do not modify" rule. The principle should point at the ADRs and this file instead |
-| `README.md`, `docs/guides/getting-started.md` | Layout and workflow |
-| `docs/development/state.md`, `roadmap.md` | "1,479-line Rust oracle" and "ready to retire" |
-| `.gitignore` | `/rust-old/target/` |
-| `src/types.cyr`, `src/scheduler.cyr`, and therefore `dist/samay.cyr`; `tests/samay.tcyr` | Oracle citations such as `lib.rs:483` and `lib.rs:68-83`. Keep them as breadcrumbs, pointing at the tag |
-| ADR-0001, 0003, 0004, 0006, 0007; `docs/audit/2026-07-21-audit.md` | Oracle citations, several with line numbers. Point them at the tag |
-| `CHANGELOG.md` | Leave the history as it is; record the removal under the release that makes it |
+| `CLAUDE.md` | Project identity and Scaffolding now say the oracle is retired and give the anchor. The "cross-check against `rust-old/`" principle became "divergence needs an ADR", and the "do not modify" rule was dropped |
+| `README.md`, `docs/guides/getting-started.md` | `rust-old/` removed from both layouts. The workflow step now points at the ADRs and this file |
+| `docs/development/state.md`, `roadmap.md` | Now say "retired after 1.1.5" |
+| `.gitignore` | `/rust-old/target/` removed |
+| `src/types.cyr`, `src/scheduler.cyr`, and therefore `dist/samay.cyr`; `tests/samay.tcyr` | Oracle citations such as `lib.rs:483` and `lib.rs:68-83` are **kept as breadcrumbs**. `CLAUDE.md`'s Scaffolding section states that they refer to tag `1.1.5`, so no source file changed |
+| ADR-0001, 0003, 0004, 0006, 0007; `docs/audit/2026-07-21-audit.md` | Citations kept. The ADR index's Conventions section states the anchor once, rather than each citation being rewritten |
+| `CHANGELOG.md` | History left as it is. The removal is recorded under `[Unreleased]` |
 
 ## Pre-removal checklist
 
@@ -205,13 +205,16 @@ every occurrence.
       (1.1.5).
 - [x] Decide on a coverage gate: 100% of public functions, each called by a test, in CI
       (1.1.5).
-- [ ] Tag the last commit that still has `rust-old/`, and point every citation above at it.
-      The `1.1.5` release tag serves if the removal lands after it.
-- [ ] Update the references above in the same change that deletes the tree.
+- [x] Tag the last commit that still has `rust-old/`, and point every citation above at it.
+      That is the `1.1.5` release tag (`7f39cab`, also on GitHub).
+- [x] Update the references above in the same change that deletes the tree.
 
 ## Removal
 
+Done in the change after `1.1.5`. The `1.1.5` release tag served as the anchor, so no
+separate `samay-pre-rust-removal` tag was needed:
+
 ```sh
-git tag samay-pre-rust-removal HEAD   # or rely on the 1.1.5 release tag
-git rm -r rust-old/
+git show 1.1.5:rust-old/src/lib.rs       # the oracle, 1,479 lines
+git ls-tree -r --name-only 1.1.5 rust-old # all 7 files
 ```
