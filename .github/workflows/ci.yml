@@ -71,6 +71,30 @@ jobs:
           done
           exit $fail
 
+      - name: Every public function is called by a test
+        # `cyrius coverage` counts a public fn as covered when its NAME occurs anywhere in
+        # tests/*.tcyr: as a substring, comments included. Through 1.1.4 that credited two
+        # functions no test called: cron_scheduler_check_due (a prefix of check_due_at) and
+        # samay_str_lt (named only in comments). So this runs the tool at 100% AND a strict
+        # pass: every public fn in [lib].modules must be CALLED, meaning the whole name then
+        # `(`, outside a comment. Both verified to fail on the 1.1.4 tests and on a planted
+        # untested function. The call text goes to a file rather than a pipe into grep -q,
+        # which under pipefail would read printf's SIGPIPE as "not found".
+        run: |
+          cyrius coverage --min 100
+          calls="$(mktemp)"
+          sed 's/#.*$//' tests/*.tcyr > "$calls"
+          fail=0
+          for f in $(sed -n '/^\[lib\]/,/^\]/p' cyrius.cyml | grep -oE 'src/[a-z_]+\.cyr'); do
+            for fn in $(grep -oE '^(pub )?fn [A-Za-z][A-Za-z0-9_]*' "$f" | awk '{print $NF}'); do
+              if ! grep -qE "(^|[^A-Za-z0-9_])$fn\(" "$calls"; then
+                echo "::error file=$f::public fn '$fn' is never called by a test"
+                fail=1
+              fi
+            done
+          done
+          exit $fail
+
       - name: Every allocation in src/ is guarded (ADR-0009)
         # The OOM branch is not unit-testable, so this is what actually pins
         # the policy: every raw alloc() in src/ must have a `panic` within the

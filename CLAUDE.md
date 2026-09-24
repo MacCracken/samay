@@ -69,10 +69,16 @@ usage and exits 0 — a gate written that way checks nothing. Loop:
 for f in src/*.cyr tests/*.tcyr tests/*.bcyr; do cyrius fmt "$f" --check; done
 for f in src/*.cyr; do cyrius lint "$f"; done   # 0 warnings AND 0 untracked deferrals
 cyrius test                                     # all pass
+cyrius coverage --min 100                       # every public fn named in tests/*.tcyr
 cyrius bench tests/samay.bcyr                   # 5/5 report
 cyrius distlib                                  # regenerate dist/samay.cyr
 cyrius distlib --check                          # exits 1 if the bundle is stale
 ```
+
+`cyrius coverage` counts a name that appears anywhere in the tests, including a comment or
+a longer name that contains it. CI adds a stricter check: every public fn in
+`[lib].modules` must be *called* (`name(` outside a comment) by a `.tcyr`. A new public
+function ships with a test that calls it.
 
 Then: scan new public symbols against the vendored deps for collisions, and keep
 `VERSION` + `cyrius.cyml` + the zugot recipe in sync. CI runs all of the above.

@@ -46,7 +46,13 @@ fn test_uuid_format() {
 }
 fn test_uuid_unique() {
     test_group("uuid_unique");
-    assert_eq(str_eq_cstr(samay_uuid_v4(), samay_uuid_v4()), 0, "two uuids differ");
+    # Through 1.1.4 this compared with str_eq_cstr, which takes a C string: given
+    # a Str it strlen()s the header, so it answered "differ" even for a uuid
+    # compared with itself, and the assertion could not fail. The self-check
+    # proves the comparator can say "equal" before trusting its "differ".
+    var u = samay_uuid_v4();
+    assert_eq(str_eq(u, u), 1, "comparator sees equal as equal");
+    assert_eq(str_eq(u, samay_uuid_v4()), 0, "two uuids differ");
     return 0;
 }
 
@@ -94,7 +100,9 @@ fn test_invalid_transitions() {
     var t = make_task("t", 5);
     assert_eq(is_err_result(scheduled_task_transition(t, TASK_COMPLETED)), 1, "queued->completed err");
     var t2 = make_task("t2", 5);
-    scheduled_task_transition(t2, TASK_CANCELLED);
+    # The oracle unwrap()ed this. Unchecked, a broken QUEUED->CANCELLED left t2
+    # QUEUED, and the next assertion passed anyway (QUEUED->QUEUED is invalid too).
+    assert_eq(is_ok(scheduled_task_transition(t2, TASK_CANCELLED)), 1, "queued->cancelled");
     assert_eq(is_err_result(scheduled_task_transition(t2, TASK_QUEUED)), 1, "cancelled->queued err");
     return 0;
 }
@@ -122,6 +130,65 @@ fn test_preempt_requeue() {
     scheduled_task_transition(t, TASK_RUNNING);
     assert_eq(is_ok(scheduled_task_transition(t, TASK_PREEMPTED)), 1, "running->preempted");
     assert_eq(is_ok(scheduled_task_transition(t, TASK_QUEUED)), 1, "preempted->queued");
+    return 0;
+}
+
+# The oracle's TaskStatus::valid_transition (rust-old/src/lib.rs:68-83) as
+# data: its 10 legal edges, encoded from * 8 + to. The oracle's own tests
+# checked 9 of the 49 pairs; this checks all of them, so an extra edge fails as
+# surely as a missing one.
+fn test_status_transition_matrix() {
+    test_group("status_matrix");
+    var legal = vec_new();
+    vec_push(legal, TASK_QUEUED * 8 + TASK_SCHEDULED);
+    vec_push(legal, TASK_QUEUED * 8 + TASK_CANCELLED);
+    vec_push(legal, TASK_SCHEDULED * 8 + TASK_RUNNING);
+    vec_push(legal, TASK_SCHEDULED * 8 + TASK_CANCELLED);
+    vec_push(legal, TASK_SCHEDULED * 8 + TASK_QUEUED);
+    vec_push(legal, TASK_RUNNING * 8 + TASK_COMPLETED);
+    vec_push(legal, TASK_RUNNING * 8 + TASK_FAILED);
+    vec_push(legal, TASK_RUNNING * 8 + TASK_CANCELLED);
+    vec_push(legal, TASK_RUNNING * 8 + TASK_PREEMPTED);
+    vec_push(legal, TASK_PREEMPTED * 8 + TASK_QUEUED);
+    var first_wrong = 0 - 1;
+    var valid = 0;
+    var a = TASK_QUEUED;
+    while (a <= TASK_PREEMPTED) {
+        var b = TASK_QUEUED;
+        while (b <= TASK_PREEMPTED) {
+            var want = 0;
+            var k = 0;
+            while (k < vec_len(legal)) {
+                if (vec_get(legal, k) == a * 8 + b) { want = 1; }
+                k = k + 1;
+            }
+            var got = task_status_valid_transition(a, b);
+            if (got != want) { if (first_wrong < 0) { first_wrong = a * 8 + b; } }
+            valid = valid + got;
+            b = b + 1;
+        }
+        a = a + 1;
+    }
+    assert_eq(first_wrong, 0 - 1, "no pair differs from the oracle (first bad pair, from*8+to)");
+    assert_eq(valid, 10, "exactly the oracle's 10 legal edges");
+    assert_eq(task_status_valid_transition(TASK_QUEUED, 7), 0, "unknown target status rejected");
+    assert_eq(task_status_valid_transition(0 - 1, TASK_QUEUED), 0, "unknown source status rejected");
+    return 0;
+}
+
+# The oracle's ScheduledTask::priority_class across every band boundary, and
+# through the constructor's clamp.
+fn test_priority_class() {
+    test_group("priority_class");
+    assert_eq(scheduled_task_priority_class(make_task("p", 1)), PRIO_NORMAL, "1 normal");
+    assert_eq(scheduled_task_priority_class(make_task("p", 3)), PRIO_NORMAL, "3 normal");
+    assert_eq(scheduled_task_priority_class(make_task("p", 4)), PRIO_HIGH, "4 high");
+    assert_eq(scheduled_task_priority_class(make_task("p", 6)), PRIO_HIGH, "6 high");
+    assert_eq(scheduled_task_priority_class(make_task("p", 7)), PRIO_CRITICAL, "7 critical");
+    assert_eq(scheduled_task_priority_class(make_task("p", 9)), PRIO_CRITICAL, "9 critical");
+    assert_eq(scheduled_task_priority_class(make_task("p", 10)), PRIO_EMERGENCY, "10 emergency");
+    assert_eq(scheduled_task_priority_class(make_task("p", 0)), PRIO_NORMAL, "0 clamps to 1: normal");
+    assert_eq(scheduled_task_priority_class(make_task("p", 15)), PRIO_EMERGENCY, "15 clamps to 10: emergency");
     return 0;
 }
 
@@ -201,10 +268,13 @@ fn test_node_tpu_insufficient_chips() {
     assert_eq(node_capacity_can_fit(n, req), 0, "1 chip < 2 required");
     return 0;
 }
+# f64 assertions below compare values with f64_eq. Through 1.1.4 several used
+# f64_to(x) == k, which truncates: "util 0" held for any utilization in [0, 1),
+# measured passing at 82%.
 fn test_node_utilization() {
     test_group("utilization");
     var n = make_node("n1", f64_from(4), 1000);
-    assert_eq(f64_to(node_capacity_utilization(n)), 0, "util 0 initially");
+    assert_eq(f64_eq(node_capacity_utilization(n), f64_from(0)), 1, "util 0 initially");
     node_capacity_reserve(n, make_req(f64_from(2), 500));
     assert_eq(f64_to(f64_mul(node_capacity_utilization(n), f64_from(100))), 50, "util ~0.5");
     return 0;
@@ -214,11 +284,11 @@ fn test_node_reserve_release() {
     var n = make_node("n1", f64_from(4), 2048);
     var req = make_req(f64_from(2), 1024);
     node_capacity_reserve(n, req);
-    assert_eq(f64_to(NodeCapacity_available_cpu(n)), 2, "avail cpu 2");
+    assert_eq(f64_eq(NodeCapacity_available_cpu(n), f64_from(2)), 1, "avail cpu 2");
     assert_eq(NodeCapacity_available_memory_mb(n), 1024, "avail mem 1024");
     assert_eq(NodeCapacity_running_tasks(n), 1, "running 1");
     node_capacity_release(n, req);
-    assert_eq(f64_to(NodeCapacity_available_cpu(n)), 4, "avail cpu 4 after release");
+    assert_eq(f64_eq(NodeCapacity_available_cpu(n), f64_from(4)), 1, "avail cpu 4 after release");
     assert_eq(NodeCapacity_available_memory_mb(n), 2048, "avail mem 2048 after release");
     assert_eq(NodeCapacity_running_tasks(n), 0, "running 0 after release");
     return 0;
@@ -226,7 +296,7 @@ fn test_node_reserve_release() {
 fn test_node_utilization_empty() {
     test_group("util_empty");
     var n = node_capacity_new(str_from("empty"), f64_from(0), 0, 0, 0);
-    assert_eq(f64_to(node_capacity_utilization(n)), 0, "zero-capacity util 0");
+    assert_eq(f64_eq(node_capacity_utilization(n), f64_from(0)), 1, "zero-capacity util 0");
     return 0;
 }
 fn test_deadline_field() {
@@ -241,6 +311,58 @@ fn test_priority_clamped() {
     test_group("priority_clamped");
     assert_eq(ScheduledTask_priority(scheduled_task_new(str_from("t"), str_from("d"), str_from("a"), 15, resource_req_default())), 10, "clamp 15->10");
     assert_eq(ScheduledTask_priority(scheduled_task_new(str_from("t"), str_from("d"), str_from("a"), 0, resource_req_default())), 1, "clamp 0->1");
+    return 0;
+}
+
+# The one comparator behind every determinism tie-break (ADR-0004). Until
+# 1.1.5 no test called it; coverage counted it because comments name it.
+fn test_samay_str_lt() {
+    test_group("samay_str_lt");
+    assert_eq(samay_str_lt(str_from("a"), str_from("b")), 1, "a < b");
+    assert_eq(samay_str_lt(str_from("b"), str_from("a")), 0, "b !< a");
+    assert_eq(samay_str_lt(str_from("abc"), str_from("abd")), 1, "differs at the last byte");
+    assert_eq(samay_str_lt(str_from("ab"), str_from("abc")), 1, "a proper prefix sorts first");
+    assert_eq(samay_str_lt(str_from("abc"), str_from("ab")), 0, "longer !< its prefix");
+    assert_eq(samay_str_lt(str_from("abc"), str_from("abc")), 0, "strict: equal is not less");
+    assert_eq(samay_str_lt(str_from(""), str_from("a")), 1, "empty sorts first");
+    assert_eq(samay_str_lt(str_from(""), str_from("")), 0, "empty !< empty");
+    # Bytes compare unsigned, so the order is the same everywhere: 0xC3, the
+    # lead byte of UTF-8 "é", sorts after 'z' (0x7A). Signed, it would sort first.
+    var hi[2];
+    store8(&hi, 195);
+    store8(&hi + 1, 169);
+    var e_acute = str_new(&hi, 2);
+    assert_eq(samay_str_lt(str_from("z"), e_acute), 1, "'z' < 0xC3: bytes are unsigned");
+    assert_eq(samay_str_lt(e_acute, str_from("z")), 0, "0xC3 !< 'z'");
+    return 0;
+}
+
+# The deep copy behind every cron fire (_cron_fire): each fired task must own
+# its ResourceReq, not share a pointer into the entry's template.
+fn test_resource_req_clone() {
+    test_group("resource_req_clone");
+    var r = resource_req_new(f64_div(f64_from(1), f64_from(3)), 4096, REQ_TPU, 4, 1, 10000);
+    var c = resource_req_clone(r);
+    assert_eq(c != r, 1, "a new object, not the same pointer");
+    assert_eq(f64_eq(ResourceReq_cpu_cores(c), ResourceReq_cpu_cores(r)), 1, "cpu_cores copied");
+    assert_eq(ResourceReq_memory_mb(c), 4096, "memory_mb copied");
+    assert_eq(ResourceReq_accel_req(c), REQ_TPU, "accel_req copied");
+    assert_eq(ResourceReq_accel_min_chips(c), 4, "accel_min_chips copied");
+    assert_eq(ResourceReq_network(c), 1, "network copied");
+    assert_eq(ResourceReq_disk_mb(c), 10000, "disk_mb copied");
+    ResourceReq_set_memory_mb(c, 1);
+    assert_eq(ResourceReq_memory_mb(r), 4096, "changing the copy leaves the original alone");
+    # Through the path that depends on it: two catch-up fires of one entry.
+    var cr = mk_cron("* * * * *", CRON_CATCHUP);
+    cron_scheduler_check_due_at(cr, at_ns(2026, 7, 18, 12, 0));
+    var f = cron_scheduler_check_due_at(cr, at_ns(2026, 7, 18, 12, 2));
+    assert_eq(vec_len(f), 2, "two catch-up fires");
+    var tmpl = CronEntry_task_template(vec_get(cron_scheduler_list_entries(cr), 0));
+    var tr = CronTaskTemplate_resource_requirements(tmpl);
+    var r0 = ScheduledTask_resource_requirements(vec_get(f, 0));
+    var r1 = ScheduledTask_resource_requirements(vec_get(f, 1));
+    assert_eq(r0 != tr, 1, "a fired task does not share the template's requirements");
+    assert_eq(r0 != r1, 1, "nor another fired task's");
     return 0;
 }
 
@@ -262,7 +384,10 @@ fn test_submit_multiple() {
     var id1 = result_unwrap(_id1_t, _id1_v);
     var _id2_t, _id2_v = task_scheduler_submit_task(s, make_task("t2", 7));
     var id2 = result_unwrap(_id2_t, _id2_v);
-    assert_eq(str_eq_cstr(id1, id2), 0, "ids differ");
+    # str_eq, not str_eq_cstr: the latter takes a C string, and on two Strs it
+    # answered "differ" even for equal ids (see test_uuid_unique).
+    assert_eq(str_eq(id1, id1), 1, "comparator sees equal as equal");
+    assert_eq(str_eq(id1, id2), 0, "ids differ");
     assert_eq(SchedulerStats_total_tasks(task_scheduler_stats(s)), 2, "total 2");
     return 0;
 }
@@ -368,7 +493,9 @@ fn test_schedule_fallback_when_full() {
     var task = make_task("t1", 5);
     ScheduledTask_set_node_preference(task, str_from("n1"));
     task_scheduler_submit_task(s, task);
-    var d = vec_get(task_scheduler_schedule_pending(s), 0);
+    var decisions = task_scheduler_schedule_pending(s);
+    assert_eq(vec_len(decisions), 1, "1 decision");
+    var d = vec_get(decisions, 0);
     assert_eq(str_eq_cstr(SchedulingDecision_assigned_node(d), "n2"), 1, "fallback n2");
     assert_eq(str_eq_cstr(SchedulingDecision_reason(d), "best-fit selection"), 1, "reason best-fit");
     return 0;
@@ -750,6 +877,57 @@ fn test_cron_remove_nonexistent() {
     assert_eq(is_err_result(cron_scheduler_remove_entry(cron_scheduler_new(), str_from("nope"))), 1, "err");
     return 0;
 }
+
+# The direct port of the oracle's CronScheduler::add_entry, which every Rust
+# cron test went through. Until 1.1.5 this suite reached entries only through
+# cron_scheduler_add, so this path, and its empty-name guard, never ran.
+fn test_cron_add_entry_prebuilt() {
+    test_group("cron_add_entry");
+    var c = cron_scheduler_new();
+    var _x_t, _x_v = cron_expr_parse(str_from("0 2 * * *"));
+    var expr = result_unwrap(_x_t, _x_v);
+    var e = cron_entry_new(str_from("backup"), expr, make_template(), 1, CRON_SKIP);
+    assert_eq(is_ok(cron_scheduler_add_entry(c, e)), 1, "add ok");
+    var l = cron_scheduler_list_entries(c);
+    assert_eq(vec_len(l), 1, "1 entry");
+    assert_eq(vec_get(l, 0), e, "the entry registered is the one passed");
+    assert_eq(vec_len(cron_scheduler_check_due_at(c, at_ns(2026, 7, 18, 2, 0))), 1, "and it fires on schedule");
+    # oracle: test_cron_add_empty_name_rejected
+    var blank = cron_entry_new(str_from(""), expr, make_template(), 1, CRON_SKIP);
+    assert_eq(is_err_result(cron_scheduler_add_entry(c, blank)), 1, "empty name rejected");
+    assert_eq(vec_len(cron_scheduler_list_entries(c)), 1, "and not registered");
+    return 0;
+}
+
+# The oracle's check_due() read the wall clock, and every Rust cron test called
+# it. This suite drives check_due_at (an injected clock), so until 1.1.5 the
+# wall-clock entry point never ran; `cyrius coverage` counted it only because
+# its name is a prefix of check_due_at.
+fn test_cron_check_due_wallclock() {
+    test_group("cron_check_due");
+    var c = mk_cron("* * * * *", CRON_SKIP);
+    var before = dt_now();
+    var f = cron_scheduler_check_due(c);
+    var after = dt_now();
+    assert_eq(vec_len(f), 1, "first check fires: every minute matches");
+    assert_eq(str_eq_cstr(ScheduledTask_name(vec_get(f, 0)), "cron-job (cron)"), 1, "task name");
+    var lf = CronEntry_last_fired(vec_get(cron_scheduler_list_entries(c), 0));
+    assert_eq(lf >= before, 1, "watermark is the wall clock (not before the call)");
+    assert_eq(lf <= after, 1, "watermark is the wall clock (not after the call)");
+    # oracle: test_cron_check_due_respects_interval. Just fired, so nothing is
+    # due again within the minute. If the minute rolled over between the calls,
+    # the new minute is due and one task may fire; never more.
+    var f2 = cron_scheduler_check_due(c);
+    var after2 = dt_now();
+    var rolled = 0;
+    if (after2 / 60000000000 > lf / 60000000000) { rolled = 1; }
+    assert_eq(vec_len(f2) <= rolled, 1, "no re-fire within the minute");
+    # oracle: test_cron_check_due_disabled_skipped
+    var d = cron_scheduler_new();
+    cron_scheduler_add(d, str_from("off"), str_from("* * * * *"), make_template(), 0, CRON_SKIP);
+    assert_eq(vec_len(cron_scheduler_check_due(d)), 0, "disabled entry does not fire");
+    return 0;
+}
 fn test_cron_disabled() {
     test_group("cron_disabled");
     var c = cron_scheduler_new();
@@ -771,6 +949,29 @@ fn test_cron_first_eval_nomatch() {
     assert_eq(vec_len(cron_scheduler_check_due_at(c, at_ns(2026, 7, 18, 3, 0))), 0, "no fire at 3:00");
     assert_eq(vec_len(cron_scheduler_check_due_at(c, at_ns(2026, 7, 18, 3, 30))), 1, "fire at 3:30");
     assert_eq(vec_len(cron_scheduler_check_due_at(c, at_ns(2026, 7, 18, 3, 45))), 0, "no fire at 3:45");
+    return 0;
+}
+
+# Public since 0.3.0; no test called it until 1.1.5.
+fn test_cron_next_after() {
+    test_group("cron_next_after");
+    var _a_t, _a_v = cron_expr_parse(str_from("30 3 * * *"));
+    var daily = result_unwrap(_a_t, _a_v);
+    var at_0300 = _chrono_ymd_to_epoch_secs(2026, 7, 18, 3, 0, 0);
+    var at_0330 = _chrono_ymd_to_epoch_secs(2026, 7, 18, 3, 30, 0);
+    var next_day = _chrono_ymd_to_epoch_secs(2026, 7, 19, 3, 30, 0);
+    assert_eq(cron_expr_next_after(daily, at_0300), at_0330, "later the same day");
+    assert_eq(cron_expr_next_after(daily, at_0330 - 1), at_0330, "a mid-minute instant rounds up to the next minute");
+    assert_eq(cron_expr_next_after(daily, at_0330), next_day, "strictly after: a match is not its own successor");
+    var _b_t, _b_v = cron_expr_parse(str_from("0 0 29 2 *"));
+    var leap = result_unwrap(_b_t, _b_v);
+    var mar_2026 = _chrono_ymd_to_epoch_secs(2026, 3, 1, 0, 0, 0);
+    assert_eq(cron_expr_next_after(leap, mar_2026), _chrono_ymd_to_epoch_secs(2028, 2, 29, 0, 0, 0), "Feb 29 waits for the next leap year");
+    # Valid field by field, so it parses; it just never occurs.
+    var _c_t, _c_v = cron_expr_parse(str_from("0 0 31 2 *"));
+    assert_eq(is_ok(_c_t), 1, "Feb 31 parses");
+    var never = result_unwrap(_c_t, _c_v);
+    assert_eq(cron_expr_next_after(never, mar_2026), 0 - 1, "and has no next occurrence: -1");
     return 0;
 }
 # --- v1.1.0: a capped due-count is a floor, and says so ---
@@ -1194,6 +1395,19 @@ fn test_training_requires_accel() {
     return 0;
 }
 
+# The oracle's TrainingMethod::preferred_accelerator for all six methods. The
+# suite had reached it only through LoRA (as "not NONE") and full fine-tune.
+fn test_training_preferred_accel() {
+    test_group("training_pref_accel");
+    assert_eq(training_method_preferred_accel(TM_LORA), REQ_GPU, "lora -> gpu");
+    assert_eq(training_method_preferred_accel(TM_QLORA), REQ_GPU, "qlora -> gpu");
+    assert_eq(training_method_preferred_accel(TM_FULL), REQ_GPU_OR_TPU, "full -> gpu-or-tpu");
+    assert_eq(training_method_preferred_accel(TM_DPO), REQ_GPU_OR_TPU, "dpo -> gpu-or-tpu");
+    assert_eq(training_method_preferred_accel(TM_RLHF), REQ_GPU_OR_TPU, "rlhf -> gpu-or-tpu");
+    assert_eq(training_method_preferred_accel(TM_DISTILL), REQ_GPU_OR_TPU, "distillation -> gpu-or-tpu");
+    return 0;
+}
+
 # --- M4: JSON Serialize/Deserialize roundtrip (leaf types via #derive) ---
 #
 # Each derive emits Type_to_json(ptr, sb) + Type_from_json(bayan_json_parse(js)).
@@ -1444,6 +1658,74 @@ fn test_json_node_shared_memory() {
     return 0;
 }
 
+# Put a samay value node inside someone else's document, serialize the whole
+# document, parse it back, and hand back the nested node.
+fn _embed_rt(v) {
+    var outer = bayan_json_v_obj_new();
+    bayan_json_v_obj_set(outer, str_from("ok"), bayan_json_v_bool_new(1));
+    bayan_json_v_obj_set(outer, str_from("item"), v);
+    var text = bayan_json_v_build(outer);
+    return bayan_json_v_obj_get(bayan_json_v_parse_buf(str_data(text), str_len(text)), "item");
+}
+
+# The *_to_jsonv / *_from_jsonv layer is how a consumer embeds samay objects in
+# its own JSON. Until 1.1.5 no test called it directly: everything went through
+# the *_json_str wrappers. Each container type goes into an outer document and
+# back and must re-serialize byte-identically, and each decoder must reject a
+# missing node and a node that is not an object.
+fn test_json_jsonv_embed() {
+    test_group("json_jsonv_embed");
+    var notobj = bayan_json_v_int_new(7);
+
+    var tj = training_job_template_new(str_from("m"), TM_DPO, str_from("d"), str_from("gpu-1"), 60, 5);
+    var tj2 = training_job_template_from_jsonv(_embed_rt(training_job_template_to_jsonv(tj)));
+    assert_eq(str_eq(training_job_template_to_json_str(tj2), training_job_template_to_json_str(tj)), 1, "training template round-trips");
+    assert_eq(training_job_template_from_jsonv(0), 0, "training template: missing -> 0");
+    assert_eq(training_job_template_from_jsonv(notobj), 0, "training template: non-object -> 0");
+
+    var ct = make_template();
+    var ct2 = cron_task_template_from_jsonv(_embed_rt(cron_task_template_to_jsonv(ct)));
+    assert_eq(str_eq(cron_task_template_to_json_str(ct2), cron_task_template_to_json_str(ct)), 1, "cron task template round-trips");
+    assert_eq(cron_task_template_from_jsonv(0), 0, "cron task template: missing -> 0");
+    assert_eq(cron_task_template_from_jsonv(notobj), 0, "cron task template: non-object -> 0");
+
+    var st = make_task("st", 7);
+    ScheduledTask_set_node_preference(st, str_from("n1"));
+    var st2 = scheduled_task_from_jsonv(_embed_rt(scheduled_task_to_jsonv(st)));
+    assert_eq(str_eq(scheduled_task_to_json_str(st2), scheduled_task_to_json_str(st)), 1, "scheduled task round-trips");
+    assert_eq(scheduled_task_from_jsonv(0), 0, "scheduled task: missing -> 0");
+    assert_eq(scheduled_task_from_jsonv(notobj), 0, "scheduled task: non-object -> 0");
+
+    var nc = node_capacity_add_accel(make_node("nc", f64_from(8), 4096), profile_tpu(0, 8, TPU_V5P));
+    var nc2 = node_capacity_from_jsonv(_embed_rt(node_capacity_to_jsonv(nc)));
+    assert_eq(str_eq(node_capacity_to_json_str(nc2), node_capacity_to_json_str(nc)), 1, "node capacity round-trips");
+    assert_eq(node_capacity_from_jsonv(0), 0, "node capacity: missing -> 0");
+    assert_eq(node_capacity_from_jsonv(notobj), 0, "node capacity: non-object -> 0");
+
+    var _x_t, _x_v = cron_expr_parse(str_from("*/15 9-17 * * 1-5"));
+    var ce = cron_entry_new(str_from("weekday"), result_unwrap(_x_t, _x_v), make_template(), 1, CRON_CATCHUP);
+    var ce2 = cron_entry_from_jsonv(_embed_rt(cron_entry_to_jsonv(ce)));
+    assert_eq(str_eq(cron_entry_to_json_str(ce2), cron_entry_to_json_str(ce)), 1, "cron entry round-trips");
+    assert_eq(cron_entry_from_jsonv(0), 0, "cron entry: missing -> 0");
+    assert_eq(cron_entry_from_jsonv(notobj), 0, "cron entry: non-object -> 0");
+
+    var cs = mk_cron("0 2 * * *", CRON_SKIP);
+    var cs2 = cron_scheduler_from_jsonv(_embed_rt(cron_scheduler_to_jsonv(cs)));
+    assert_eq(str_eq(cron_scheduler_to_json_str(cs2), cron_scheduler_to_json_str(cs)), 1, "cron scheduler round-trips");
+    assert_eq(cron_scheduler_from_jsonv(0), 0, "cron scheduler: missing -> 0");
+    assert_eq(cron_scheduler_from_jsonv(notobj), 0, "cron scheduler: non-object -> 0");
+
+    var s = task_scheduler_new();
+    task_scheduler_register_node(s, make_node("n1", f64_from(4), 4096));
+    task_scheduler_submit_task(s, make_task("t1", 5));
+    task_scheduler_schedule_pending(s);
+    var s2 = task_scheduler_from_jsonv(_embed_rt(task_scheduler_to_jsonv(s)));
+    assert_eq(str_eq(task_scheduler_to_json_str(s2), task_scheduler_to_json_str(s)), 1, "task scheduler round-trips");
+    assert_eq(task_scheduler_from_jsonv(0), 0, "task scheduler: missing -> 0");
+    assert_eq(task_scheduler_from_jsonv(notobj), 0, "task scheduler: non-object -> 0");
+    return 0;
+}
+
 fn test_json_cron_entry() {
     test_group("json_cron_entry");
     var req = make_req(f64_from(1), 128);
@@ -1607,7 +1889,7 @@ fn test_json_parity_boundaries() {
     assert_eq(NodeCapacity_total_cpu(tiny2) == NodeCapacity_total_cpu(tiny), 1, "1e-9 cpu bit-exact");
     var zero = node_capacity_new(str_from("z"), f64_from(0), 1, 1, 0);
     var zero2 = node_capacity_from_json_str(node_capacity_to_json_str(zero));
-    assert_eq(NodeCapacity_total_cpu(zero2) == f64_from(0), 1, "0.0 cpu bit-exact");
+    assert_eq(f64_eq(NodeCapacity_total_cpu(zero2), f64_from(0)), 1, "0.0 cpu bit-exact");
     # A double at a rounding near-tie. 1.621274542797433e-9 is the shortest repr
     # of 0x3E1BDA70DB50D19F, and through samay 1.1.3 (bayan 1.5.6) it restored
     # one ULP high, as ...D1A0; bayan 1.5.7's parser is correctly rounded. The
@@ -1865,7 +2147,7 @@ fn test_sec_resource_req_domain() {
     var t = scheduled_task_from_json_str(str_from("{\"task_id\":\"t\",\"name\":\"n\",\"description\":\"d\",\"agent_id\":\"a\",\"priority\":5,\"resource_requirements\":{\"cpu_cores\":-4.0,\"memory_mb\":-1000,\"accel_req\":99,\"accel_min_chips\":0,\"network\":5,\"disk_mb\":-7},\"status\":0}"));
     assert_eq(t != 0, 1, "restored");
     var r = ScheduledTask_resource_requirements(t);
-    assert_eq(f64_to(ResourceReq_cpu_cores(r)), 0, "negative cpu_cores clamped to 0");
+    assert_eq(f64_eq(ResourceReq_cpu_cores(r), f64_from(0)), 1, "negative cpu_cores clamped to 0");
     assert_eq(ResourceReq_memory_mb(r), 0, "negative memory_mb clamped to 0");
     assert_eq(ResourceReq_disk_mb(r), 0, "negative disk_mb clamped to 0");
     assert_eq(ResourceReq_accel_req(r), REQ_NONE, "out-of-range accel_req clamped");
@@ -1879,7 +2161,7 @@ fn test_sec_node_capacity_invariants() {
     # won every _best_fit_node argmin forever.
     var n = node_capacity_from_json_str(str_from("{\"node_id\":\"n\",\"total_cpu\":1.0,\"available_cpu\":1e18,\"total_memory_mb\":100,\"available_memory_mb\":999999,\"total_disk_mb\":10,\"available_disk_mb\":999}"));
     assert_eq(n != 0, 1, "restored");
-    assert_eq(f64_to(NodeCapacity_available_cpu(n)), 1, "available_cpu clamped to total");
+    assert_eq(f64_eq(NodeCapacity_available_cpu(n), f64_from(1)), 1, "available_cpu clamped to total");
     assert_eq(NodeCapacity_available_memory_mb(n), 100, "available_memory clamped to total");
     assert_eq(NodeCapacity_available_disk_mb(n), 10, "available_disk clamped to total");
     # bayan maps an overflowing exponent to +Inf; a non-finite capacity makes
@@ -2064,6 +2346,8 @@ fn main() {
     test_running_to_failed();
     test_invalid_completed_to_running();
     test_preempt_requeue();
+    test_status_transition_matrix();
+    test_priority_class();
     test_node_can_fit();
     test_node_can_fit_gpu();
     test_node_can_fit_tpu();
@@ -2078,6 +2362,8 @@ fn main() {
     test_node_utilization_empty();
     test_deadline_field();
     test_priority_clamped();
+    test_samay_str_lt();
+    test_resource_req_clone();
     test_submit_task();
     test_submit_multiple();
     test_pending_sorted_by_priority();
@@ -2111,9 +2397,12 @@ fn main() {
     test_cron_add_invalid_expr();
     test_cron_remove();
     test_cron_remove_nonexistent();
+    test_cron_add_entry_prebuilt();
+    test_cron_check_due_wallclock();
     test_cron_disabled();
     test_cron_first_eval_match();
     test_cron_first_eval_nomatch();
+    test_cron_next_after();
     test_cron_count_capped_flag();
     test_task_status_name();
     test_cron_clock_regression();
@@ -2135,6 +2424,7 @@ fn main() {
     test_training_high_priority();
     test_training_no_deadline_when_zero();
     test_training_requires_accel();
+    test_training_preferred_accel();
     test_json_resource_req();
     test_json_resource_req_default();
     test_json_scheduling_decision();
@@ -2148,6 +2438,7 @@ fn main() {
     test_json_scheduled_task_null_fields();
     test_json_node_capacity();
     test_json_node_shared_memory();
+    test_json_jsonv_embed();
     test_json_cron_entry();
     test_json_cron_scheduler_deterministic();
     test_json_task_scheduler_snapshot();

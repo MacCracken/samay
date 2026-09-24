@@ -2,12 +2,22 @@
 
 **Status**: accepted (2026-08-29, v1.0.3). Records a divergence that shipped
 unrecorded in v0.3.0, and the semantics settled by the P-1 sweep.
+**Amended** 2026-09-23 (v1.1.5). The first version misdescribed the oracle's model, both
+its field names and its first-fire rule. It also did not record the one capability that
+had no replacement. Both corrections are made below. This ADR is the record of the
+oracle's cron model once `rust-old/` is deleted, so it has to be right.
 
 ## Context
 
-The Rust oracle (`rust-old/`) has no cron expressions. Its recurring-task support is an
-**interval** in seconds: an entry stores `interval_secs` plus `last_run`, and each
-`check_due` call pushes at most one task per entry when `now - last_run >= interval`.
+The Rust oracle (`rust-old/src/lib.rs:598-709`) has no cron expressions. A `CronEntry`
+carries `interval_seconds`, an optional `specific_hour` and `specific_minute`, and a
+`last_fired` watermark. `check_due` fires an enabled entry in two cases:
+
+- it has never fired;
+- `now - last_fired >= interval_seconds`.
+
+If `specific_hour` or `specific_minute` is set, the current UTC hour or minute must also
+match. A call pushes at most one task per entry and sets `last_fired = now`.
 
 M2 (v0.3.0) replaced that wholesale with standard 5-field cron expressions, parse-time
 validation, and an explicit missed-schedule catch-up/skip policy. That is a substantial
@@ -27,12 +37,26 @@ Recurring entries carry a parsed 5-field cron expression, not an interval. Field
 i64 bitmasks; every expression is validated at **parse** time, never at execution time.
 Consequences that differ from the oracle and are accepted deliberately:
 
-- **First fire.** An interval entry fires `interval` seconds after registration; a cron
-  entry fires at the next instant matching the expression, and never retroactively on
-  first evaluation (`last_fired == 0` anchors the watermark at `now`).
+- **First fire.** An interval entry that has never fired fires on the very first
+  `check_due`, at whatever time that is (`lib.rs:673-679`; the oracle's own
+  `test_cron_check_due_fires_first_time` asserts it). A cron entry fires on its first
+  evaluation only if that minute matches the expression, and never retroactively:
+  `last_fired == 0` anchors the watermark at `now`.
 - **Fires per call.** Rust pushes at most one task per entry per `check_due`. samay fires
   every missed occurrence under `CRON_CATCHUP`, bounded by `CRON_CATCHUP_CAP` (1000).
   Under `CRON_SKIP` it fires exactly one and logs the rest as dropped.
+- **Relative intervals have no replacement.** An interval was measured from the last fire,
+  in seconds, with no alignment to the clock; the oracle's tests used 1 s and 10 s. A cron
+  expression names wall-clock minutes. That leaves two kinds of schedule with no
+  expression:
+  - a sub-minute schedule, such as "every 10 seconds";
+  - a period that does not divide the hour or the day, counted from the last run, such as
+    "every 90 minutes since the last fire".
+
+  A consumer that needs one runs its own timer and submits tasks with
+  `task_scheduler_submit_task`. This is accepted: every schedule in the domain so far is
+  wall-clock, and expressions are what make parse-time validation and the missed-schedule
+  policy possible.
 
 ### 2. The Vixie DOM/DOW rule is AND-when-starred, and the mask always applies
 

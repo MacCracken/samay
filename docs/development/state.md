@@ -5,21 +5,19 @@
 
 ## Version
 
-**1.1.4** — dependencies to latest: ai-hwaccel 2.3.23 → **2.4.0**, bayan 1.5.6 →
-**1.5.7**; cyrius unchanged at 6.6.6. No `src/` change. Two effects reach samay's
-JSON snapshots, and tests now pin both. bayan's f64 parser is now correctly
-rounded, so a near-tie double that 1.1.3 restored one ULP high now restores
-exactly. Node snapshots now carry ai-hwaccel's schema-v6 `shared_memory_bytes`
-for unified-memory accelerators, and older snapshots without the key still
-restore. Placement is untouched: `requirement_satisfied` and
-`find_satisfying_profile` are byte-identical across the bump.
+**1.1.5** — test correctness and coverage, done as preparation for deleting
+`rust-old/` ([removal readiness](rust-old-removal.md)). No `src/` change. Seven
+assertions ported from the Rust oracle could not fail, or were weaker than the
+oracle's; all are fixed. Every public function is now called by a test (79/79),
+and CI gates on that. ADR-0006's account of the oracle's cron model is corrected.
+558 assertions.
 
-Built on **1.1.3** (constructors own every `Str` they retain), **1.1.2** (the
-cyrius 6.6.x `Result` value form), **1.1.1** (every allocation checked,
-[ADR-0009](../adr/0009-oom-policy.md)), **1.1.0** (capped cron counts report as
-floors, `>=`), **1.0.4** (threading contract,
-[ADR-0008](../adr/0008-threading-contract.md)) and **1.0.3** (the P-1 sweep).
-475 assertions.
+Built on **1.1.4** (ai-hwaccel 2.4.0, bayan 1.5.7), **1.1.3** (constructors own
+every `Str` they retain), **1.1.2** (the cyrius 6.6.x `Result` value form),
+**1.1.1** (every allocation checked, [ADR-0009](../adr/0009-oom-policy.md)),
+**1.1.0** (capped cron counts report as floors, `>=`), **1.0.4** (threading
+contract, [ADR-0008](../adr/0008-threading-contract.md)) and **1.0.3** (the P-1
+sweep).
 
 ## Toolchain
 
@@ -41,7 +39,7 @@ floors, `>=`), **1.0.4** (threading contract,
 
 ## Tests
 
-- `tests/samay.tcyr` — **475/475 assertions passing** (`cyrius test`), up from 296 in
+- `tests/samay.tcyr` — **558/558 assertions passing** (`cyrius test`), up from 296 in
   v1.0.2. Includes the v1.0.3 additions: the capacity-conservation invariant (the
   assertion whose absence let ADR-0007's defect ship), a cron differential guard pinning
   the optimised matcher to an in-test reference implementation, back-compat snapshot
@@ -53,13 +51,22 @@ floors, `>=`), **1.0.4** (threading contract,
   anywhere but is exported public API. v1.1.3 adds `test_ownership_retained_strs`,
   which checks that each constructor owns the `Str`s it keeps. v1.1.4 adds
   `test_json_node_shared_memory`, which is mutation-proven, and a bit-level f64
-  round trip at a rounding near-tie.
+  round trip at a rounding near-tie. v1.1.5 fixes seven assertions ported from the
+  oracle that could not fail or were weaker than the oracle's, and four of the
+  port's own with the same defects. It also adds nine tests that call the 22 public
+  functions no test called. Eight of nine mutations of those functions passed the
+  whole 1.1.4 suite; the 1.1.5 suite catches all nine.
 - `tests/samay.bcyr` — 5 benchmarks, all green (see `docs/benchmarks.md`). Was dead
   (SIGSEGV) from v0.5.0 to v1.0.1: the `Str` migration left it passing bare cstring
   literals into `Str`-taking APIs. Now run by CI so it cannot rot silently again.
 - Gates: `cyrius fmt <file> --check` clean, `cyrius lint <file>` 0 warnings and 0
   untracked deferrals, `cyrius distlib --check` in sync. **All four now run in CI** —
   note `fmt`/`lint` take a file argument, so a bare `cyrius fmt --check` gates nothing.
+- Coverage (v1.1.5): `cyrius coverage --min 100`, **79/79**, plus a strict CI check
+  that every public function in `[lib].modules` is *called* by a test. The strict
+  check exists because the tool counts a name that appears anywhere in the tests,
+  including in a comment or inside a longer name. That counting credited
+  `cron_scheduler_check_due` and `samay_str_lt` while no test called either.
 
 ## Dependencies
 

@@ -4,6 +4,122 @@ All notable changes to Samay are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.1.5] — 2026-09-23
+
+**Every assertion ported from the Rust oracle can now fail, and every public function has a
+test that calls it.** This prepares for deleting `rust-old/`
+([removal readiness](docs/development/rust-old-removal.md)). No `src/` change.
+**558 tests** (was 475). Coverage is 79/79 functions, now gated in CI.
+
+### Fixed — assertions that could not fail
+
+The `rust-old/` review found these. Each was confirmed by running the assertion's own
+expression in a probe.
+
+| Assertion | Problem | Now |
+|---|---|---|
+| "two uuids differ", "ids differ" | `str_eq_cstr` takes a C string. Given a `Str`, its `strlen` measures the header, so `str_eq_cstr(u, u)` returns 0 for a UUID compared with itself | `str_eq`, plus a self-check that the comparator can answer "equal" |
+| "util 0 initially", "zero-capacity util 0" | `f64_to(util) == 0` truncates, so any utilization in [0, 1) passed. Measured passing at 82% | `f64_eq` |
+| "avail cpu 2", "avail cpu 4 after release" | The same truncation accepted a whole core of slack | `f64_eq` |
+| "negative cpu_cores clamped to 0", "available_cpu clamped to total" | The same truncation | `f64_eq` |
+| "0.0 cpu bit-exact" | Compared an f64 with an integer using `==`; this was the test build's one compiler warning | `f64_eq`. The test build is now warning-free |
+| `test_invalid_transitions` | Never checked its QUEUED → CANCELLED step, which the oracle `unwrap()`ed. If that step broke, the next assertion still passed, starting from QUEUED | Asserted |
+| `test_schedule_fallback_when_full` | Indexed the decisions without checking one existed; the oracle asserted `len == 1` | Asserted |
+
+### Added — a test that calls every public function
+
+`cyrius coverage` reported 59/79. It counts a function as covered when its name appears
+anywhere in `tests/*.tcyr`, including inside a longer name or a comment. That credited
+two functions nothing called:
+- `cron_scheduler_check_due`, which is a prefix of `check_due_at`;
+- `samay_str_lt`, which only comments mention.
+
+The real figure was 57/79. It is now 79/79, and every one is an actual call.
+
+| Test | What it pins |
+|---|---|
+| `test_status_transition_matrix` | The oracle's transition table as data, all 49 pairs. The oracle's own tests checked 9 |
+| `test_priority_class` | Every band boundary, including through the constructor's clamp |
+| `test_samay_str_lt` | The ADR-0004 tie-break comparator: prefixes, equality, empty strings, and unsigned bytes (0xC3 sorts after `z`) |
+| `test_resource_req_clone` | A real deep copy, and that each cron fire owns its own requirements |
+| `test_cron_add_entry_prebuilt` | The direct port of the oracle's `add_entry`, including its empty-name guard |
+| `test_cron_check_due_wallclock` | The wall-clock entry point every Rust cron test used. The watermark is the wall clock, and nothing fires twice in one minute |
+| `test_cron_next_after` | Same day, strictly after, the next Feb 29 (2028), and -1 for Feb 31 |
+| `test_training_preferred_accel` | All six methods; only two had been checked |
+| `test_json_jsonv_embed` | The 14 `*_to_jsonv` / `*_from_jsonv` functions. Each type, embedded in an outer document, round-trips byte-identically, and each decoder rejects a missing node and a non-object |
+
+**Mutation-proven.** Nine source mutations were applied one at a time, each run against both
+suites:
+
+| Mutation | 1.1.4 suite | 1.1.5 suite |
+|---|---|---|
+| `cron_scheduler_add_entry` loses its empty-name guard | 475/475 pass | 2 fail |
+| `cron_scheduler_check_due` reads epoch 0, not the clock | 475/475 pass | 1 fails |
+| `cron_expr_next_after` is not strictly after | 475/475 pass | 1 fails |
+| `samay_str_lt` sorts a prefix after its extension | 475/475 pass | 2 fail |
+| RUNNING → QUEUED becomes legal | 475/475 pass | 2 fail |
+| `resource_req_clone` returns the same pointer | 475/475 pass | 4 fail |
+| QLoRA prefers GPU-or-TPU | 475/475 pass | 1 fails |
+| An empty node reports 50% utilization | 475/475 pass | 1 fails |
+| Priority classes shift by one | Caught: a preemption assertion, then a segfault | 6 fail, naming the band boundaries, then the same segfault |
+
+The epoch-0 mutant is caught only by the watermark assertion. Minute 0 of 1970 still
+matches `* * * * *`, so "the first check fires" passes regardless.
+
+`test_json_jsonv_embed` is not mutation-proven. The `*_json_str` wrappers call the same
+functions, so the round trip was already exercised through them. What the test adds is the
+contract a consumer relies on: a samay object embedded in the consumer's own document comes
+back intact, and each decoder rejects a missing or non-object node.
+
+### Changed — CI gates coverage
+
+A new CI step, "Every public function is called by a test", runs two checks:
+- `cyrius coverage --min 100`;
+- a stricter pass: every public function in `[lib].modules` must be called, meaning its
+  whole name followed by `(`, outside a comment.
+
+The stricter pass exists because the tool's rule can be satisfied without a call. The step
+was verified in both directions, running the exact block from `ci.yml` under
+`bash -eo pipefail`:
+- It passes on this tree.
+- It fails on the 1.1.4 tests (74%).
+- It fails on a planted untested function.
+- It fails on a function mentioned only in a test comment, where the tool alone reports
+  "gate OK: 100%".
+
+`CLAUDE.md`'s cleanliness gate now lists the coverage command. The Rust crate gated at 80%
+line coverage (`rust-old/codecov.yml`). This is a different measure, and it is only a floor:
+it proves every function is called, not that every line runs.
+
+### Changed — ADR-0006 corrected
+
+The ADR described the oracle's cron model with field names it never had (`interval_secs`,
+`last_run`). It also gave a first-fire rule the oracle did not follow: "fires `interval`
+seconds after registration". In fact the oracle fires a never-fired entry on the first
+`check_due`. Finally, the ADR did not record that relative intervals, sub-minute or measured
+from the last run, have no replacement. All three are now corrected, because the ADR becomes
+the only record of that model once `rust-old/` is deleted.
+
+### Added — `docs/development/rust-old-removal.md`
+
+This is the removal-readiness review, in the form kavach used. It maps every public item
+and all 53 Rust tests, and it records what the port dropped: ten `tracing` events, the error
+text, and relative intervals. It also lists the references to update and the removal
+commands.
+
+### Verified
+
+- `cyrius test`: **558 / 558**. The test build compiles with no warnings.
+- `cyrius coverage`: 79/79. The strict check finds all 78 library functions called.
+- fmt is clean. lint reports 0 warnings and 0 untracked deferrals. The ADR-0009 alloc guard
+  passes. `distlib --check` is in sync; the only change to the bundle is its version header.
+  Bench: 5/5.
+
+### Performance
+
+No `src/` change. Three bench runs are within noise of 1.1.4: `scheduled_task_new` at
+2.206 / 2.203 / 2.225 µs, and `cron_expr_matches` at 13 ns.
+
 ## [1.1.4] — 2026-09-23
 
 **Dependencies to latest: ai-hwaccel 2.3.23 → 2.4.0, bayan 1.5.6 → 1.5.7.** No `src/` change.
