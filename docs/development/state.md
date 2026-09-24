@@ -5,37 +5,31 @@
 
 ## Version
 
-**1.1.1** — every allocation samay performs is checked, and aborts on failure
-([ADR-0009](../adr/0009-oom-policy.md)). The planned scope was wrong and the
-evidence corrected it: an unchecked `alloc()` does **not** produce a wild write
-(offsets ≤ 112 against `mmap_min_addr` 65536, so it traps), and the 16 listed
-sites already failed loudly. The real defect was **eleven allocation points that
-are not raw `alloc(` tokens**, where a null escapes as struct data — two measured
-producing a wrong answer before any crash: `node_capacity_new` stored a null
-`accel_profiles` vec, returned an intact-looking struct, and
-`schedule_pending` **placed a task on it**; `samay_uuid_v4` produced a null
-`task_id` that inserted fine and crashed on the 8th-to-10th *subsequent* submit.
-28 guards, plus a CI gate (verified to fail on a removed guard) because the OOM
-branch is not unit-testable. `return 0` and `Err` were both rejected on
-reproduced evidence — a propagated 0 silently lost a task from a valid snapshot
-while reporting success, and `Ok`/`Err` allocate the 16 bytes that just failed.
+**1.1.4** — dependencies to latest: ai-hwaccel 2.3.23 → **2.4.0**, bayan 1.5.6 →
+**1.5.7**; cyrius unchanged at 6.6.6. No `src/` change. Two effects reach samay's
+JSON snapshots, and tests now pin both. bayan's f64 parser is now correctly
+rounded, so a near-tie double that 1.1.3 restored one ULP high now restores
+exactly. Node snapshots now carry ai-hwaccel's schema-v6 `shared_memory_bytes`
+for unified-memory accelerators, and older snapshots without the key still
+restore. Placement is untouched: `requirement_satisfied` and
+`find_satisfying_profile` are byte-identical across the bump.
 
-Built on **1.1.0** (capped cron counts report as floors, `>=`), **1.0.4**
-(threading contract, [ADR-0008](../adr/0008-threading-contract.md)) and **1.0.3**
-(the P-1 sweep). 446 assertions. Toolchain 6.5.36, ai-hwaccel 2.3.19,
-bayan-json 1.5.2. Both consumers (kavach 3.8.0, daimon 2.0.0) integrated and
-unaffected; a third, **stiva**, was found during this release pinned to samay
-1.0.1 with its `accel` feature default-ON.
+Built on **1.1.3** (constructors own every `Str` they retain), **1.1.2** (the
+cyrius 6.6.x `Result` value form), **1.1.1** (every allocation checked,
+[ADR-0009](../adr/0009-oom-policy.md)), **1.1.0** (capped cron counts report as
+floors, `>=`), **1.0.4** (threading contract,
+[ADR-0008](../adr/0008-threading-contract.md)) and **1.0.3** (the P-1 sweep).
+475 assertions.
 
 ## Toolchain
 
-- **Cyrius pin**: `6.5.36` (in `cyrius.cyml [package].cyrius`)
+- **Cyrius pin**: `6.6.6` (in `cyrius.cyml [package].cyrius`)
 
 ## Source
 
 - `src/{uuid,types,scheduler,cronexpr,cron,training,json}.cyr` + `src/lib.cyr`
   aggregation header + `src/main.cyr` demo. The seven `[lib].modules` bundle to
-  2,331 lines in `dist/samay.cyr` (as `cyrius distlib` reports it); `json.cyr` is the largest module.
+  2,463 lines in `dist/samay.cyr` (as `cyrius distlib` reports it); `json.cyr` is the largest module.
 - **Strings are `Str` (ptr+len), not cstr** since **v0.5.0**
   ([ADR-0003](../adr/0003-str-string-representation.md)) — required because
   `#derive(Serialize)` core dumps on a cstr in a `Str`-typed field. Passing a
@@ -47,7 +41,7 @@ unaffected; a third, **stiva**, was found during this release pinned to samay
 
 ## Tests
 
-- `tests/samay.tcyr` — **446/446 assertions passing** (`cyrius test`), up from 296 in
+- `tests/samay.tcyr` — **475/475 assertions passing** (`cyrius test`), up from 296 in
   v1.0.2. Includes the v1.0.3 additions: the capacity-conservation invariant (the
   assertion whose absence let ADR-0007's defect ship), a cron differential guard pinning
   the optimised matcher to an in-test reference implementation, back-compat snapshot
@@ -56,7 +50,10 @@ unaffected; a third, **stiva**, was found during this release pinned to samay
   v1.0.4 adds the `samay_init()` pre-warm guards (that the chrono month table is
   *filled*, not merely published, after each constructor). v1.1.0 adds the
   capped-due-count guards and pins `task_status_name`, which had zero callers
-  anywhere but is exported public API.
+  anywhere but is exported public API. v1.1.3 adds `test_ownership_retained_strs`,
+  which checks that each constructor owns the `Str`s it keeps. v1.1.4 adds
+  `test_json_node_shared_memory`, which is mutation-proven, and a bit-level f64
+  round trip at a rounding near-tie.
 - `tests/samay.bcyr` — 5 benchmarks, all green (see `docs/benchmarks.md`). Was dead
   (SIGSEGV) from v0.5.0 to v1.0.1: the `Str` migration left it passing bare cstring
   literals into `Str`-taking APIs. Now run by CI so it cannot rot silently again.
@@ -66,9 +63,11 @@ unaffected; a third, **stiva**, was found during this release pinned to samay
 
 ## Dependencies
 
-- **ai-hwaccel** 2.3.19 (git) — `AcceleratorRequirement` `REQ_*` + lossless
+- **ai-hwaccel** 2.4.0 (git) — `AcceleratorRequirement` `REQ_*` + lossless
   `profile_to_json`/`profile_from_json` (used by `NodeCapacity` serialization).
-- **bayan** 1.5.2 (git) — `dist/bayan-json.cyr`, the focused JSON sublib, *not*
+  Since 2.3.28 (schema v6) a profile carries `shared_memory_bytes`, which node
+  snapshots pass through.
+- **bayan** 1.5.7 (git) — `dist/bayan-json.cyr`, the focused JSON sublib, *not*
   the 641 KB monolith. bayan left the stdlib snapshot in 1.5.2; taking the
   monolith while ai-hwaccel pulls the sublib vendors both files and collides on
   27 JSON symbols under last-def-wins. The sublib omits the short `json_v_*`
@@ -88,9 +87,11 @@ unaffected; a third, **stiva**, was found during this release pinned to samay
 - **daimon 2.0.0** — integrated: deleted its duplicated `scheduler.cyr`/`cron.cyr` and
   consumes samay as the single scheduler source of truth (api_sched rewired; 215 assertions).
   The migration surfaced + fixed the `uuid_v4`↔libro collision (samay 1.0.1).
-- Neither consumer calls samay's cron or JSON API today, so v1.0.3's restore-validation
-  tightening and cron semantics changes have zero downstream blast radius. Both pin
-  `tag = "1.0.1"` and should move to `1.0.3`.
+- Current pins, as of 1.1.4: kavach 3.12.5 → samay `1.1.2`, daimon 2.4.3 → `1.1.3`,
+  stiva 3.0.20 → `1.1.2`. kavach and daimon also set `path = "../samay"`, so local
+  builds of them use this checkout, not the tag. The only samay JSON call among
+  them is daimon's `SchedulingDecision_to_json`, which is emit-only. None of them
+  restores a samay snapshot.
 - zugot's marketplace recipe is stale: it still describes samay as a Rust crate at v0.1.0
   (cargo build, `Cargo.toml`, `runtime = "rust-crate"`). Needs a rewrite for Cyrius.
 

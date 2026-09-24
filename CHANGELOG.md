@@ -4,6 +4,127 @@ All notable changes to Samay are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.1.4] — 2026-09-23
+
+**Dependencies to latest: ai-hwaccel 2.3.23 → 2.4.0, bayan 1.5.6 → 1.5.7.** No `src/` change.
+cyrius stays at 6.6.6: the vendored stdlib already matched the 6.6.6 snapshot byte for byte. Two
+effects reach samay's snapshots, and both are now tested. A near-tie f64 that 1.1.3 restored one
+ULP high now restores exactly. And a node snapshot now carries ai-hwaccel's schema-v6
+`shared_memory_bytes`. **475 tests** (was 465), all CI gates clean.
+
+### Changed — dependency pins
+
+| | was | now |
+|---|---|---|
+| cyrius | 6.6.6 | 6.6.6 (unchanged; `lib/` stdlib byte-identical to the snapshot) |
+| bayan | 1.5.6 | **1.5.7** |
+| ai-hwaccel | 2.3.23 | **2.4.0** |
+
+`cyrius deps` re-vendored exactly two files, `lib/bayan-json.cyr` and `lib/ai-hwaccel.cyr`, each
+byte-identical to its tag's `dist/` bundle; `cyrius.lock` pins the tag commits (`746ef31`,
+`ae4f9a1`). No stdlib leaf was added or removed: neither dep's `.deps` sidecar changed.
+ai-hwaccel 2.4.0 pins bayan 1.5.6 itself, but that dep is feature-gated and features resolve from
+the root manifest only, so samay still vendors a single `bayan-json.cyr`, at 1.5.7.
+
+What reaches samay, checked function by function against the two tags:
+
+- **Placement: nothing.** `requirement_satisfied`, `find_satisfying_profile` and the five
+  `profile_cuda/rocm/tpu/gaudi/neuron` constructors are byte-identical from 2.3.23 to 2.4.0.
+  2.4.0's headline change (a GPU seen by two backends listed once, `profiles_dedup`) lives in
+  ai-hwaccel's detection post-passes, which samay never calls; nodes are built from explicit
+  profiles.
+- **Profile layout: grew, harmlessly.** `PROFILE_SIZE` 160 → 176 (`shared_mem` in 2.3.28, `pci_id`
+  in 2.4.0). samay never sizes or copies a profile; it holds ai-hwaccel's pointers.
+- **bayan: the parse side only.** Of `dist/bayan-json.cyr`'s functions, only `bayan_f64_parse` and
+  its new private `_d_*` helpers changed. The emitter `bayan_f64_to_json` is identical, so
+  everything samay *writes* is unchanged. That includes daimon's one samay codec call,
+  `SchedulingDecision_to_json`.
+
+### Fixed — a near-tie f64 no longer restores one ULP off
+
+bayan 1.5.7's f64 parser is correctly rounded. 1.5.6 returned a neighbouring double for about 2 in
+10⁵ values, and samay's restore path decodes through it. Measured through samay itself, with the
+same node snapshot restored by each tree:
+
+```
+total_cpu = 0x3E1BDA70DB50D19F   (shortest repr 1.621274542797433e-9)
+samay 1.1.3 (bayan 1.5.6)  ->  0x3E1BDA70DB50D1A0   one ULP high
+samay 1.1.4 (bayan 1.5.7)  ->  0x3E1BDA70DB50D19F   exact
+```
+
+samay's own suite could not have seen this. None of its nine "bit-exact" f64 assertions uses a
+value at a rounding near-tie: they use 1/3, 2/3, 3/2, 1.0, 8.0, 6.0, 1e-9 and 0.0. They also compare
+with f64 `==`, which tests equality of value, not of bits, so it cannot tell -0.0 from 0.0.
+`test_json_parity_boundaries` now pins this vector and compares the bits. It fails on the 1.1.3
+tree (`got …912, expected …911`) and passes on 1.1.4.
+
+### Changed — node snapshots carry `shared_memory_bytes` (ai-hwaccel schema v6)
+
+`node_capacity_to_jsonv` embeds `profile_to_json` output verbatim, so the key ai-hwaccel 2.3.28
+added appears in samay's snapshot for any profile whose memory is partly or wholly system RAM:
+Apple's Metal GPU and Neural Engine, the client NPUs, and GH200. Discrete CUDA/ROCm, TPU, Gaudi and
+Neuron profiles share nothing and serialize exactly as before.
+
+```
+1.1.3: {"accelerator":"Metal GPU","accel_type_id":3,…,"memory_bytes":51539607552,"family":"GPU"}
+1.1.4: {"accelerator":"Metal GPU","accel_type_id":3,…,"memory_bytes":51539607552,"family":"GPU","shared_memory_bytes":51539607552}
+```
+
+Old snapshots still restore. Without the key, `profile_from_json` derives the shared part from the
+type. A 1.1.3 snapshot, restored and re-serialized, yields exactly the 1.1.4 bytes. No consumer is
+affected today: kavach, daimon and stiva never restore a samay snapshot.
+
+**`test_json_node_shared_memory` (9 assertions).** It checks that the key survives a snapshot and
+that a 1.1.3 snapshot still reads. The 1.1.3 fixture is real output of the 1.1.3 tree, not
+hand-written. Metal alone cannot prove that restore *reads* the key, because Metal's shared part is
+what its type implies anyway. So the test adds a GH200: a CUDA card, whose type shares nothing,
+with 480 GiB of its 576 GiB in Grace RAM. Only the key can carry that value. Mutation-proven by
+overriding one ai-hwaccel function at a time in a scratch copy:
+
+| mutation | assertions that go red |
+|---|---|
+| `profile_to_json` stops emitting the key | Metal key present; GH200 restored from key |
+| `profile_from_json` ignores the key | GH200 restored from key; GH200 re-serialize |
+| `profile_new` stops deriving the shared part | Metal key present; re-serialize; 1.1.3 → 1.1.4 bytes |
+
+Without the GH200 case, the second mutation passes every assertion.
+
+⚠ **Symbol hygiene: "last definition wins" does not hold for calls compiled before the second
+definition.** The first mutation harness placed the overrides after `src/json.cyr`. The compiler
+warned `duplicate fn 'profile_to_json' (last definition wins)`, yet a canary override that made
+`profile_to_json` emit nothing left all 474 tests green. `json.cyr`'s calls had already bound to
+ai-hwaccel's definition. With the override moved above the `src/` includes, the same canary turns
+four assertions red. So a duplicate definition does not simply replace the other: **callers
+compiled before the second definition keep the first, and callers after it get the second.** That
+makes a collision worse than the warning suggests, which is why the pre-release scan matters.
+Separately, the harness could not just edit `lib/ai-hwaccel.cyr`. `cyrius build` put back a
+vendored file whose contents no longer matched `cyrius.lock`, and it did so even with `--no-deps`.
+
+### Verified
+
+- `cyrius test`: **475 / 475**. `cyrius bench tests/samay.bcyr`: 5 / 5. The `./build/samay` demo
+  runs and places both tasks.
+- `fmt --check` is clean on every `src/*.cyr`, `tests/*.tcyr` and `tests/*.bcyr` file. `lint` shows
+  0 warnings and 0 untracked deferrals on every `src/*.cyr`. The ADR-0009 alloc guard passes.
+- `cyrius distlib --check`: in sync. The only change to `dist/samay.cyr` is its `# Version:` header.
+- Symbol hygiene: 177 samay symbols (fns, globals, enum variants, struct names) against 2,198 in the
+  vendored closure. **0 collisions**, and no dependency symbol falls inside samay's
+  derived-accessor namespaces. The scan is not vacuous: it catches a planted `profiles_dedup`,
+  which is new in 2.4.0.
+
+### Performance
+
+No change, as expected. None of the five rows reaches the changed code: `node_can_fit` measures the
+`REQ_NONE` path, and nothing benchmarked parses JSON. Three runs each:
+
+| | 1.1.3 | 1.1.4 |
+|---|---|---|
+| `node_can_fit` | 12 / 12 / 13 ns | 12 / 12 / 12 ns |
+| `priority_from_numeric` | 4 / 4 / 4 ns | 4 / 4 / 4 ns |
+| `samay_uuid_v4` | 621 / 620 / 612 ns | 616 / 612 / 620 ns |
+| `scheduled_task_new` | 2.220 / 2.224 / 2.218 µs | 2.215 / 2.205 / 2.222 µs |
+| `cron_expr_matches` | 13 / 13 / 13 ns | 13 / 13 / 13 ns |
+
 ## [1.1.3] — 2026-09-22
 
 **samay now owns every Str it retains.** Seven constructors stored the caller's pointer instead of

@@ -10,9 +10,9 @@
 > An item moves when its dependencies are met; a trigger-gated item has no pin at
 > all, deliberately — see [Trigger-gated](#trigger-gated--no-pin-by-design).
 
-> **Current**: **v1.1.1**, cyrius pin **6.5.36**, deps ai-hwaccel **2.3.19** +
-> bayan-json **1.5.2**. Gates green: **446 assertions**, **5/5 benchmarks**,
-> lint 0-warn / 0 untracked deferrals, fmt clean, `dist/` in sync (2,345 lines),
+> **Current**: **v1.1.4**, cyrius pin **6.6.6**, deps ai-hwaccel **2.4.0** +
+> bayan-json **1.5.7**. Gates green: **475 assertions**, **5/5 benchmarks**,
+> lint 0-warn / 0 untracked deferrals, fmt clean, `dist/` in sync (2,463 lines),
 > 0 symbol collisions against the vendored deps. `src/` is 9 modules against the
 > frozen 1,479-line Rust oracle.
 

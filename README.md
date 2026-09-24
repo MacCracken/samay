@@ -3,9 +3,9 @@
 Task scheduler for AGNOS — real cron scheduling with **resource-aware,
 accelerator-conscious** task placement. Cyrius port of the original Rust library.
 
-- **Language**: Cyrius (toolchain 6.5.36) · **License**: GPL-3.0-only
+- **Language**: Cyrius (toolchain 6.6.6) · **License**: GPL-3.0-only
 - **Consumers**: daimon (task scheduling), kavach (sandboxed execution)
-- **Status**: **v1.1.1** — port complete, P-1 and concurrency audited. Real cron
+- **Status**: **v1.1.4** — port complete, P-1 and concurrency audited. Real cron
   (Vixie DOM/DOW), ai-hwaccel placement, JSON snapshot/restore, deterministic
   scheduling, fail-closed restore, conserved node capacity. Both downstream
   consumers (kavach 3.8.0, daimon 2.0.0) integrated.
@@ -31,7 +31,7 @@ accelerator-conscious** task placement. Cyrius port of the original Rust library
 cyrius deps                          # resolve stdlib + ai-hwaccel into lib/
 cyrius build src/main.cyr build/samay
 ./build/samay                        # runnable demo
-cyrius test  tests/samay.tcyr        # 446/446 assertions
+cyrius test  tests/samay.tcyr        # 475/475 assertions
 cyrius bench tests/samay.bcyr
 ```
 
@@ -42,7 +42,7 @@ Consumers declare the dep and include the committed bundle:
 ```toml
 [deps.samay]
 git = "https://github.com/MacCracken/samay.git"
-tag = "1.1.1"
+tag = "1.1.4"
 modules = ["dist/samay.cyr"]
 ```
 

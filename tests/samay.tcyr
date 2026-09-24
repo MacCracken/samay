@@ -1406,6 +1406,44 @@ fn test_json_node_capacity() {
     return 0;
 }
 
+# ai-hwaccel schema v6 (2.3.28, pinned from samay 1.1.4): a profile records how
+# much of its memory is system RAM, as "shared_memory_bytes". A node snapshot
+# embeds profile_to_json verbatim, so the key must survive restore rather than
+# be dropped: all of Metal's memory is shared, none of a discrete CUDA card's.
+fn test_json_node_shared_memory() {
+    test_group("json_node_shared_mem");
+    var gib = 1073741824;
+    var node = node_capacity_new(str_from("mac-1"), f64_from(12), 49152, 102400, 0);
+    node_capacity_add_accel(node, profile_new(ACCEL_METAL, 0, 48 * gib));
+    node_capacity_add_accel(node, profile_cuda(1, 24 * gib));
+    var js = node_capacity_to_json_str(node);
+    assert_eq(str_contains(js, str_from("\"shared_memory_bytes\":51539607552")), 1, "snapshot carries Metal shared part");
+    var n2 = node_capacity_from_json_str(js);
+    var profs = NodeCapacity_accel_profiles(n2);
+    assert_eq(vec_len(profs), 2, "both profiles restored");
+    assert_eq(profile_shared_mem(vec_get(profs, 0)), 48 * gib, "Metal shared part restored");
+    assert_eq(profile_shared_mem(vec_get(profs, 1)), 0, "CUDA shares nothing");
+    assert_eq(str_eq(node_capacity_to_json_str(n2), js), 1, "re-serialize byte-identical");
+    # Metal's shared part is also what its type implies, so the asserts above
+    # would pass if restore ignored the key. A GH200 is a CUDA card (type: no
+    # sharing) whose 576 GiB includes 480 GiB of Grace RAM: only the key can
+    # carry that through a snapshot.
+    var gh = profile_cuda(0, 576 * gib);
+    profile_set_shared_mem(gh, 480 * gib);
+    var ghn = node_capacity_add_accel(node_capacity_new(str_from("gh-1"), f64_from(72), 491520, 102400, 0), gh);
+    var ghjs = node_capacity_to_json_str(ghn);
+    var gh2 = node_capacity_from_json_str(ghjs);
+    assert_eq(profile_shared_mem(vec_get(NodeCapacity_accel_profiles(gh2), 0)), 480 * gib, "GH200 shared part restored from the key");
+    assert_eq(str_eq(node_capacity_to_json_str(gh2), ghjs), 1, "GH200 re-serialize byte-identical");
+    # The same Metal node as samay 1.1.3 (ai-hwaccel 2.3.23) wrote it: no key.
+    # Restore derives the shared part from the type, so an old snapshot comes
+    # back as the node a fresh one describes, down to the byte.
+    var old = node_capacity_from_json_str(str_from("{\"node_id\":\"mac-1\",\"total_cpu\":12.0,\"available_cpu\":12.0,\"total_memory_mb\":49152,\"available_memory_mb\":49152,\"total_disk_mb\":102400,\"available_disk_mb\":102400,\"running_tasks\":0,\"accel_profiles\":[{\"accelerator\":\"Metal GPU\",\"accel_type_id\":3,\"device_id\":0,\"available\":true,\"memory_bytes\":51539607552,\"family\":\"GPU\"},{\"accelerator\":\"CUDA GPU\",\"accel_type_id\":1,\"device_id\":1,\"available\":true,\"memory_bytes\":25769803776,\"family\":\"GPU\"}]}"));
+    assert_eq(profile_shared_mem(vec_get(NodeCapacity_accel_profiles(old), 0)), 48 * gib, "1.1.3 snapshot: shared part derived");
+    assert_eq(str_eq(node_capacity_to_json_str(old), js), 1, "1.1.3 snapshot re-serializes as 1.1.4");
+    return 0;
+}
+
 fn test_json_cron_entry() {
     test_group("json_cron_entry");
     var req = make_req(f64_from(1), 128);
@@ -1570,6 +1608,15 @@ fn test_json_parity_boundaries() {
     var zero = node_capacity_new(str_from("z"), f64_from(0), 1, 1, 0);
     var zero2 = node_capacity_from_json_str(node_capacity_to_json_str(zero));
     assert_eq(NodeCapacity_total_cpu(zero2) == f64_from(0), 1, "0.0 cpu bit-exact");
+    # A double at a rounding near-tie. 1.621274542797433e-9 is the shortest repr
+    # of 0x3E1BDA70DB50D19F, and through samay 1.1.3 (bayan 1.5.6) it restored
+    # one ULP high, as ...D1A0; bayan 1.5.7's parser is correctly rounded. The
+    # asserts above use f64 ==, a value compare; this one compares the bits.
+    var hard = node_capacity_new(str_from("h"), f64_from(1), 1, 1, 0);
+    NodeCapacity_set_total_cpu(hard, 0x3E1BDA70DB50D19F);
+    NodeCapacity_set_available_cpu(hard, 0x3E1BDA70DB50D19F);
+    var hard2 = node_capacity_from_json_str(node_capacity_to_json_str(hard));
+    assert_eq(NodeCapacity_total_cpu(hard2), 0x3E1BDA70DB50D19F, "near-tie cpu bit-exact (bits)");
     # i64 boundary: near-max timestamp, no coercion
     var t = scheduled_task_new(str_from("t"), str_from("d"), str_from("a"), 5, resource_req_default());
     ScheduledTask_set_scheduled_at(t, 9223372036854775807);
@@ -2100,6 +2147,7 @@ fn main() {
     test_json_scheduled_task();
     test_json_scheduled_task_null_fields();
     test_json_node_capacity();
+    test_json_node_shared_memory();
     test_json_cron_entry();
     test_json_cron_scheduler_deterministic();
     test_json_task_scheduler_snapshot();

@@ -78,7 +78,7 @@ stdlib = [
 # under either bayan packaging.
 [deps.bayan]
 git = "https://github.com/MacCracken/bayan.git"
-tag = "1.5.6"
+tag = "1.5.7"
 modules = ["dist/bayan-json.cyr"]
 
 # AcceleratorRequirement (REQ_* enum) + resource-aware placement API.
@@ -86,5 +86,5 @@ modules = ["dist/bayan-json.cyr"]
 # port consumes the same type from ai-hwaccel's committed dist bundle.
 [deps.ai-hwaccel]
 git = "https://github.com/MacCracken/ai-hwaccel.git"
-tag = "2.3.23"
+tag = "2.4.0"
 modules = ["dist/ai-hwaccel.cyr"]

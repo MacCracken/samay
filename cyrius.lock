@@ -1,6 +1,6 @@
-commit	fd46aa927f81a5a522458592db8367180fe3f3a0	bayan	https://github.com/MacCracken/bayan.git	1.5.6
-commit	135ded19848d6e3d309b00fcf0312735a333343f	ai-hwaccel	https://github.com/MacCracken/ai-hwaccel.git	2.3.23
-88901cb4c80590ebf2531e825f912d2238d449f15577363ea2baa77694535a17  lib/ai-hwaccel.cyr
+commit	746ef31f7cb0b63173052708bb16a6d28473bbd2	bayan	https://github.com/MacCracken/bayan.git	1.5.7
+commit	ae4f9a15d77d088b3bb6f7027521713784bde28a	ai-hwaccel	https://github.com/MacCracken/ai-hwaccel.git	2.4.0
+8b8d93a378faf91ceaa84e9a30a3ea962e3748b0fc269eba5bf03e0efead9963  lib/ai-hwaccel.cyr
 417031acfb92b8f018315ebf375a410c7aecafecd1175c2e691097bb3373a0ee  lib/alloc.cyr
 69e92cc4b67f1a936f94c92ce8a4c66673758b84dba385e96fbeaa46fa692b4c  lib/alloc_agnos.cyr
 c3b7f80d39f39610f44bebf34ba8f31c82eb85b1a7b7ff5327ef5a81e4945889  lib/alloc_cx.cyr
@@ -12,7 +12,7 @@ c88c2ab7f87fdbf63d8e8cb12d43471e7863315f8053341f295b2237788e6d78  lib/args.cyr
 f7b9d52f29de6d3d633962ccc765a76637091a7256eebc1da5547530eed2c44b  lib/args_win.cyr
 65b99d174e411037dc1662bea183fe4c67835760eda848063d352e590219d955  lib/assert.cyr
 eeadd5a7b29998c0039a6758687857689b20f83d3d16c74349a403dac39e71a4  lib/atomic.cyr
-8fe373b54e608bb5ee72efb0895a635d22fe93189e784529b84c3192748ce0e5  lib/bayan-json.cyr
+d8549b6d017c9fac75545db8903af41ca271e1b20911deab8b6cc93726356d34  lib/bayan-json.cyr
 a82f4d28665d98a7336b81fb344ca0c78177ffe911c61ac02bd9c18e10dadb44  lib/bench.cyr
 e4a5d91e12a71feb2d245ec38804ded6333558cb74168853d226cb8ec22e4b19  lib/boxed.cyr
 a89d1b5c950f68b3f770c93ed3cdaf316be738aa1be7c03d4d896377f3dee166  lib/chrono.cyr
