@@ -45,7 +45,7 @@ fn _jv_opt_str(s): i64 {
 
 # Read a required Str field, or 0 if absent / not a string.
 fn _jv_str(obj, key): i64 {
-    var el = bayan_json_v_obj_get(obj, key);
+    var el = bayan_json_v_obj_get_by_cstr(obj, key);
     if (el == 0) { return 0; }
     if (bayan_json_v_is_str(el) == 0) { return 0; }
     return bayan_json_v_str(el);
@@ -53,7 +53,7 @@ fn _jv_str(obj, key): i64 {
 
 # Read a nullable Str field: absent or JSON null -> 0, else the Str.
 fn _jv_opt_str_get(obj, key): i64 {
-    var el = bayan_json_v_obj_get(obj, key);
+    var el = bayan_json_v_obj_get_by_cstr(obj, key);
     if (el == 0) { return 0; }
     if (bayan_json_v_is_null(el) == 1) { return 0; }
     if (bayan_json_v_is_str(el) == 0) { return 0; }
@@ -62,14 +62,14 @@ fn _jv_opt_str_get(obj, key): i64 {
 
 # Read an int field with a default.
 fn _jv_int(obj, key, dflt): i64 {
-    var el = bayan_json_v_obj_get(obj, key);
+    var el = bayan_json_v_obj_get_by_cstr(obj, key);
     if (el == 0) { return dflt; }
     return bayan_json_v_int(el);
 }
 
 # Read an f64 (bit pattern) field with a default.
 fn _jv_f64(obj, key, dflt): i64 {
-    var el = bayan_json_v_obj_get(obj, key);
+    var el = bayan_json_v_obj_get_by_cstr(obj, key);
     if (el == 0) { return dflt; }
     return bayan_json_v_float(el);
 }
@@ -112,7 +112,7 @@ fn _clamp_i64(x, lo, hi): i64 {
 
 # Read an f64 field, falling back to the default when absent or non-finite.
 fn _jv_f64_checked(obj, key, dflt): i64 {
-    var el = bayan_json_v_obj_get(obj, key);
+    var el = bayan_json_v_obj_get_by_cstr(obj, key);
     if (el == 0) { return dflt; }
     var x = bayan_json_v_float(el);
     if (_f64_is_finite(x) == 0) { return dflt; }
@@ -132,7 +132,7 @@ fn _jv_f64_nonneg(obj, key, dflt): i64 {
 # REQ_ANY_ACCELERATOR, a requirement nobody asked for). Matches how
 # `status` and `missed_policy` already handle an out-of-domain value.
 fn _jv_enum(obj, key, lo, hi, dflt): i64 {
-    var el = bayan_json_v_obj_get(obj, key);
+    var el = bayan_json_v_obj_get_by_cstr(obj, key);
     if (el == 0) { return dflt; }
     var x = bayan_json_v_int(el);
     if (x < lo) { return dflt; }
@@ -143,7 +143,7 @@ fn _jv_enum(obj, key, lo, hi, dflt): i64 {
 # Read a flag field normalised to exactly 0 or 1. Anything non-zero is 1, so
 # a truthy-but-not-1 value cannot land in a field compared with `== 1`.
 fn _jv_bool01(obj, key, dflt): i64 {
-    var el = bayan_json_v_obj_get(obj, key);
+    var el = bayan_json_v_obj_get_by_cstr(obj, key);
     if (el == 0) { return dflt; }
     if (bayan_json_v_int(el) == 0) { return 0; }
     return 1;
@@ -152,7 +152,7 @@ fn _jv_bool01(obj, key, dflt): i64 {
 # Read an int field, coerced to its non-negative (u64-like) domain; a
 # negative value clamps to 0. Default if absent.
 fn _jv_uint(obj, key, dflt): i64 {
-    var el = bayan_json_v_obj_get(obj, key);
+    var el = bayan_json_v_obj_get_by_cstr(obj, key);
     if (el == 0) { return dflt; }
     var x = bayan_json_v_int(el);
     if (x < 0) { return 0; }
@@ -192,11 +192,11 @@ fn _rr_node(req): i64 {
 # requirements previously ran backwards through node_capacity_reserve, which
 # computes `available - required` and so ADDED capacity.
 fn _rr_from(obj, key): i64 {
-    var el = bayan_json_v_obj_get(obj, key);
+    var el = bayan_json_v_obj_get_by_cstr(obj, key);
     if (el == 0) { return 0; }
     if (bayan_json_v_is_obj(el) == 0) { return 0; }
     # Require a mandatory key, so a wrong-shaped object is rejected too.
-    if (bayan_json_v_obj_get(el, "cpu_cores") == 0) { return 0; }
+    if (bayan_json_v_obj_get_by_cstr(el, "cpu_cores") == 0) { return 0; }
     return resource_req_new(
       _jv_f64_nonneg(el, "cpu_cores", f64_from(0)),
       _jv_uint(el, "memory_mb", 0),
@@ -218,10 +218,10 @@ fn _ce_node(expr): i64 {
 # not fail, so a wrong-typed `expr` produced an all-zero CronExpr whose masks
 # match nothing -- an entry that silently never fires.
 fn _ce_from(obj, key): i64 {
-    var el = bayan_json_v_obj_get(obj, key);
+    var el = bayan_json_v_obj_get_by_cstr(obj, key);
     if (el == 0) { return 0; }
     if (bayan_json_v_is_obj(el) == 0) { return 0; }
-    if (bayan_json_v_obj_get(el, "minute_mask") == 0) { return 0; }
+    if (bayan_json_v_obj_get_by_cstr(el, "minute_mask") == 0) { return 0; }
     var p = alloc(56);   # 7 fields * 8 — mirrors cron_expr_parse
     # NOT `return 0`: this function already returns 0 for ADR-0005's "absent or
     # wrong type -> reject this record", and the container readers act on that
@@ -357,7 +357,7 @@ fn scheduled_task_from_jsonv(v): i64 {
     # schedule_pending had written the assigned node into node_preference, so
     # the held-reservation state is reconstructable. Absent key vs explicit
     # null matters here, so test the key rather than the decoded value.
-    if (bayan_json_v_obj_get(v, "reserved_on") == 0) {
+    if (bayan_json_v_obj_get_by_cstr(v, "reserved_on") == 0) {
         var ron = 0;
         if (st == TASK_SCHEDULED) { ron = npref; }
         if (st == TASK_RUNNING) { ron = npref; }
@@ -467,7 +467,7 @@ fn node_capacity_from_jsonv(v): i64 {
     # path: a null vec stored here returns a struct that looks healthy.
     var profs = vec_new();
     if (profs == 0) { panic("samay: out of memory in node_capacity_from_jsonv (accel_profiles)"); }
-    var arr = bayan_json_v_obj_get(v, "accel_profiles");
+    var arr = bayan_json_v_obj_get_by_cstr(v, "accel_profiles");
     if (arr != 0) {
         var n = bayan_json_v_arr_len(arr);
         if (n > SAMAY_JSON_MAX_ITEMS) { return 0; }
@@ -506,7 +506,7 @@ fn cron_entry_from_jsonv(v): i64 {
     if (bayan_json_v_is_obj(v) == 0) { return 0; }
     var name = _jv_str(v, "name");
     var expr = _ce_from(v, "expr");
-    var tmpl = cron_task_template_from_jsonv(bayan_json_v_obj_get(v, "task_template"));
+    var tmpl = cron_task_template_from_jsonv(bayan_json_v_obj_get_by_cstr(v, "task_template"));
     if (name == 0) { return 0; }
     if (expr == 0) { return 0; }
     if (tmpl == 0) { return 0; }
@@ -585,7 +585,7 @@ fn cron_scheduler_from_jsonv(v): i64 {
     if (v == 0) { return 0; }
     if (bayan_json_v_is_obj(v) == 0) { return 0; }
     var c = cron_scheduler_new();
-    var arr = bayan_json_v_obj_get(v, "entries");
+    var arr = bayan_json_v_obj_get_by_cstr(v, "entries");
     if (arr != 0) {
         var n = bayan_json_v_arr_len(arr);
         if (n > SAMAY_JSON_MAX_ITEMS) { return 0; }
@@ -635,7 +635,7 @@ fn task_scheduler_from_jsonv(v): i64 {
     if (v == 0) { return 0; }
     if (bayan_json_v_is_obj(v) == 0) { return 0; }
     var s = task_scheduler_new();
-    var tarr = bayan_json_v_obj_get(v, "tasks");
+    var tarr = bayan_json_v_obj_get_by_cstr(v, "tasks");
     if (tarr != 0) {
         var tn = bayan_json_v_arr_len(tarr);
         if (tn > SAMAY_JSON_MAX_ITEMS) { return 0; }
@@ -646,7 +646,7 @@ fn task_scheduler_from_jsonv(v): i64 {
             ti = ti + 1;
         }
     }
-    var narr = bayan_json_v_obj_get(v, "nodes");
+    var narr = bayan_json_v_obj_get_by_cstr(v, "nodes");
     if (narr != 0) {
         var nn = bayan_json_v_arr_len(narr);
         if (nn > SAMAY_JSON_MAX_ITEMS) { return 0; }

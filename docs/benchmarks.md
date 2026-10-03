@@ -14,6 +14,22 @@ pre-warm off every hot path, and re-measured within noise of the table below
 | `samay_uuid_v4`         | 606 ns   | 613 ns   | getrandom(2) syscall-bound         |
 | `scheduled_task_new`    | 2.07 µs  | 2.06 µs  | alloc + uuid + `dt_now`            |
 
+## v1.1.6 — cyrius 6.6.6 → 6.6.14
+
+1.1.5 on cyrius 6.6.6 against 1.1.6 on 6.6.14, 60 rounds interleaved, shuffled and pinned to
+one CPU (2026-10-03). Medians:
+
+| Op                      | 1.1.5    | 1.1.6    | Δ      |
+|-------------------------|----------|----------|--------|
+| `priority_from_numeric` | 4.3 ns   | 4.3 ns   | 0.0%   |
+| `node_can_fit`          | 12.5 ns  | 12.5 ns  | 0.0%   |
+| `cron_expr_matches`     | 14.0 ns  | 14.0 ns  | +0.3%  |
+| `samay_uuid_v4`         | 656.5 ns | 667.0 ns | +1.6%  |
+| `scheduled_task_new`    | 2.32 µs  | 2.32 µs  | +0.1%  |
+
+Only `samay_uuid_v4` moved (p < 0.01), by 10 ns on a `getrandom(2)`-bound path whose source
+and Linux syscall wrapper did not change. The table above is the v1.0.3 baseline on 6.5.36.
+
 ## v1.0.3 — the two measured wins
 
 **`cron_expr_matches`: 282 ns → 22 ns, and the miss path no longer allocates.**

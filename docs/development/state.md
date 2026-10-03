@@ -5,6 +5,12 @@
 
 ## Version
 
+**1.1.6** — cyrius 6.6.14, bayan 1.5.11, ai-hwaccel 2.4.1, and `rust-old/` removed. The
+18 `bayan_json_v_obj_get` calls in `src/json.cyr` (deprecated by bayan 1.5.10) read
+through `bayan_json_v_obj_get_by_cstr`; every key is a string literal, so the lookups are
+unchanged. The tag `1.1.5` is the last revision with `rust-old/`
+(`git show 1.1.5:rust-old/src/lib.rs`). 558 assertions.
+
 **1.1.5** — test correctness and coverage, done as preparation for deleting
 `rust-old/` ([removal readiness](rust-old-removal.md)). No `src/` change. Seven
 assertions ported from the Rust oracle could not fail, or were weaker than the
@@ -12,8 +18,6 @@ oracle's; all are fixed. Every public function is now called by a test (79/79),
 and CI gates on that. ADR-0006's account of the oracle's cron model is corrected.
 558 assertions.
 
-**Unreleased:** `rust-old/` is removed. The tag `1.1.5` is the last revision that has
-it (`git show 1.1.5:rust-old/src/lib.rs`).
 
 Built on **1.1.4** (ai-hwaccel 2.4.0, bayan 1.5.7), **1.1.3** (constructors own
 every `Str` they retain), **1.1.2** (the cyrius 6.6.x `Result` value form),
@@ -24,7 +28,7 @@ sweep).
 
 ## Toolchain
 
-- **Cyrius pin**: `6.6.6` (in `cyrius.cyml [package].cyrius`)
+- **Cyrius pin**: `6.6.14` (in `cyrius.cyml [package].cyrius`)
 
 ## Source
 
@@ -67,7 +71,8 @@ sweep).
 - Gates: `cyrius fmt <file> --check` clean, `cyrius lint <file>` 0 warnings and 0
   untracked deferrals, `cyrius distlib --check` in sync. **All four now run in CI** —
   note `fmt`/`lint` take a file argument, so a bare `cyrius fmt --check` gates nothing.
-- Coverage (v1.1.5): `cyrius coverage --min 100`, **79/79**, plus a strict CI check
+- Coverage (v1.1.6): `cyrius coverage --min 100`, **78/78** (cyrius 6.6.14's tool no longer
+  counts `src/main.cyr`'s `main`; 1.1.5 read 79/79 on 6.6.6), plus a strict CI check
   that every public function in `[lib].modules` is *called* by a test. The strict
   check exists because the tool counts a name that appears anywhere in the tests,
   including in a comment or inside a longer name. That counting credited
@@ -75,11 +80,11 @@ sweep).
 
 ## Dependencies
 
-- **ai-hwaccel** 2.4.0 (git) — `AcceleratorRequirement` `REQ_*` + lossless
+- **ai-hwaccel** 2.4.1 (git) — `AcceleratorRequirement` `REQ_*` + lossless
   `profile_to_json`/`profile_from_json` (used by `NodeCapacity` serialization).
   Since 2.3.28 (schema v6) a profile carries `shared_memory_bytes`, which node
   snapshots pass through.
-- **bayan** 1.5.7 (git) — `dist/bayan-json.cyr`, the focused JSON sublib, *not*
+- **bayan** 1.5.11 (git, the version cyrius 6.6.14 folds) — `dist/bayan-json.cyr`, the focused JSON sublib, *not*
   the 641 KB monolith. bayan left the stdlib snapshot in 1.5.2; taking the
   monolith while ai-hwaccel pulls the sublib vendors both files and collides on
   27 JSON symbols under last-def-wins. The sublib omits the short `json_v_*`

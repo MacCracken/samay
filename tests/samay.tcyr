@@ -1665,7 +1665,7 @@ fn _embed_rt(v) {
     bayan_json_v_obj_set(outer, str_from("ok"), bayan_json_v_bool_new(1));
     bayan_json_v_obj_set(outer, str_from("item"), v);
     var text = bayan_json_v_build(outer);
-    return bayan_json_v_obj_get(bayan_json_v_parse_buf(str_data(text), str_len(text)), "item");
+    return bayan_json_v_obj_get_by_cstr(bayan_json_v_parse_buf(str_data(text), str_len(text)), "item");
 }
 
 # The *_to_jsonv / *_from_jsonv layer is how a consumer embeds samay objects in

@@ -4,7 +4,34 @@ All notable changes to Samay are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.1.6] — 2026-10-03
+
+**cyrius 6.6.14, bayan 1.5.11 and ai-hwaccel 2.4.1, and `rust-old/` removed.** The 18
+`bayan_json_v_obj_get` calls in `src/json.cyr` read through `bayan_json_v_obj_get_by_cstr`, so a
+consumer that builds `dist/samay.cyr` on cyrius 6.6.13 or later (kavach) no longer gets 18
+`#deprecated` warnings from it. samay builds with 0 warnings. **558 tests**, unchanged.
+
+### Changed — toolchain and dependency pins
+
+| | was | now |
+|---|---|---|
+| cyrius | 6.6.6 | **6.6.14** |
+| bayan | 1.5.7 | **1.5.11**, the version cyrius 6.6.14 folds (commit `aeb13d2`) |
+| ai-hwaccel | 2.4.0 | **2.4.1** (`5fc564c`) |
+
+- **`lib/` re-vendored from an empty tree** (`cyrius lib sync`, then `cyrius deps`): 52 files,
+  one more than 1.1.5. The new one is `lib/hashmap_fast.cyr`, which 6.6.14's stdlib pulls in.
+  `lib/bayan-json.cyr` and `lib/ai-hwaccel.cyr` are byte-identical to their tags' `dist/`
+  bundles, and `cyrius.lock` pins both tag commits.
+- **`src/json.cyr`: `bayan_json_v_obj_get` → `bayan_json_v_obj_get_by_cstr`**, all 18 call sites,
+  and the one in `tests/samay.tcyr`. bayan 1.5.10 deprecated the bare name. Every key that reaches
+  them is a string literal (52 literal arguments to the `_jv_*`, `_rr_from` and `_ce_from`
+  readers), the case `_by_cstr` is for, so the lookups are unchanged.
+- **ai-hwaccel 2.4.1** removes the 3 deprecation warnings its bundle printed here. It changes
+  nothing samay calls: its three renamed calls sit behind `profile_from_json_str`'s field readers,
+  with the same keys.
+- **Coverage reads 78/78.** 6.6.14's `cyrius coverage` no longer counts `src/main.cyr`'s `main`,
+  the demo entry. The 78 library functions are the same, all referenced.
 
 ### Removed — `rust-old/`
 
@@ -22,7 +49,7 @@ dropped is recorded there. 1.1.5 fixed the three blockers that audit found.
 - **Other references:** the README and getting-started layouts, the getting-started
   workflow step, `state.md`, the roadmap, and the `.gitignore` entry.
 
-No `src/` change. `dist/samay.cyr` is unchanged, and 558/558 tests still pass.
+The removal changed no `src/` file and no test.
 
 ### Upstream — the coverage-tool weakness is filed
 
@@ -31,6 +58,29 @@ The finding behind 1.1.5's strict coverage check is filed against cyrius as
 It includes a three-function reproduction that passes `--min 100` with one function
 referenced. Once cyrius matches whole identifiers outside comments, the strict half of CI's
 "Every public function is called by a test" step can be reconsidered.
+
+### Performance
+
+`tests/samay.bcyr`, 1.1.5 on cyrius 6.6.6 against 1.1.6 on 6.6.14: 60 rounds, interleaved, shuffled
+and pinned to one CPU. Medians:
+
+| row | 1.1.5 | 1.1.6 | Δ | p |
+|---|---:|---:|---:|---:|
+| `node_can_fit` | 12.5 ns | 12.5 ns | 0.0% | 0.86 |
+| `priority_from_numeric` | 4.3 ns | 4.3 ns | 0.0% | 1.00 |
+| `samay_uuid_v4` | 656.5 ns | 667.0 ns | +1.6% | <0.01 |
+| `scheduled_task_new` | 2.32 µs | 2.32 µs | +0.1% | 0.30 |
+| `cron_expr_matches` | 14.0 ns | 14.0 ns | +0.3% | 0.28 |
+
+`samay_uuid_v4` is 10 ns slower. Its source did not change, and neither did the Linux path of
+`sys_getrandom`, the syscall that dominates it (6.6.14 added only a macOS clamp). Not traced
+further. The other four rows are unchanged.
+
+### Verified
+
+- CI's steps, run locally on 6.6.14: build, 558/558 tests, fmt and lint over `src/` and
+  `tests/`, every public function called by a test, every allocation guarded (ADR-0009),
+  `dist/` in sync (2,463 lines), and the benchmarks. `cyrius coverage --min 100` passes.
 
 ## [1.1.5] — 2026-09-23
 
