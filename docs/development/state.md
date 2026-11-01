@@ -5,6 +5,10 @@
 
 ## Version
 
+**1.1.7** — cyrius 6.6.20, bayan 1.5.12, ai-hwaccel 2.4.2. No `src/` or test change.
+`dist/samay.cyr` gains a `# Requires` block, and `dist/samay.deps` lists the 4 leaves
+6.6.20's distlib proves the bundle needs, instead of 23. 558 assertions.
+
 **1.1.6** — cyrius 6.6.14, bayan 1.5.11, ai-hwaccel 2.4.1, and `rust-old/` removed. The
 18 `bayan_json_v_obj_get` calls in `src/json.cyr` (deprecated by bayan 1.5.10) read
 through `bayan_json_v_obj_get_by_cstr`; every key is a string literal, so the lookups are
@@ -28,7 +32,7 @@ sweep).
 
 ## Toolchain
 
-- **Cyrius pin**: `6.6.14` (in `cyrius.cyml [package].cyrius`)
+- **Cyrius pin**: `6.6.20` (in `cyrius.cyml [package].cyrius`)
 
 ## Source
 
@@ -71,7 +75,7 @@ sweep).
 - Gates: `cyrius fmt <file> --check` clean, `cyrius lint <file>` 0 warnings and 0
   untracked deferrals, `cyrius distlib --check` in sync. **All four now run in CI** —
   note `fmt`/`lint` take a file argument, so a bare `cyrius fmt --check` gates nothing.
-- Coverage (v1.1.6): `cyrius coverage --min 100`, **78/78** (cyrius 6.6.14's tool no longer
+- Coverage (v1.1.7): `cyrius coverage --min 100`, **78/78** (cyrius 6.6.14's tool no longer
   counts `src/main.cyr`'s `main`; 1.1.5 read 79/79 on 6.6.6), plus a strict CI check
   that every public function in `[lib].modules` is *called* by a test. The strict
   check exists because the tool counts a name that appears anywhere in the tests,
@@ -80,11 +84,11 @@ sweep).
 
 ## Dependencies
 
-- **ai-hwaccel** 2.4.1 (git) — `AcceleratorRequirement` `REQ_*` + lossless
+- **ai-hwaccel** 2.4.2 (git) — `AcceleratorRequirement` `REQ_*` + lossless
   `profile_to_json`/`profile_from_json` (used by `NodeCapacity` serialization).
   Since 2.3.28 (schema v6) a profile carries `shared_memory_bytes`, which node
   snapshots pass through.
-- **bayan** 1.5.11 (git, the version cyrius 6.6.14 folds) — `dist/bayan-json.cyr`, the focused JSON sublib, *not*
+- **bayan** 1.5.12 (git, the version cyrius 6.6.20 folds) — `dist/bayan-json.cyr`, the focused JSON sublib, *not*
   the 641 KB monolith. bayan left the stdlib snapshot in 1.5.2; taking the
   monolith while ai-hwaccel pulls the sublib vendors both files and collides on
   27 JSON symbols under last-def-wins. The sublib omits the short `json_v_*`
@@ -94,8 +98,9 @@ sweep).
 - **stdlib** — syscalls, string, alloc, str, fmt, vec, hashmap, io, fs,
   chrono, random, result, **math**, tagged, fnptr, freelist, atomic,
   sakshi, process, args, thread, assert, bench.
-  (`math` supplies `f64_parse`, which `#derive(Serialize)` needs to deserialize
-  f64.) Vendor with `cyrius lib sync` (not `cyrius deps`).
+  (`math` is no longer required: 6.6.20's `#derive(Serialize)` decodes f64 with
+  `bayan_f64_from_json`, not `f64_parse`, and samay builds and tests without it.)
+  Vendor with `cyrius lib sync` (not `cyrius deps`).
 
 ## Consumers
 
@@ -104,9 +109,9 @@ sweep).
 - **daimon 2.0.0** — integrated: deleted its duplicated `scheduler.cyr`/`cron.cyr` and
   consumes samay as the single scheduler source of truth (api_sched rewired; 215 assertions).
   The migration surfaced + fixed the `uuid_v4`↔libro collision (samay 1.0.1).
-- Current pins, as of 1.1.4: kavach 3.12.5 → samay `1.1.2`, daimon 2.4.3 → `1.1.3`,
-  stiva 3.0.20 → `1.1.2`. kavach and daimon also set `path = "../samay"`, so local
-  builds of them use this checkout, not the tag. The only samay JSON call among
+- Current pins, as of 1.1.7: kavach 3.13.2 → samay `1.1.6`, daimon 2.4.3 → `1.1.3`,
+  stiva 3.0.22 → `1.1.2`. daimon also sets `path = "../samay"`, so its local
+  builds use this checkout, not the tag. The only samay JSON call among
   them is daimon's `SchedulingDecision_to_json`, which is emit-only. None of them
   restores a samay snapshot.
 - zugot's marketplace recipe is stale: it still describes samay as a Rust crate at v0.1.0

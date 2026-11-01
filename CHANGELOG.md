@@ -4,6 +4,76 @@ All notable changes to Samay are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.1.7] — 2026-11-01
+
+**cyrius 6.6.20, bayan 1.5.12 and ai-hwaccel 2.4.2.** A toolchain and dependency bump: no `src/` or
+test change, and the body of `dist/samay.cyr` is byte-identical to 1.1.6's. The bundle gains a
+`# Requires` block, and `dist/samay.deps` lists 4 leaves instead of 23 (see *Consumers*). samay
+builds with 0 warnings. **558 tests**, unchanged.
+
+### Changed — toolchain and dependency pins
+
+| | was | now |
+|---|---|---|
+| cyrius | 6.6.14 | **6.6.20** |
+| bayan | 1.5.11 | **1.5.12**, the version cyrius 6.6.20 folds (commit `de460c4`) |
+| ai-hwaccel | 2.4.1 | **2.4.2** (`4d689d5`), the tag built on cyrius 6.6.20 and bayan 1.5.12 |
+
+- **These are the newest tags on 6.6.20's line.** bayan 1.5.13 moves to cyrius 6.7.5, and
+  ai-hwaccel 2.5.0 to 6.7.18.
+- **`lib/` re-vendored from an empty tree** (`cyrius.lock` deleted, `cyrius lib sync`, then
+  `cyrius deps`): 53 files, one more than 1.1.6. The new one is `lib/poison.cyr`, which 6.6.20's
+  `alloc` and `freelist` include. 28 of the other 52 changed. `lib/bayan-json.cyr` and
+  `lib/ai-hwaccel.cyr` are byte-identical to their tags' `dist/` bundles, every stdlib file matches
+  the 6.6.20 snapshot, and `cyrius.lock` pins both tag commits. A second vendoring from empty
+  reproduced the lock byte for byte, and `cyrius deps --verify` reports 53 verified, 0 failed.
+- **Neither dep changes anything samay calls.** bayan 1.5.12 has no source change, and the body of
+  ai-hwaccel 2.4.2's bundle is byte-identical to 2.4.1's. Each bundle gains a `# Requires` block.
+
+### Consumers
+
+- **`dist/samay.cyr` opens with a `# Requires` block** that includes `random`, `assert`, `chrono`
+  and `hashmap`, and `dist/samay.deps` lists those 4 leaves instead of 23. Since cyrius 6.6.18,
+  distlib writes only the leaves its compile-verify proves the bundle needs. The rest arrive through
+  those leaves' own includes and through the `# Requires` blocks of `bayan-json` (`result`) and
+  `ai-hwaccel` (`sakshi`), both of which a consumer must still supply, as before.
+- **A consumer that got a module for its own code only through samay's sidecar must now list it.**
+  kavach and stiva already list all 23. daimon lists all but `result` and `sakshi`, and declares
+  `[deps.sakshi]` itself. A scratch copy of daimon 2.4.3, on its own 6.6.6 pin and resolving
+  `path = "../samay"`, builds the same way against 1.1.6 and 1.1.7: 3,313,248 bytes and the same
+  warnings. One of those warnings is an undefined `bayan_json_v_obj_get_by_cstr`, which its bayan
+  1.5.6 pin predates; it comes from samay 1.1.6, not from this release.
+- **The bundle works with nothing else in scope.** A consumer that includes only `bayan-json`,
+  `ai-hwaccel` and `dist/samay.cyr` compiles with no undefined functions and runs the scheduler and
+  cron JSON round trips. `1/3` reads back bit-exact through `ResourceReq_from_json`.
+- **`math` left the sidecar, and that is safe.** cyrius 6.6.20's `#derive(Serialize)` decodes f64
+  through `bayan_f64_from_json`, not `f64_parse`. samay's own `[deps] stdlib` still lists `math`,
+  though a scratch build without it passes all 558 tests and the benchmarks.
+
+### Performance
+
+`tests/samay.bcyr`, 1.1.6 on cyrius 6.6.14 against 1.1.7 on 6.6.20: 60 rounds, interleaved, shuffled
+and pinned to one CPU. Medians:
+
+| row | 1.1.6 | 1.1.7 | Δ | p |
+|---|---:|---:|---:|---:|
+| `node_can_fit` | 12.45 ns | 12.47 ns | +0.1% | 0.32 |
+| `priority_from_numeric` | 4.31 ns | 4.33 ns | +0.4% | 0.02 |
+| `samay_uuid_v4` | 663.0 ns | 663.0 ns | 0.0% | 0.79 |
+| `scheduled_task_new` | 2.30 µs | 2.31 µs | +0.2% | 0.13 |
+| `cron_expr_matches` | 13.94 ns | 13.96 ns | +0.1% | 0.55 |
+
+No row moved by more than 0.4%. `priority_from_numeric` is the only one under p = 0.05, by 0.02 ns,
+and its source did not change. Not traced further.
+
+### Verified
+
+- CI's steps, run locally on 6.6.20: build, 558/558 tests, fmt and lint over `src/` and `tests/`,
+  every public function called by a test, every allocation guarded (ADR-0009), `dist/` in sync
+  (2,463 lines), and the benchmarks. `cyrius coverage --min 100` passes, 78/78.
+- No symbol collisions: none of samay's 137 functions or its globals is defined in the vendored
+  `lib/`, which grew from 1,529 functions to 1,632.
+
 ## [1.1.6] — 2026-10-03
 
 **cyrius 6.6.14, bayan 1.5.11 and ai-hwaccel 2.4.1, and `rust-old/` removed.** The 18

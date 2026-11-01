@@ -14,6 +14,22 @@ pre-warm off every hot path, and re-measured within noise of the table below
 | `samay_uuid_v4`         | 606 ns   | 613 ns   | getrandom(2) syscall-bound         |
 | `scheduled_task_new`    | 2.07 µs  | 2.06 µs  | alloc + uuid + `dt_now`            |
 
+## v1.1.7 — cyrius 6.6.14 → 6.6.20
+
+1.1.6 on cyrius 6.6.14 against 1.1.7 on 6.6.20, 60 rounds interleaved, shuffled and pinned to
+one CPU (2026-11-01). Medians:
+
+| Op                      | 1.1.6    | 1.1.7    | Δ      |
+|-------------------------|----------|----------|--------|
+| `priority_from_numeric` | 4.31 ns  | 4.33 ns  | +0.4%  |
+| `node_can_fit`          | 12.45 ns | 12.47 ns | +0.1%  |
+| `cron_expr_matches`     | 13.94 ns | 13.96 ns | +0.1%  |
+| `samay_uuid_v4`         | 663.0 ns | 663.0 ns | 0.0%   |
+| `scheduled_task_new`    | 2.30 µs  | 2.31 µs  | +0.2%  |
+
+No row moved by more than 0.4%. `priority_from_numeric` is the only one under p = 0.05, by
+0.02 ns, and its source did not change.
+
 ## v1.1.6 — cyrius 6.6.6 → 6.6.14
 
 1.1.5 on cyrius 6.6.6 against 1.1.6 on 6.6.14, 60 rounds interleaved, shuffled and pinned to
