@@ -5,6 +5,10 @@
 
 ## Version
 
+**1.2.0** — cyrius 6.7.9, bayan 1.5.13, and `math` out of `[deps] stdlib`. ai-hwaccel
+stays at 2.4.2: no tag targets 6.7.9, and 2.5.0 moves to 6.7.18. No `src/` or test
+change, and `dist/samay.cyr` differs from 1.1.7's only in its version line. 558 assertions.
+
 **1.1.7** — cyrius 6.6.20, bayan 1.5.12, ai-hwaccel 2.4.2. No `src/` or test change.
 `dist/samay.cyr` gains a `# Requires` block, and `dist/samay.deps` lists the 4 leaves
 6.6.20's distlib proves the bundle needs, instead of 23. 558 assertions.
@@ -32,7 +36,7 @@ sweep).
 
 ## Toolchain
 
-- **Cyrius pin**: `6.6.20` (in `cyrius.cyml [package].cyrius`)
+- **Cyrius pin**: `6.7.9` (in `cyrius.cyml [package].cyrius`)
 
 ## Source
 
@@ -75,7 +79,7 @@ sweep).
 - Gates: `cyrius fmt <file> --check` clean, `cyrius lint <file>` 0 warnings and 0
   untracked deferrals, `cyrius distlib --check` in sync. **All four now run in CI** —
   note `fmt`/`lint` take a file argument, so a bare `cyrius fmt --check` gates nothing.
-- Coverage (v1.1.7): `cyrius coverage --min 100`, **78/78** (cyrius 6.6.14's tool no longer
+- Coverage (v1.2.0): `cyrius coverage --min 100`, **78/78** (cyrius 6.6.14's tool no longer
   counts `src/main.cyr`'s `main`; 1.1.5 read 79/79 on 6.6.6), plus a strict CI check
   that every public function in `[lib].modules` is *called* by a test. The strict
   check exists because the tool counts a name that appears anywhere in the tests,
@@ -84,11 +88,12 @@ sweep).
 
 ## Dependencies
 
-- **ai-hwaccel** 2.4.2 (git) — `AcceleratorRequirement` `REQ_*` + lossless
+- **ai-hwaccel** 2.4.2 (git, the newest tag not above this pin; 2.5.0 needs 6.7.18) —
+  `AcceleratorRequirement` `REQ_*` + lossless
   `profile_to_json`/`profile_from_json` (used by `NodeCapacity` serialization).
   Since 2.3.28 (schema v6) a profile carries `shared_memory_bytes`, which node
   snapshots pass through.
-- **bayan** 1.5.12 (git, the version cyrius 6.6.20 folds) — `dist/bayan-json.cyr`, the focused JSON sublib, *not*
+- **bayan** 1.5.13 (git, the version cyrius 6.7.9 folds) — `dist/bayan-json.cyr`, the focused JSON sublib, *not*
   the 641 KB monolith. bayan left the stdlib snapshot in 1.5.2; taking the
   monolith while ai-hwaccel pulls the sublib vendors both files and collides on
   27 JSON symbols under last-def-wins. The sublib omits the short `json_v_*`
@@ -96,11 +101,11 @@ sweep).
   — which resolves under either bayan packaging, so consumers of
   `dist/samay.cyr` are unconstrained in which they vendor.
 - **stdlib** — syscalls, string, alloc, str, fmt, vec, hashmap, io, fs,
-  chrono, random, result, **math**, tagged, fnptr, freelist, atomic,
+  chrono, random, result, tagged, fnptr, freelist, atomic,
   sakshi, process, args, thread, assert, bench.
-  (`math` is no longer required: 6.6.20's `#derive(Serialize)` decodes f64 with
-  `bayan_f64_from_json`, not `f64_parse`, and samay builds and tests without it.)
-  Vendor with `cyrius lib sync` (not `cyrius deps`).
+  (`math` left in 1.2.0: `#derive(Serialize)` decodes f64 with `bayan_f64_from_json`,
+  and samay calls nothing in it. bayan 1.5.14 and later require it, so it comes back
+  with that bump.) Vendor with `cyrius lib sync` (not `cyrius deps`).
 
 ## Consumers
 
@@ -109,7 +114,7 @@ sweep).
 - **daimon 2.0.0** — integrated: deleted its duplicated `scheduler.cyr`/`cron.cyr` and
   consumes samay as the single scheduler source of truth (api_sched rewired; 215 assertions).
   The migration surfaced + fixed the `uuid_v4`↔libro collision (samay 1.0.1).
-- Current pins, as of 1.1.7: kavach 3.13.2 → samay `1.1.6`, daimon 2.4.3 → `1.1.3`,
+- Current pins, as of 1.2.0: kavach 3.13.2 → samay `1.1.6`, daimon 2.4.3 → `1.1.3`,
   stiva 3.0.22 → `1.1.2`. daimon also sets `path = "../samay"`, so its local
   builds use this checkout, not the tag. The only samay JSON call among
   them is daimon's `SchedulingDecision_to_json`, which is emit-only. None of them
@@ -122,9 +127,9 @@ sweep).
 See [`roadmap.md`](roadmap.md) — it carries the full backlog with version pins and
 is the single source for forward work. In brief: **1.1.0** shipped the one
 deferral of three that survived verification (capped counts report as floors);
-**1.1.1** is checked `alloc()`; **1.2.0**
-splits `node_preference`; **1.3.0** is F5 (stable sort + terminal-task pruning),
-the one item with real risk; **1.4.0** is the F8/F9 cron work budget; **1.5.0**
+**1.1.1** is checked `alloc()`; **1.2.0** took the cyrius 6.7 bump; **1.3.0**
+splits `node_preference`; **1.4.0** is F5 (stable sort + terminal-task pruning),
+the one item with real risk; **1.5.0** is the F8/F9 cron work budget; **1.6.0**
 is the write-side JSON codec. Everything else is trigger-gated and deliberately
 unpinned.
 

@@ -1,6 +1,6 @@
 # samay — Roadmap
 
-> **Last refreshed**: 2026-08-30 (v1.1.1)
+> **Last refreshed**: 2026-11-01 (v1.2.0)
 >
 > **Forward-looking only.** Nothing shipped belongs here — per-release detail
 > lives in [`../../CHANGELOG.md`](../../CHANGELOG.md) (complete from 0.1.0), the
@@ -10,8 +10,8 @@
 > An item moves when its dependencies are met; a trigger-gated item has no pin at
 > all, deliberately — see [Trigger-gated](#trigger-gated--no-pin-by-design).
 
-> **Current**: **v1.1.7**, cyrius pin **6.6.20**, deps ai-hwaccel **2.4.2** +
-> bayan-json **1.5.12**. Gates green: **558 assertions**, **5/5 benchmarks**,
+> **Current**: **v1.2.0**, cyrius pin **6.7.9**, deps ai-hwaccel **2.4.2** +
+> bayan-json **1.5.13**. Gates green: **558 assertions**, **5/5 benchmarks**,
 > coverage **78/78** public functions (each called by a test; 6.6.14 stopped counting `main`), lint 0-warn / 0
 > untracked deferrals, fmt clean, `dist/` in sync (2,463 lines), 0 symbol collisions
 > against the vendored deps. `src/` is 9 modules. The 1,479-line Rust oracle was
@@ -23,10 +23,11 @@
 |---|---|---|---|
 | ~~1.1.0~~ | ~~Cron catch-up counting tells the truth~~ | — | **shipped 2026-08-30** |
 | ~~1.1.1~~ | ~~Checked `alloc()` across `src/`~~ | — | **shipped 2026-08-30** |
-| **1.2.0** | Split `node_preference` (ADR-0009) | medium | wire back-compat proof |
-| **1.3.0** | F5 — stable sort + terminal-task pruning | **high** | sort consolidation first |
-| **1.4.0** | F8/F9 — cron aggregate work budget | medium | an ADR on the exhaustion rule |
-| **1.5.0** | Write-side JSON codec | medium | byte-equality corpus |
+| ~~1.2.0~~ | ~~cyrius 6.7.9, bayan 1.5.13, `math` dropped~~ | — | **shipped 2026-11-01** |
+| **1.3.0** | Split `node_preference` (ADR-0009) | medium | wire back-compat proof |
+| **1.4.0** | F5 — stable sort + terminal-task pruning | **high** | sort consolidation first |
+| **1.5.0** | F8/F9 — cron aggregate work budget | medium | an ADR on the exhaustion rule |
+| **1.6.0** | Write-side JSON codec | medium | byte-equality corpus |
 | *(none)* | Trigger-gated items | — | a consumer event |
 
 ---
@@ -61,12 +62,13 @@ allocation. See the CHANGELOG.
   `map_values` order differ between runs, which is a benefit (it surfaces latent
   order dependencies) but needs a migration window.
 
-## 1.2.x – 1.5.x — existing backlog, re-sequenced
+## 1.3.x – 1.6.x — existing backlog, re-sequenced
 
-Ordering is by dependency and blast radius, not by appetite. F5 (1.3.0) is the
+Ordering is by dependency and blast radius, not by appetite. F5 (1.4.0) is the
 one with real risk, and it sits behind a mechanical refactor that must land first.
+All four moved up one minor on 2026-11-01, when 1.2.0 went to the cyrius 6.7 bump.
 
-### 1.2.0 — split `node_preference` into request and assignment
+### 1.3.0 — split `node_preference` into request and assignment
 
 - [ ] `schedule_pending` overwrites the caller's requested node with the chosen
   one (`src/scheduler.cyr`), which destroys the accurate "preferred node"
@@ -78,7 +80,7 @@ one with real risk, and it sits behind a mechanical refactor that must land firs
   proof that it works. *Entry gate*: a back-compat restore test over a 1.0.x
   snapshot corpus, both directions.
 
-### 1.3.0 — F5: stable sort + terminal-task pruning
+### 1.4.0 — F5: stable sort + terminal-task pruning
 
 - [ ] **Consolidate the four insertion sorts first, then swap the algorithm
   once.** `src/scheduler.cyr` ×2, `src/cron.cyr`, `src/json.cyr`; two are already
@@ -97,7 +99,7 @@ one with real risk, and it sits behind a mechanical refactor that must land firs
   result is element-for-element identical to the insertion result, plus the
   existing determinism group green.
 
-### 1.4.0 — F8/F9: cron aggregate work budget
+### 1.5.0 — F8/F9: cron aggregate work budget
 
 - [ ] Per-entry catch-up is bounded (`CRON_SCAN_WINDOW_SECS`, `CRON_MAX_COUNT`,
   `CRON_CATCHUP_CAP`); the aggregate across many entries in one `check_due_at` is
@@ -108,7 +110,7 @@ one with real risk, and it sits behind a mechanical refactor that must land firs
   skip remaining entries, degrade to SKIP) collides with "missed schedules are
   never silently skipped", and that conflict is the actual work.
 
-### 1.5.0 — write-side JSON codec
+### 1.6.0 — write-side JSON codec
 
 - [ ] `_rr_node` / `_ce_node` still serialize-then-reparse through the `#derive`
   codec — measured 3.14 µs → 695 ns for a direct builder, ~68% of
@@ -167,7 +169,7 @@ Recorded so they are not re-proposed. Each was measured, not argued.
   behavioural change would be suppressing `_cron_log_clamp`, a **true** warning
   that pre-window occurrences were dropped. Nothing gained, information lost.
   *The real cost here is the full-window scan itself (~3.9 ms per stale entry),
-  and the fix for that is the aggregate budget at 1.4.0, not a restore clamp.*
+  and the fix for that is the aggregate budget at 1.5.0, not a restore clamp.*
 - **Raise `CRON_MAX_COUNT` to the window size** (planned for 1.1.0). **Not free,
   as had been claimed.** A matching minute costs ~40× a missing one — it passes
   the v1.0.3 prefilter and reaches `epoch_to_date` — so `* * * * *` over a full

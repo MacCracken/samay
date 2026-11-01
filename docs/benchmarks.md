@@ -14,6 +14,23 @@ pre-warm off every hot path, and re-measured within noise of the table below
 | `samay_uuid_v4`         | 606 ns   | 613 ns   | getrandom(2) syscall-bound         |
 | `scheduled_task_new`    | 2.07 µs  | 2.06 µs  | alloc + uuid + `dt_now`            |
 
+## v1.2.0 — cyrius 6.6.20 → 6.7.9
+
+1.1.7 on cyrius 6.6.20 against 1.2.0 on 6.7.9, 60 rounds interleaved, shuffled and pinned to
+one CPU (2026-11-01). Medians:
+
+| Op                      | 1.1.7    | 1.2.0    | Δ      |
+|-------------------------|----------|----------|--------|
+| `priority_from_numeric` | 4.54 ns  | 4.57 ns  | +0.7%  |
+| `node_can_fit`          | 12.82 ns | 12.87 ns | +0.4%  |
+| `cron_expr_matches`     | 14.54 ns | 14.53 ns | −0.1%  |
+| `samay_uuid_v4`         | 682.0 ns | 680.0 ns | −0.3%  |
+| `scheduled_task_new`    | 2.37 µs  | 2.37 µs  | +0.2%  |
+
+No row is under p = 0.05, and none moved by more than 0.7%. The machine was not idle (load
+about 4), so the absolute numbers run about 3% above the v1.1.7 table. Read the Δ, not the
+medians.
+
 ## v1.1.7 — cyrius 6.6.14 → 6.6.20
 
 1.1.6 on cyrius 6.6.14 against 1.1.7 on 6.6.20, 60 rounds interleaved, shuffled and pinned to

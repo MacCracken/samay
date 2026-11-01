@@ -5,7 +5,7 @@ description = "Samay — task scheduler for AGNOS (cron, resource-aware scheduli
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/samay"
 language = "cyrius"
-cyrius = "6.6.20"
+cyrius = "6.7.9"
 
 [build]
 entry = "src/main.cyr"
@@ -33,11 +33,12 @@ modules = [
 # Cyrius stdlib modules vendored into lib/ by `cyrius lib sync` (NOT
 # `cyrius deps` — that resolves [deps.NAME] git deps only). lib/ is
 # committed, not gitignored. The set is the union of what samay's own src
-# needs (chrono/random/result/hashmap/bayan/math/…) and what the ai-hwaccel
+# needs (chrono/random/result/hashmap/bayan/…) and what the ai-hwaccel
 # dist bundle forward-references (sakshi/thread/process/fs/… — its own
 # [deps].stdlib).
-#   math  — no longer required: 6.6.20's #derive(Serialize) decodes f64 with
-#           bayan_f64_from_json, not f64_parse. samay builds and tests without it.
+# NOTE: math is NOT in this list. #derive(Serialize) decodes f64 with
+# bayan_f64_from_json, and samay calls nothing in it. bayan 1.5.14 and later
+# require it, so it comes back with that bump.
 # NOTE: bayan is NOT in this list. As of bayan 1.5.2 it ships focused
 # sublibs, and samay consumes `dist/bayan-json.cyr` via [deps.bayan]
 # below — see that block for why.
@@ -55,7 +56,6 @@ stdlib = [
     "chrono",
     "random",
     "result",
-    "math",
     "tagged",
     "fnptr",
     "freelist",
@@ -79,7 +79,7 @@ stdlib = [
 # under either bayan packaging.
 [deps.bayan]
 git = "https://github.com/MacCracken/bayan.git"
-tag = "1.5.12"
+tag = "1.5.13"
 modules = ["dist/bayan-json.cyr"]
 
 # AcceleratorRequirement (REQ_* enum) + resource-aware placement API.

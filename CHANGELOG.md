@@ -4,6 +4,83 @@ All notable changes to Samay are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.2.0] — 2026-11-01
+
+**cyrius 6.7.9, bayan 1.5.13, and `math` out of `[deps] stdlib`.** samay's first release on the
+cyrius 6.7 language minor. No `src/` or test change, and `dist/samay.cyr` differs from 1.1.7's only
+in its version line. samay builds with 0 warnings. **558 tests**, unchanged.
+
+### Changed — toolchain and dependency pins
+
+| | was | now |
+|---|---|---|
+| cyrius | 6.6.20 | **6.7.9** |
+| bayan | 1.5.12 | **1.5.13**, the version cyrius 6.7.9 folds (commit `d391852`) |
+| ai-hwaccel | 2.4.2 | **2.4.2**, unchanged (`4d689d5`) |
+
+- **bayan 1.5.13, not 1.5.14.** 1.5.14 is also built on 6.7.9, but 6.7.9 folds 1.5.13, the rule
+  1.1.6 and 1.1.7 followed. 1.5.14 also moves `bayan_f64_parse` onto the stdlib's `f64_parse_n`,
+  which makes `math` a hard requirement, and its own benchmarks put number parsing 30–41% slower on
+  its two fastest tiers.
+- **ai-hwaccel stays at 2.4.2.** No tag targets 6.7.9: 2.4.2 is built on 6.6.20, and 2.5.0 moves to
+  cyrius 6.7.18 and bayan 1.11.1. Its bundle compiles on 6.7.9 with 0 warnings, and
+  `lib/ai-hwaccel.cyr` is byte-identical to the tag's `dist/` bundle.
+- **`lib/` re-vendored from an empty tree** (`cyrius.lock` deleted, `cyrius lib sync`, then
+  `cyrius deps`): 52 files, one fewer than 1.1.7, with `lib/math.cyr` gone. 31 of them changed.
+  `lib/bayan-json.cyr` is byte-identical to its tag's bundle, every stdlib file matches the 6.7.9
+  snapshot, and `cyrius.lock` pins both tag commits. A second vendoring from empty reproduced the
+  lock byte for byte, and `cyrius deps --verify` reports 52 verified, 0 failed.
+- **bayan 1.5.13's JSON sublib changes no behaviour.** `_D_DEC_CAP` and `_JP_STATE_SIZE` become
+  `const`, and the stack buffers read them instead of repeating 800, 832 and 48. Its TOML fixes are
+  outside `bayan-json`.
+
+### Removed — `math` from `[deps] stdlib`
+
+- **samay calls nothing in it.** `#derive(Serialize)` decodes f64 with `bayan_f64_from_json`, and
+  `f64_parse` appears in the compiler's derive only in comments. With `math` gone, samay builds with
+  no undefined functions and the 558 tests pass, bit-exact f64 round trips included. On 6.7.9 the demo
+  binary goes from 676,368 bytes to 633,216.
+- **It comes back with bayan 1.5.14.** `cyrius.cyml` records that, because the `# Requires` block of
+  bayan 1.5.14 and later includes `lib/math.cyr`.
+
+### Changed — roadmap
+
+- **The four planned minors move up one.** 1.2.0 went to this bump, so the `node_preference` split
+  is now 1.3.0, F5 is 1.4.0, F8/F9 is 1.5.0, and the write-side JSON codec is 1.6.0. Their scope and
+  order are unchanged.
+
+### Consumers
+
+- **Nothing changes in what a consumer compiles.** `dist/samay.cyr` has the same body as 1.1.7's, and
+  `dist/samay.deps` lists the same 4 leaves. It has not named `math` since 1.1.7.
+- A consumer that includes only `bayan-json`, `ai-hwaccel` and `dist/samay.cyr` compiles on 6.7.9
+  with no undefined functions, runs the scheduler and cron JSON round trips, and reads `1/3` back
+  bit-exact through `ResourceReq_from_json`.
+
+### Performance
+
+`tests/samay.bcyr`, 1.1.7 on cyrius 6.6.20 against 1.2.0 on 6.7.9: 60 rounds, interleaved, shuffled
+and pinned to one CPU. Medians:
+
+| row | 1.1.7 | 1.2.0 | Δ | p |
+|---|---:|---:|---:|---:|
+| `node_can_fit` | 12.82 ns | 12.87 ns | +0.4% | 0.17 |
+| `priority_from_numeric` | 4.54 ns | 4.57 ns | +0.7% | 0.08 |
+| `samay_uuid_v4` | 682.0 ns | 680.0 ns | −0.3% | 0.18 |
+| `scheduled_task_new` | 2.37 µs | 2.37 µs | +0.2% | 0.96 |
+| `cron_expr_matches` | 14.54 ns | 14.53 ns | −0.1% | 0.65 |
+
+No row is under p = 0.05, and none moved by more than 0.7%. The machine was not idle (load about 4),
+so the absolute numbers run about 3% above 1.1.7's table. Read the Δ, not the medians.
+
+### Verified
+
+- CI's steps, run locally on 6.7.9: build, 558/558 tests, fmt and lint over `src/` and `tests/`,
+  every public function called by a test, every allocation guarded (ADR-0009), `dist/` in sync
+  (2,463 lines), and the benchmarks. `cyrius coverage --min 100` passes, 78/78.
+- No symbol collisions: none of samay's 137 functions or its globals is defined in the vendored
+  `lib/` (1,586 functions), and no samay identifier uses a word 6.7 reserved.
+
 ## [1.1.7] — 2026-11-01
 
 **cyrius 6.6.20, bayan 1.5.12 and ai-hwaccel 2.4.2.** A toolchain and dependency bump: no `src/` or
