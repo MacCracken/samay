@@ -1,6 +1,6 @@
 # samay — Roadmap
 
-> **Last refreshed**: 2026-11-01 (v1.2.2)
+> **Last refreshed**: 2026-11-01 (v1.3.0)
 >
 > **Forward-looking only.** Nothing shipped belongs here — per-release detail
 > lives in [`../../CHANGELOG.md`](../../CHANGELOG.md) (complete from 0.1.0), the
@@ -10,10 +10,10 @@
 > An item moves when its dependencies are met; a trigger-gated item has no pin at
 > all, deliberately — see [Trigger-gated](#trigger-gated--no-pin-by-design).
 
-> **Current**: **v1.2.2**, cyrius pin **6.7.18**, deps ai-hwaccel **2.5.6** +
-> bayan-json **1.11.1**. Gates green: **575 assertions**, **5/5 benchmarks**,
-> coverage **78/78** public functions (each called by a test; 6.6.14 stopped counting `main`), lint 0-warn / 0
-> untracked deferrals, fmt clean, `dist/` in sync (2,485 lines), 0 symbol collisions
+> **Current**: **v1.3.0**, cyrius pin **6.7.18**, deps ai-hwaccel **2.5.6** +
+> bayan-json **1.11.1**. Gates green: **728 assertions**, **5/5 benchmarks**,
+> coverage **80/80** public functions (each called by a test; 6.6.14 stopped counting `main`), lint 0-warn / 0
+> untracked deferrals, fmt clean, `dist/` in sync (2,530 lines), 0 symbol collisions
 > against the vendored deps. `src/` is 9 modules. The 1,479-line Rust oracle was
 > retired after 1.1.5 ([`rust-old-removal.md`](rust-old-removal.md)).
 
@@ -24,7 +24,7 @@
 | ~~1.1.0~~ | ~~Cron catch-up counting tells the truth~~ | — | **shipped 2026-08-30** |
 | ~~1.1.1~~ | ~~Checked `alloc()` across `src/`~~ | — | **shipped 2026-08-30** |
 | ~~1.2.0~~ | ~~cyrius 6.7.9, bayan 1.5.13, `math` dropped~~ | — | **shipped 2026-11-01** |
-| **1.3.0** | Split `node_preference` (ADR-0009) | medium | wire back-compat proof |
+| ~~1.3.0~~ | ~~Split `node_preference` ([ADR-0010](../adr/0010-request-and-assignment.md))~~ | — | **shipped 2026-11-01** |
 | **1.4.0** | F5 — stable sort + terminal-task pruning | **high** | sort consolidation first |
 | **1.5.0** | F8/F9 — cron aggregate work budget | medium | an ADR on the exhaustion rule |
 | **1.6.0** | Write-side JSON codec | medium | byte-equality corpus |
@@ -62,23 +62,11 @@ allocation. See the CHANGELOG.
   `map_values` order differ between runs, which is a benefit (it surfaces latent
   order dependencies) but needs a migration window.
 
-## 1.3.x – 1.6.x — existing backlog, re-sequenced
+## 1.4.x – 1.6.x — existing backlog, re-sequenced
 
 Ordering is by dependency and blast radius, not by appetite. F5 (1.4.0) is the
 one with real risk, and it sits behind a mechanical refactor that must land first.
-All four moved up one minor on 2026-11-01, when 1.2.0 went to the cyrius 6.7 bump.
-
-### 1.3.0 — split `node_preference` into request and assignment
-
-- [ ] `schedule_pending` overwrites the caller's requested node with the chosen
-  one (`src/scheduler.cyr`), which destroys the accurate "preferred node"
-  decision reason. ADR-0007 balanced the *accounting* with a separate
-  `reserved_on` and deliberately left the field semantics alone, because changing
-  the meaning of a shipped field is not a patch-release action. **Needs its own
-  ADR-0009.** Achievable without a wire break if the new field is nullable and
-  defaulted on restore — the same shape `reserved_on` used in 1.0.3, which is the
-  proof that it works. *Entry gate*: a back-compat restore test over a 1.0.x
-  snapshot corpus, both directions.
+These moved up one minor on 2026-11-01, when 1.2.0 went to the cyrius 6.7 bump.
 
 ### 1.4.0 — F5: stable sort + terminal-task pruning
 

@@ -242,13 +242,15 @@ fn resource_req_clone(req): i64 {
 # resource_requirements (ResourceReq pointer), status (TaskStatus),
 # fail_reason (Str, 0=none — payload of Failed), created_at (epoch-ns),
 # scheduled_at/started_at/completed_at/deadline (epoch-ns, 0=None),
-# node_preference (Str, 0=None).
+# requested_node/assigned_node/reserved_on (Str, 0=None).
 #derive(accessors)
-# `node_preference` is the caller's requested node AND, after placement, the
-# node actually chosen (schedule_pending overwrites it). `reserved_on` is
-# distinct: it names the node whose capacity this task is CURRENTLY holding,
-# and is 0 when it holds none. That distinction is what makes releasing
-# idempotent — see _release_task_node / _reconcile_reservations (ADR-0007).
+# Three fields name a node, and each has one meaning (ADR-0010):
+# `requested_node` is the node the caller asked for, and only the caller writes
+# it. `assigned_node` is the node schedule_pending last placed this task on, and
+# it stays after the task ends, so a finished task still says where it ran.
+# `reserved_on` is the node whose capacity this task is CURRENTLY holding, and is
+# 0 when it holds none. That distinction is what makes releasing idempotent —
+# see _release_task_node / _reconcile_reservations (ADR-0007).
 struct ScheduledTask {
     task_id: Str;
     name: Str;
@@ -263,13 +265,31 @@ struct ScheduledTask {
     started_at: i64;
     completed_at: i64;
     deadline: i64;
-    node_preference: Str;
+    requested_node: Str;
     reserved_on: Str;
+    assigned_node: Str;
+}
+
+# The node a task was placed on, or the node it asked for if it was never placed.
+# This is what a single `node_preference` field meant through 1.2.x, and it is
+# what consumers reading this name and the snapshot's `node_preference` key still
+# get (ADR-0010). Use requested_node or assigned_node for just one of the two.
+fn ScheduledTask_node_preference(t): Str {
+    var assigned = ScheduledTask_assigned_node(t);
+    if (assigned != 0) { return assigned; }
+    return ScheduledTask_requested_node(t);
+}
+
+# Ask for a node. Takes effect at the next schedule_pending, so on a task already
+# placed, ScheduledTask_node_preference keeps naming the assignment until then.
+fn ScheduledTask_set_node_preference(t, node): i64 {
+    ScheduledTask_set_requested_node(t, node);
+    return 0;
 }
 
 # Create a new task in Queued status. Priority is clamped to 1-10.
 fn scheduled_task_new(name, description, agent_id, priority, req): i64 {
-    var p = alloc(120);   # 15 fields * 8
+    var p = alloc(128);   # 16 fields * 8
     if (p == 0) { panic("samay: out of memory in scheduled_task_new"); }
     var prio = priority;
     if (prio < 1) { prio = 1; }
@@ -287,8 +307,9 @@ fn scheduled_task_new(name, description, agent_id, priority, req): i64 {
     ScheduledTask_set_started_at(p, 0);
     ScheduledTask_set_completed_at(p, 0);
     ScheduledTask_set_deadline(p, 0);
-    ScheduledTask_set_node_preference(p, 0);
+    ScheduledTask_set_requested_node(p, 0);
     ScheduledTask_set_reserved_on(p, 0);
+    ScheduledTask_set_assigned_node(p, 0);
     return p;
 }
 

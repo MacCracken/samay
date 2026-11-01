@@ -323,7 +323,7 @@ fn cron_task_template_to_json_str(t): i64 { return bayan_json_v_build(cron_task_
 fn cron_task_template_from_json_str(s): i64 { return cron_task_template_from_jsonv(_parse(s)); }
 
 # ---------------------------------------------------------------------------
-# ScheduledTask — nested ResourceReq + nullable fail_reason/node_preference
+# ScheduledTask — nested ResourceReq + nullable fail_reason and node fields
 # ---------------------------------------------------------------------------
 
 # Rebuild a ScheduledTask from its raw stored state. scheduled_task_new
@@ -347,7 +347,7 @@ fn scheduled_task_from_jsonv(v): i64 {
     var st = _jv_int(v, "status", TASK_QUEUED);
     if (st < TASK_QUEUED) { st = TASK_QUEUED; }
     if (st > TASK_PREEMPTED) { st = TASK_QUEUED; }
-    var p = alloc(120);   # 15 fields * 8 — MUST track scheduled_task_new
+    var p = alloc(128);   # 16 fields * 8 — MUST track scheduled_task_new
     if (p == 0) { panic("samay: out of memory in scheduled_task_from_jsonv"); }
     ScheduledTask_set_task_id(p, _samay_own(tid, "samay: out of memory in scheduled_task_from_jsonv"));
     ScheduledTask_set_name(p, _samay_own(name, "samay: out of memory in scheduled_task_from_jsonv"));
@@ -362,8 +362,28 @@ fn scheduled_task_from_jsonv(v): i64 {
     ScheduledTask_set_started_at(p, _jv_int(v, "started_at", 0));
     ScheduledTask_set_completed_at(p, _jv_int(v, "completed_at", 0));
     ScheduledTask_set_deadline(p, _jv_int(v, "deadline", 0));
+    # The wire's `node_preference` is the one-field view: the assigned node once
+    # placed, else the request (ADR-0010). Snapshots since v1.3.0 also carry each
+    # on its own. An older one has only the view. Placing a task overwrote its
+    # request, so a placed task's view is its assignment and its request is gone.
+    # That view stays as the request: it may be real, and it is how 1.2.x read it.
     var npref = _jv_opt_str_get(v, "node_preference");
-    ScheduledTask_set_node_preference(p, npref);
+    if (bayan_json_v_obj_get_by_cstr(v, "requested_node") == 0) {
+        ScheduledTask_set_requested_node(p, npref);
+    } else {
+        ScheduledTask_set_requested_node(p, _jv_opt_str_get(v, "requested_node"));
+    }
+    if (bayan_json_v_obj_get_by_cstr(v, "assigned_node") == 0) {
+        var placed = npref;
+        if (ScheduledTask_scheduled_at(p) == 0) {
+            if (st != TASK_SCHEDULED) {
+                if (st != TASK_RUNNING) { placed = 0; }
+            }
+        }
+        ScheduledTask_set_assigned_node(p, placed);
+    } else {
+        ScheduledTask_set_assigned_node(p, _jv_opt_str_get(v, "assigned_node"));
+    }
     # Back-compat: snapshots written before v1.0.3 carry no `reserved_on`.
     # A task that was SCHEDULED or RUNNING did hold a reservation, and
     # schedule_pending had written the assigned node into node_preference, so
@@ -397,6 +417,8 @@ fn scheduled_task_to_jsonv(t): i64 {
     bayan_json_v_obj_set(o, str_from("deadline"), bayan_json_v_int_new(ScheduledTask_deadline(t)));
     bayan_json_v_obj_set(o, str_from("node_preference"), _jv_opt_str(ScheduledTask_node_preference(t)));
     bayan_json_v_obj_set(o, str_from("reserved_on"), _jv_opt_str(ScheduledTask_reserved_on(t)));
+    bayan_json_v_obj_set(o, str_from("requested_node"), _jv_opt_str(ScheduledTask_requested_node(t)));
+    bayan_json_v_obj_set(o, str_from("assigned_node"), _jv_opt_str(ScheduledTask_assigned_node(t)));
     return o;
 }
 

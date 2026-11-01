@@ -4,6 +4,113 @@ All notable changes to Samay are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.3.0] — 2026-11-01
+
+**A task's request and its assignment are two fields** ([ADR-0010](docs/adr/0010-request-and-assignment.md)).
+Placing a task used to overwrite the node the caller asked for, so a requeue read the old assignment
+back as a request. That is fixed. Consumers need no source change, and releases back to 1.0.2 still
+read a 1.3.0 snapshot. **728 tests**, up 153. The toolchain and deps are unchanged.
+
+### Fixed — a requeued task goes where it should, and says why
+
+| case | 1.2.2 | 1.3.0 |
+|---|---|---|
+| asked for n1, fell back to n2, n1 frees, requeued | n2, "preferred node" | n1, "preferred node" |
+| asked for nothing, placed on n1, n1 gets busy, requeued | n1, "preferred node" | n2, "best-fit selection" |
+
+Both 1.2.2 rows report a preference nobody expressed, and the first ignores the one that was. The
+request now survives placement and snapshots.
+
+**This changes placement on a requeue.** A task with no request no longer stays on its old node by
+accident. A first placement is unchanged.
+
+### Added
+
+- **`ScheduledTask_requested_node`**, the node the caller asked for. Only the caller writes it.
+- **`ScheduledTask_assigned_node`**, the node `schedule_pending` last placed the task on. It stays
+  after the task ends, so a finished task still says where it ran.
+- **Two nullable snapshot keys**, `requested_node` and `assigned_node`, appended after `reserved_on`.
+  They add about 43 bytes per task.
+
+### Changed — `ScheduledTask_node_preference` is now a view
+
+The struct field is gone. `ScheduledTask_node_preference` and its setter are hand-written and
+behave as before: the getter answers the assignment, else the request, and the setter asks for a
+node. The snapshot key `node_preference` keeps that same value. Both stay because the roadmap's plan,
+narrowing the field to the request, would have broken two things without a compile error:
+
+- **daimon's API.** `_api_task_json` publishes this getter as `"node"`, "where it was placed", and
+  daimon follows this checkout through `path = "../samay"`. `node` would have turned null for every
+  best-fit task.
+- **Older readers.** Run through the gate below, that design lost tasks on all four old releases
+  (`tasks_for_node` n1 1 of 2, n2 0 of 1).
+
+The one difference: setting it on a task already placed changes the request, while the getter keeps
+naming the assignment until the next pass.
+
+### Old snapshots
+
+- **A task never placed** reads back with the recorded node as its request and no assignment.
+- **A placed task** reads back with the recorded node as both. Its real request was overwritten and
+  cannot be recovered, so it can still report "preferred node" for a node nobody asked for. That is
+  how 1.2.x read it, and it keeps a real request, such as a training job's `target_node`.
+- **A snapshot that passes through an older release** loses the two keys when that release rewrites
+  it, and comes back to 1.3.0 as an old snapshot.
+
+### Consumers
+
+- **No source change is needed.** `ScheduledTask` is 128 bytes, up from 120, and every construction
+  site is inside samay. `src/training.cyr` now writes `requested_node` directly.
+- **daimon's 56 scheduler tests pass on 1.2.2 and on 1.3.0**, in a scratch copy on its own 6.6.6 pin.
+  It can read `ScheduledTask_assigned_node` for `"node"` if it wants the strict answer: today that
+  field also shows a queued task's requested node.
+- A consumer that includes only `bayan-json`, `ai-hwaccel` and `dist/samay.cyr` still compiles on
+  6.7.18 with no undefined functions and runs. `dist/samay.deps` is unchanged.
+
+### Tests
+
+- **Seven new tests, 153 assertions:** the two requeue cases, re-targeting and a finished task's
+  history, the wire keys, and one for each fixture.
+- **`tests/fixtures/`** holds snapshots written by real 1.0.2, 1.0.4 and 1.2.2 binaries, from one
+  program that covers every placement history. Every test run restores them.
+- **All 13 mutations of the split are caught**, each built and run in a copy of the tree.
+- **The 575 existing tests passed with no edits** against the split.
+
+### Performance
+
+**Hot paths unchanged. Writing a snapshot is 3.0% slower and restoring one 0.8% slower,** from the
+two new keys on each task. 1.2.2 against 1.3.0, both on cyrius 6.7.18: 60 rounds, interleaved, shuffled
+and pinned to one CPU, on a quiet machine. Medians:
+
+| row | 1.2.2 | 1.3.0 | Δ | p |
+|---|---:|---:|---:|---:|
+| `node_can_fit` | 12.35 ns | 12.38 ns | +0.3% | 0.03 |
+| `priority_from_numeric` | 4.24 ns | 4.24 ns | +0.1% | 0.85 |
+| `samay_uuid_v4` | 650.0 ns | 648.5 ns | −0.2% | 0.81 |
+| `scheduled_task_new` | 2.28 µs | 2.27 µs | −0.3% | 0.17 |
+| `cron_expr_matches` | 13.77 ns | 13.77 ns | 0.0% | 0.74 |
+| snapshot restore (scratch) | 201.0 µs | 202.6 µs | **+0.8%** | <0.01 |
+| snapshot write (scratch) | 286.7 µs | 295.2 µs | **+3.0%** | <0.01 |
+
+`node_can_fit` is the only suite row under p = 0.05, by 0.03 ns, and its source did not change. The
+snapshot rows use the scratch harness from 1.2.1 over the same 5.8 KB snapshot, which is an old one,
+so restore takes the back-compat path.
+
+### Verified
+
+- **The roadmap's entry gate, both directions, on real binaries.** 1.0.2 and 1.0.4 were built on
+  cyrius 6.5.36 in a throwaway home, 1.1.2 on 6.6.2, 1.2.2 on 6.7.18. For each, 1.3.0 restored its
+  snapshot and kept every field. The release then read 1.3.0's output back and re-emitted identical
+  tasks and nodes, and it listed the same tasks per node on a native 1.3.0 snapshot. 1.0.2 is the
+  strictest reader: it has no `reserved_on` and finds capacity through `node_preference`.
+- **The gate can fail.** The narrower design fails it on all four releases.
+- **Same history, 1.2.2's writer against 1.3.0's:** tasks and nodes are identical apart from the two
+  new keys.
+- CI's steps, run locally on 6.7.18: build, 728/728 tests, fmt and lint over `src/` and `tests/`,
+  every public function called by a test, every allocation guarded (ADR-0009), `dist/` in sync
+  (2,530 lines), and the benchmarks. `cyrius coverage --min 100` passes, 80/80.
+- No symbol collisions: none of samay's 140 functions is defined in the vendored `lib/`.
+
 ## [1.2.2] — 2026-11-01
 
 **ai-hwaccel 2.5.6: a TPU pod's profile survives a snapshot again.** This fixes the regression 1.2.1

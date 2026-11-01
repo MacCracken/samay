@@ -14,6 +14,26 @@ pre-warm off every hot path, and re-measured within noise of the table below
 | `samay_uuid_v4`         | 606 ns   | 613 ns   | getrandom(2) syscall-bound         |
 | `scheduled_task_new`    | 2.07 µs  | 2.06 µs  | alloc + uuid + `dt_now`            |
 
+## v1.3.0 — `node_preference` split into two fields
+
+1.2.2 against 1.3.0, both on cyrius 6.7.18, 60 rounds interleaved, shuffled and pinned to one
+CPU (2026-11-01). The machine was quiet (load under 3.5). Medians:
+
+| Op                      | 1.2.2    | 1.3.0    | Δ      |
+|-------------------------|----------|----------|--------|
+| `priority_from_numeric` | 4.24 ns  | 4.24 ns  | +0.1%  |
+| `node_can_fit`          | 12.35 ns | 12.38 ns | +0.3%  |
+| `cron_expr_matches`     | 13.77 ns | 13.77 ns | 0.0%   |
+| `samay_uuid_v4`         | 650.0 ns | 648.5 ns | −0.2%  |
+| `scheduled_task_new`    | 2.28 µs  | 2.27 µs  | −0.3%  |
+| snapshot restore        | 201.0 µs | 202.6 µs | **+0.8%** |
+| snapshot write          | 286.7 µs | 295.2 µs | **+3.0%** |
+
+The two snapshot rows are real (p < 0.01): each task carries two more keys. `node_can_fit` is the
+only suite row under p = 0.05, by 0.03 ns, and its source did not change. The snapshot rows use
+the v1.2.1 scratch harness over the same 5.8 KB snapshot, which is an old one, so restore takes
+the back-compat path.
+
 ## v1.2.2 — ai-hwaccel 2.5.5 → 2.5.6
 
 1.2.1 against 1.2.2, both on cyrius 6.7.18, 60 rounds interleaved, shuffled and pinned to one

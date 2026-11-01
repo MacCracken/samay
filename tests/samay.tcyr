@@ -1720,6 +1720,193 @@ fn test_json_refuses_duplicate_and_leading_zero() {
     return 0;
 }
 
+# ADR-0010: what the caller asked for and where the scheduler put a task are two
+# fields. Through 1.2.x placing a task overwrote its request, so a requeue read the
+# old assignment back as a request: the task stayed put and reported "preferred
+# node" for a node nobody had asked for.
+
+# 1 if optional Str `v` is the cstr `want`, or both are None.
+fn _node_is(v, want) {
+    if (want == 0) { return v == 0; }
+    if (v == 0) { return 0; }
+    return str_eq_cstr(v, want);
+}
+
+# Assert a task's request, assignment and the old one-field view of the two.
+fn _assert_nodes(t, requested, assigned, view) {
+    assert_eq(_node_is(ScheduledTask_requested_node(t), requested), 1, "requested_node");
+    assert_eq(_node_is(ScheduledTask_assigned_node(t), assigned), 1, "assigned_node");
+    assert_eq(_node_is(ScheduledTask_node_preference(t), view), 1, "node_preference view");
+    return 0;
+}
+
+# A scheduler where n1 is full, and a task that asked for n1 and fell back to n2.
+fn _fallback_scheduler(s, n1, task) {
+    NodeCapacity_set_available_cpu(n1, f64_from(0));
+    NodeCapacity_set_available_memory_mb(n1, 0);
+    task_scheduler_register_node(s, n1);
+    task_scheduler_register_node(s, make_node("n2", f64_from(4), 4096));
+    ScheduledTask_set_node_preference(task, str_from("n1"));
+    task_scheduler_submit_task(s, task);
+    return vec_get(task_scheduler_schedule_pending(s), 0);
+}
+
+fn test_split_request_survives_fallback() {
+    test_group("split_request_survives_fallback");
+    var s = task_scheduler_new();
+    var n1 = make_node("n1", f64_from(1), 256);
+    var task = make_task("t1", 5);
+    _assert_nodes(task, 0, 0, 0);
+    var d = _fallback_scheduler(s, n1, task);
+    assert_eq(str_eq_cstr(SchedulingDecision_reason(d), "best-fit selection"), 1, "fell back");
+    _assert_nodes(task, "n1", "n2", "n2");
+    # n1 frees up and the task is requeued: it goes where it asked to go.
+    NodeCapacity_set_available_cpu(n1, f64_from(1));
+    NodeCapacity_set_available_memory_mb(n1, 256);
+    scheduled_task_transition(task, TASK_QUEUED);
+    var d2 = vec_get(task_scheduler_schedule_pending(s), 0);
+    assert_eq(str_eq_cstr(SchedulingDecision_assigned_node(d2), "n1"), 1, "requeue honours the request");
+    assert_eq(str_eq_cstr(SchedulingDecision_reason(d2), "preferred node"), 1, "and says so");
+    _assert_nodes(task, "n1", "n1", "n1");
+    assert_eq(_cpu_milli(map_get(TaskScheduler_nodes(s), str_from("n2"))), 4000, "n2 released");
+    return 0;
+}
+
+fn test_split_no_request_is_best_fit() {
+    test_group("split_no_request_is_best_fit");
+    var s = task_scheduler_new();
+    var n1 = make_node("n1", f64_from(8), 8192);
+    task_scheduler_register_node(s, n1);
+    task_scheduler_register_node(s, make_node("n2", f64_from(8), 8192));
+    var task = make_task("t1", 5);
+    task_scheduler_submit_task(s, task);
+    var d = vec_get(task_scheduler_schedule_pending(s), 0);
+    assert_eq(str_eq_cstr(SchedulingDecision_assigned_node(d), "n1"), 1, "tie goes to n1");
+    _assert_nodes(task, 0, "n1", "n1");
+    # n1 gets busier while the task is out. Nobody asked for n1, so it does not stick.
+    NodeCapacity_set_available_cpu(n1, f64_from(3));
+    scheduled_task_transition(task, TASK_QUEUED);
+    var d2 = vec_get(task_scheduler_schedule_pending(s), 0);
+    assert_eq(str_eq_cstr(SchedulingDecision_assigned_node(d2), "n2"), 1, "best fit again, not the old node");
+    assert_eq(str_eq_cstr(SchedulingDecision_reason(d2), "best-fit selection"), 1, "no false preferred-node reason");
+    _assert_nodes(task, 0, "n2", "n2");
+    return 0;
+}
+
+# The setter asks for a node. On a placed task the view keeps naming the assignment
+# until the next pass, and a finished task keeps saying where it ran.
+fn test_split_retarget_and_history() {
+    test_group("split_retarget_and_history");
+    var s = task_scheduler_new();
+    task_scheduler_register_node(s, make_node("n1", f64_from(8), 8192));
+    task_scheduler_register_node(s, make_node("n2", f64_from(8), 8192));
+    var task = make_task("t1", 5);
+    ScheduledTask_set_node_preference(task, str_from("n1"));
+    _assert_nodes(task, "n1", 0, "n1");
+    var id = ScheduledTask_task_id(task);
+    task_scheduler_submit_task(s, task);
+    task_scheduler_schedule_pending(s);
+    scheduled_task_transition(task, TASK_QUEUED);
+    ScheduledTask_set_node_preference(task, str_from("n2"));
+    _assert_nodes(task, "n2", "n1", "n1");
+    var d = vec_get(task_scheduler_schedule_pending(s), 0);
+    assert_eq(str_eq_cstr(SchedulingDecision_assigned_node(d), "n2"), 1, "the new request is honoured");
+    assert_eq(str_eq_cstr(SchedulingDecision_reason(d), "preferred node"), 1, "preferred node");
+    scheduled_task_transition(task, TASK_RUNNING);
+    assert_eq(vec_len(task_scheduler_tasks_for_node(s, str_from("n2"))), 1, "listed on its node");
+    assert_eq(vec_len(task_scheduler_tasks_for_node(s, str_from("n1"))), 0, "not on the old one");
+    task_scheduler_complete_task(s, id, TASK_COMPLETED);
+    assert_eq(ScheduledTask_reserved_on(task), 0, "reservation released");
+    _assert_nodes(task, "n2", "n2", "n2");
+    return 0;
+}
+
+# Readers before 1.3.0 read `node_preference` as the assigned node, so the key keeps
+# that value and the split travels in two new keys.
+fn test_split_json_round_trip() {
+    test_group("split_json_round_trip");
+    var s = task_scheduler_new();
+    var task = make_task("t1", 5);
+    _fallback_scheduler(s, make_node("n1", f64_from(1), 256), task);
+    var js = scheduled_task_to_json_str(task);
+    assert_eq(str_contains(js, str_from("\"node_preference\":\"n2\"")), 1, "key keeps the assignment");
+    assert_eq(str_contains(js, str_from("\"requested_node\":\"n1\"")), 1, "request on its own key");
+    assert_eq(str_contains(js, str_from("\"assigned_node\":\"n2\"")), 1, "assignment on its own key");
+    var back = scheduled_task_from_json_str(js);
+    _assert_nodes(back, "n1", "n2", "n2");
+    assert_eq(str_eq(scheduled_task_to_json_str(back), js), 1, "re-serialize byte-identical");
+    # An explicit null is an answer: the view must not stand in for the request.
+    var fresh = make_task("t2", 5);
+    ScheduledTask_set_assigned_node(fresh, str_from("n1"));
+    var js2 = scheduled_task_to_json_str(fresh);
+    assert_eq(str_contains(js2, str_from("\"requested_node\":null")), 1, "no request is written as null");
+    _assert_nodes(scheduled_task_from_json_str(js2), 0, "n1", "n1");
+    # A wrong-typed key reads as None, as every nullable Str field does.
+    var bad = scheduled_task_from_json_str(str_from("{\"task_id\":\"x\",\"name\":\"n\",\"description\":\"d\",\"agent_id\":\"a\",\"resource_requirements\":{\"cpu_cores\":1.0,\"memory_mb\":1,\"accel_req\":0,\"accel_min_chips\":0,\"network\":0,\"disk_mb\":0},\"node_preference\":\"n1\",\"requested_node\":5,\"assigned_node\":[]}"));
+    assert_eq(bad != 0, 1, "record survives");
+    _assert_nodes(bad, 0, 0, 0);
+    return 0;
+}
+
+# A restored scheduler's task with this name.
+fn _task_named(s, name) {
+    var all = map_values(TaskScheduler_tasks(s));
+    var i = 0;
+    while (i < vec_len(all)) {
+        if (str_eq_cstr(ScheduledTask_name(vec_get(all, i)), name) == 1) { return vec_get(all, i); }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# tests/fixtures holds snapshots written by real releases, all from the same program:
+# 3 nodes and a task for each placement history. A placed task's request is gone
+# from these, so each reads back with its one recorded node as both fields.
+fn _assert_fixture(path) {
+    var cap = 65536;
+    var buf = alloc(cap);
+    var n = file_read_all(path, buf, cap);
+    assert_eq(n > 0, 1, "fixture readable from the project root");
+    var s = task_scheduler_from_json_str(str_new(buf, n));
+    assert_eq(s != 0, 1, "fixture restored");
+    assert_eq(map_size(TaskScheduler_tasks(s)), 8, "every task restored");
+    # Never placed: the recorded node is the request, and it is not an assignment.
+    _assert_nodes(_task_named(s, "queued-req"), "n1", 0, "n1");
+    _assert_nodes(_task_named(s, "sched-req"), "n1", "n1", "n1");
+    _assert_nodes(_task_named(s, "sched-fallback"), "n2", "n2", "n2");
+    _assert_nodes(_task_named(s, "sched-bestfit"), "n3", "n3", "n3");
+    _assert_nodes(_task_named(s, "running"), "n1", "n1", "n1");
+    _assert_nodes(_task_named(s, "completed"), "n1", "n1", "n1");
+    _assert_nodes(_task_named(s, "cancelled"), "n3", "n3", "n3");
+    _assert_nodes(_task_named(s, "requeued-fallback"), "n2", "n2", "n2");
+    assert_eq(_node_is(ScheduledTask_reserved_on(_task_named(s, "running")), "n1"), 1, "running holds n1");
+    assert_eq(vec_len(task_scheduler_tasks_for_node(s, str_from("n1"))), 2, "n1 tasks");
+    assert_eq(vec_len(task_scheduler_tasks_for_node(s, str_from("n2"))), 1, "n2 tasks");
+    assert_eq(vec_len(task_scheduler_tasks_for_node(s, str_from("n3"))), 1, "n3 tasks");
+    # The requeued task behaves as it did on the release that wrote it. queued-req
+    # asks for more CPU than any node has, so it is the only one left.
+    var ds = task_scheduler_schedule_pending(s);
+    assert_eq(vec_len(ds), 1, "only the requeued task places");
+    assert_eq(str_eq_cstr(SchedulingDecision_assigned_node(vec_get(ds, 0)), "n2"), 1, "requeued onto its old node");
+    assert_eq(str_eq_cstr(SchedulingDecision_reason(vec_get(ds, 0)), "preferred node"), 1, "reason as before");
+    return 0;
+}
+
+fn test_split_fixture_1_0_2() {
+    test_group("split_fixture_1_0_2");
+    return _assert_fixture("tests/fixtures/snapshot-1.0.2.json");
+}
+
+fn test_split_fixture_1_0_4() {
+    test_group("split_fixture_1_0_4");
+    return _assert_fixture("tests/fixtures/snapshot-1.0.4.json");
+}
+
+fn test_split_fixture_1_2_2() {
+    test_group("split_fixture_1_2_2");
+    return _assert_fixture("tests/fixtures/snapshot-1.2.2.json");
+}
+
 # Put a samay value node inside someone else's document, serialize the whole
 # document, parse it back, and hand back the nested node.
 fn _embed_rt(v) {
@@ -2528,6 +2715,13 @@ fn main() {
     test_json_node_profile_refused();
     test_json_node_profile_quoted_name();
     test_json_refuses_duplicate_and_leading_zero();
+    test_split_request_survives_fallback();
+    test_split_no_request_is_best_fit();
+    test_split_retarget_and_history();
+    test_split_json_round_trip();
+    test_split_fixture_1_0_2();
+    test_split_fixture_1_0_4();
+    test_split_fixture_1_2_2();
     return assert_summary();
 }
 

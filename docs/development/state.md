@@ -5,6 +5,12 @@
 
 ## Version
 
+**1.3.0** — the caller's request and the scheduler's assignment are two fields,
+`requested_node` and `assigned_node` ([ADR-0010](../adr/0010-request-and-assignment.md)). A
+requeued task goes where it asked to go, or to the best fit, and its reason is true.
+`ScheduledTask_node_preference` and the snapshot key stay as a view of the two, so no consumer
+changes and releases back to 1.0.2 still read a 1.3.0 snapshot. 728 assertions.
+
 **1.2.2** — ai-hwaccel 2.5.6, which fixes 1.2.1's regression: a TPU pod's profile survives
 a snapshot again, up to 16,384 chips. A snapshot written after a 1.2.1 restore has already
 lost the profile, and 1.2.2 cannot bring it back. 575 assertions.
@@ -52,7 +58,7 @@ sweep).
 
 - `src/{uuid,types,scheduler,cronexpr,cron,training,json}.cyr` + `src/lib.cyr`
   aggregation header + `src/main.cyr` demo. The seven `[lib].modules` bundle to
-  2,485 lines in `dist/samay.cyr` (as `cyrius distlib` reports it); `json.cyr` is the largest module.
+  2,530 lines in `dist/samay.cyr` (as `cyrius distlib` reports it); `json.cyr` is the largest module.
 - **Strings are `Str` (ptr+len), not cstr** since **v0.5.0**
   ([ADR-0003](../adr/0003-str-string-representation.md)) — required because
   `#derive(Serialize)` core dumps on a cstr in a `Str`-typed field. Passing a
@@ -66,7 +72,7 @@ sweep).
 
 ## Tests
 
-- `tests/samay.tcyr` — **575/575 assertions passing** (`cyrius test`), up from 296 in
+- `tests/samay.tcyr` — **728/728 assertions passing** (`cyrius test`), up from 296 in
   v1.0.2. Includes the v1.0.3 additions: the capacity-conservation invariant (the
   assertion whose absence let ADR-0007's defect ship), a cron differential guard pinning
   the optimised matcher to an in-test reference implementation, back-compat snapshot
@@ -85,13 +91,16 @@ sweep).
   whole 1.1.4 suite; the 1.1.5 suite catches all nine. v1.2.1 adds three tests that
   pin what ai-hwaccel 2.5.5 and bayan 1.11.1 change on restore. v1.2.2 moves the first to
   ai-hwaccel 2.5.6's bound, with real pods on one side of it and one chip past it on the other.
+  v1.3.0 adds the request/assignment split's tests and `tests/fixtures/`: snapshots written by
+  real 1.0.2, 1.0.4 and 1.2.2 binaries, which every run restores. All 13 mutations of the split
+  are caught.
 - `tests/samay.bcyr` — 5 benchmarks, all green (see `docs/benchmarks.md`). Was dead
   (SIGSEGV) from v0.5.0 to v1.0.1: the `Str` migration left it passing bare cstring
   literals into `Str`-taking APIs. Now run by CI so it cannot rot silently again.
 - Gates: `cyrius fmt <file> --check` clean, `cyrius lint <file>` 0 warnings and 0
   untracked deferrals, `cyrius distlib --check` in sync. **All four now run in CI** —
   note `fmt`/`lint` take a file argument, so a bare `cyrius fmt --check` gates nothing.
-- Coverage (v1.2.2): `cyrius coverage --min 100`, **78/78** (cyrius 6.6.14's tool no longer
+- Coverage (v1.3.0): `cyrius coverage --min 100`, **80/80** (cyrius 6.6.14's tool no longer
   counts `src/main.cyr`'s `main`; 1.1.5 read 79/79 on 6.6.6), plus a strict CI check
   that every public function in `[lib].modules` is *called* by a test. The strict
   check exists because the tool counts a name that appears anywhere in the tests,
@@ -129,7 +138,7 @@ sweep).
 - **daimon 2.0.0** — integrated: deleted its duplicated `scheduler.cyr`/`cron.cyr` and
   consumes samay as the single scheduler source of truth (api_sched rewired; 215 assertions).
   The migration surfaced + fixed the `uuid_v4`↔libro collision (samay 1.0.1).
-- Current pins, as of 1.2.2: kavach 3.13.2 → samay `1.1.6`, daimon 2.4.3 → `1.1.3`,
+- Current pins, as of 1.3.0: kavach 3.13.2 → samay `1.1.6`, daimon 2.4.3 → `1.1.3`,
   stiva 3.0.22 → `1.1.2`. daimon also sets `path = "../samay"`, so its local
   builds use this checkout, not the tag. The only samay JSON call among
   them is daimon's `SchedulingDecision_to_json`, which is emit-only. None of them
@@ -143,7 +152,7 @@ See [`roadmap.md`](roadmap.md) — it carries the full backlog with version pins
 is the single source for forward work. In brief: **1.1.0** shipped the one
 deferral of three that survived verification (capped counts report as floors);
 **1.1.1** is checked `alloc()`; **1.2.0** took the cyrius 6.7 bump; **1.3.0**
-splits `node_preference`; **1.4.0** is F5 (stable sort + terminal-task pruning),
+split `node_preference`; **1.4.0** is F5 (stable sort + terminal-task pruning),
 the one item with real risk; **1.5.0** is the F8/F9 cron work budget; **1.6.0**
 is the write-side JSON codec. Everything else is trigger-gated and deliberately
 unpinned.

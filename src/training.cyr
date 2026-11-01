@@ -115,6 +115,6 @@ fn training_job_to_scheduled_task(job, agent_id): i64 {
     } else {
         ScheduledTask_set_deadline(task, 0);
     }
-    ScheduledTask_set_node_preference(task, TrainingJobTemplate_target_node(job));
+    ScheduledTask_set_requested_node(task, TrainingJobTemplate_target_node(job));
     return task;
 }

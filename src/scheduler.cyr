@@ -116,9 +116,9 @@ fn task_scheduler_get_task(s, id): i64 {
 }
 
 # Return the node capacity a task is currently holding, if any. Keyed on
-# `reserved_on` (not `node_preference`, which schedule_pending overwrites with
-# the chosen node and never clears), and clears it afterwards — so calling
-# this twice is a no-op rather than a double release.
+# `reserved_on` (not `assigned_node`, which outlives the reservation), and
+# clears it afterwards — so calling this twice is a no-op rather than a double
+# release.
 fn _release_task_node(s, task): i64 {
     var ron = ScheduledTask_reserved_on(task);
     if (ron != 0) {
@@ -210,7 +210,9 @@ fn task_scheduler_pending_tasks(s): i64 {
     return out;
 }
 
-# Tasks assigned to a node (Scheduled|Running with matching node_preference).
+# Tasks on a node (Scheduled|Running with matching node_preference). That name
+# rather than assigned_node, so a task a consumer drove to Scheduled itself,
+# without schedule_pending, is still listed on the node it asked for.
 fn task_scheduler_tasks_for_node(s, node_id): i64 {
     var all = map_values(TaskScheduler_tasks(s));
     var out = vec_new();
@@ -292,7 +294,7 @@ fn task_scheduler_schedule_pending(s): i64 {
     while (i < n) {
         var task = vec_get(pending, i);
         var req = ScheduledTask_resource_requirements(task);
-        var pref = ScheduledTask_node_preference(task);
+        var pref = ScheduledTask_requested_node(task);
 
         var chosen = 0;
         if (pref != 0) {
@@ -312,7 +314,7 @@ fn task_scheduler_schedule_pending(s): i64 {
             var reason = str_from("best-fit selection");
             if (pref != 0) { if (str_eq(pref, chosen) == 1) { reason = str_from("preferred node"); } }
             if (reason == 0) { panic("samay: out of memory in task_scheduler_schedule_pending (reason)"); }
-            ScheduledTask_set_node_preference(task, chosen);
+            ScheduledTask_set_assigned_node(task, chosen);
             ScheduledTask_set_reserved_on(task, chosen);
             vec_push(decisions, scheduling_decision_new(ScheduledTask_task_id(task), chosen, reason, score));
         } else {
