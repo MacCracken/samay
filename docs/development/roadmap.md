@@ -1,6 +1,6 @@
 # samay — Roadmap
 
-> **Last refreshed**: 2026-11-01 (v1.2.0)
+> **Last refreshed**: 2026-11-01 (v1.2.1)
 >
 > **Forward-looking only.** Nothing shipped belongs here — per-release detail
 > lives in [`../../CHANGELOG.md`](../../CHANGELOG.md) (complete from 0.1.0), the
@@ -10,10 +10,10 @@
 > An item moves when its dependencies are met; a trigger-gated item has no pin at
 > all, deliberately — see [Trigger-gated](#trigger-gated--no-pin-by-design).
 
-> **Current**: **v1.2.0**, cyrius pin **6.7.9**, deps ai-hwaccel **2.4.2** +
-> bayan-json **1.5.13**. Gates green: **558 assertions**, **5/5 benchmarks**,
+> **Current**: **v1.2.1**, cyrius pin **6.7.18**, deps ai-hwaccel **2.5.5** +
+> bayan-json **1.11.1**. Gates green: **572 assertions**, **5/5 benchmarks**,
 > coverage **78/78** public functions (each called by a test; 6.6.14 stopped counting `main`), lint 0-warn / 0
-> untracked deferrals, fmt clean, `dist/` in sync (2,463 lines), 0 symbol collisions
+> untracked deferrals, fmt clean, `dist/` in sync (2,484 lines), 0 symbol collisions
 > against the vendored deps. `src/` is 9 modules. The 1,479-line Rust oracle was
 > retired after 1.1.5 ([`rust-old-removal.md`](rust-old-removal.md)).
 
@@ -127,6 +127,10 @@ All four moved up one minor on 2026-11-01, when 1.2.0 went to the cyrius 6.7 bum
 Pinning these would be theatre: none can start until an external event occurs,
 and a version number would just rot. Each names the event.
 
+- [ ] **Restore a TPU profile over 1,024 chips** — ai-hwaccel 2.5.5 refuses one, so a
+  node loses that profile on restore, with a logged warning
+  ([issue](issues/2026-11-01-ai-hwaccel-profile-bounds.md)). *Trigger*: ai-hwaccel
+  raises the bound, which makes `test_json_node_profile_refused` fail.
 - [ ] **Opt-in concurrent-entry detector** — a debug mode that notices two threads
   inside one scheduler and aborts. Considered during the 1.0.4 audit and
   deliberately not built ([ADR-0008](../adr/0008-threading-contract.md)).

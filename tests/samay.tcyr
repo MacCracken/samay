@@ -1658,6 +1658,60 @@ fn test_json_node_shared_memory() {
     return 0;
 }
 
+# ai-hwaccel 2.5.5 checks a profile's ranges on restore, and its 1024 bound on
+# tpu_chips is below a real pod (TPU v4: 4,096 chips). Through samay 1.2.0 such a
+# node round-tripped. Now its TPU profile is refused: the node must survive with
+# its other profiles. samay logs the loss, which an assert here cannot see. If
+# ai-hwaccel raises the bound, the 4096 asserts fail, and that is the prompt to
+# retire the limit recorded in docs/development/issues.
+fn test_json_node_profile_refused() {
+    test_group("json_node_profile_refused");
+    var gib = 1073741824;
+    var edge = node_capacity_with_tpu(node_capacity_new(str_from("tpu-1024"), f64_from(8), 4096, 8192, 0), 1024);
+    var edge2 = node_capacity_from_json_str(node_capacity_to_json_str(edge));
+    assert_eq(vec_len(NodeCapacity_accel_profiles(edge2)), 1, "1024 chips restored");
+    var pod = node_capacity_new(str_from("tpu-pod"), f64_from(8), 4096, 8192, 0);
+    node_capacity_add_accel(pod, profile_cuda(0, 24 * gib));
+    node_capacity_with_tpu(pod, 4096);
+    var req = resource_req_new(f64_from(1), 1, REQ_TPU, 4096, 0, 0);
+    assert_eq(node_capacity_can_fit(pod, req), 1, "4096 chips fit before the round trip");
+    var pod2 = node_capacity_from_json_str(node_capacity_to_json_str(pod));
+    assert_eq(pod2 != 0, 1, "node survives a refused profile");
+    var profs = NodeCapacity_accel_profiles(pod2);
+    assert_eq(vec_len(profs), 1, "only the refused profile is lost");
+    assert_eq(profile_accel_type(vec_get(profs, 0)), ACCEL_CUDA, "the CUDA profile stays");
+    assert_eq(node_capacity_can_fit(pod2, req), 0, "the refused profile no longer places");
+    return 0;
+}
+
+# Through ai-hwaccel 2.5.4 a quote in a device name made the profile's text
+# unparseable, so the snapshot omitted the accelerator. 2.5.5 escapes strings.
+fn test_json_node_profile_quoted_name() {
+    test_group("json_node_profile_quoted_name");
+    var p = profile_cuda(0, 8589934592);
+    profile_set_device_name(p, "Weird \"GPU\" \\ name");
+    var node = node_capacity_add_accel(node_capacity_new(str_from("q"), f64_from(8), 4096, 8192, 0), p);
+    var js = node_capacity_to_json_str(node);
+    var n2 = node_capacity_from_json_str(js);
+    var profs = NodeCapacity_accel_profiles(n2);
+    assert_eq(vec_len(profs), 1, "quoted device name restored");
+    assert_eq(streq(profile_device_name(vec_get(profs, 0)), "Weird \"GPU\" \\ name"), 1, "name fidelity");
+    assert_eq(str_eq(node_capacity_to_json_str(n2), js), 1, "re-serialize byte-identical");
+    return 0;
+}
+
+# bayan 1.11.1 refuses a duplicate object key and a leading-zero number, in any
+# object of the document. Each restore answers 0, as for any malformed document.
+fn test_json_refuses_duplicate_and_leading_zero() {
+    test_group("json_refuses_invalid");
+    assert_eq(task_scheduler_from_json_str(str_from("{\"tasks\":[],\"tasks\":[]}")), 0, "scheduler: duplicate key");
+    assert_eq(cron_scheduler_from_json_str(str_from("{\"entries\":[],\"entries\":[]}")), 0, "cron: duplicate key");
+    assert_eq(node_capacity_from_json_str(str_from("{\"node_id\":\"a\",\"node_id\":\"b\"}")), 0, "node: duplicate key");
+    assert_eq(node_capacity_from_json_str(str_from("{\"node_id\":\"a\",\"total_cpu\":01}")), 0, "node: leading zero");
+    assert_eq(task_scheduler_from_json_str(str_from("{\"nodes\":[{\"node_id\":\"a\",\"node_id\":\"b\"}]}")), 0, "nested duplicate key");
+    return 0;
+}
+
 # Put a samay value node inside someone else's document, serialize the whole
 # document, parse it back, and hand back the nested node.
 fn _embed_rt(v) {
@@ -2463,6 +2517,9 @@ fn main() {
     test_sec_clamp_priority();
     test_sec_clamp_negative_resources();
     test_ownership_retained_strs();
+    test_json_node_profile_refused();
+    test_json_node_profile_quoted_name();
+    test_json_refuses_duplicate_and_leading_zero();
     return assert_summary();
 }
 

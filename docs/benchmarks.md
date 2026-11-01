@@ -14,6 +14,27 @@ pre-warm off every hot path, and re-measured within noise of the table below
 | `samay_uuid_v4`         | 606 ns   | 613 ns   | getrandom(2) syscall-bound         |
 | `scheduled_task_new`    | 2.07 µs  | 2.06 µs  | alloc + uuid + `dt_now`            |
 
+## v1.2.1 — cyrius 6.7.9 → 6.7.18, bayan 1.5.13 → 1.11.1
+
+1.2.0 on cyrius 6.7.9 against 1.2.1 on 6.7.18, 60 rounds interleaved, shuffled and pinned to
+one CPU (2026-11-01). Medians:
+
+| Op                      | 1.2.0    | 1.2.1    | Δ       |
+|-------------------------|----------|----------|---------|
+| `priority_from_numeric` | 5.33 ns  | 5.41 ns  | +1.4%   |
+| `node_can_fit`          | 14.68 ns | 14.79 ns | +0.7%   |
+| `cron_expr_matches`     | 18.26 ns | 18.00 ns | −1.4%   |
+| `samay_uuid_v4`         | 770.5 ns | 780.0 ns | +1.2%   |
+| `scheduled_task_new`    | 2.57 µs  | 2.59 µs  | +0.6%   |
+| snapshot restore        | 130.3 µs | 204.2 µs | **+56.8%** |
+| snapshot write          | 268.0 µs | 290.6 µs | **+8.5%**  |
+
+The last two rows come from a scratch harness over a 5.8 KB snapshot, because this suite has
+no JSON row. Restore pays for bayan 1.11.1's bounds-checked parsers and duplicate-key set.
+Write parses text on the way out, so it pays a smaller share. Both are p < 0.01; none of
+the five suite rows is under p = 0.05. Load rose to about 6 during the run, so read the Δ,
+not the medians.
+
 ## v1.2.0 — cyrius 6.6.20 → 6.7.9
 
 1.1.7 on cyrius 6.6.20 against 1.2.0 on 6.7.9, 60 rounds interleaved, shuffled and pinned to

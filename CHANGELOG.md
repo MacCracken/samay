@@ -4,6 +4,120 @@ All notable changes to Samay are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.2.1] — 2026-11-01
+
+**cyrius 6.7.18, bayan 1.11.1 and ai-hwaccel 2.5.5, the latest of each.** samay builds with 0
+warnings. **572 tests**, up 14. Snapshots read both ways between 1.2.0 and 1.2.1, byte for byte.
+
+**One regression comes with the bump, and samay can only report it.** ai-hwaccel 2.5.5 refuses a TPU
+profile over 1,024 chips on restore, and a real pod has more (see *Known limit*). A node like that
+loses the profile. samay now logs the loss, and the bound is reported upstream.
+
+### Changed — toolchain and dependency pins
+
+| | was | now |
+|---|---|---|
+| cyrius | 6.7.9 | **6.7.18** |
+| bayan | 1.5.13 | **1.11.1**, the latest tag and the version cyrius 6.7.18 folds (commit `965298d`) |
+| ai-hwaccel | 2.4.2 | **2.5.5**, the latest tag (`0586202`), built on 6.7.18 and bayan 1.11.1 |
+
+- **`lib/` re-vendored from an empty tree** (`cyrius.lock` deleted, `cyrius lib sync`, then
+  `cyrius deps`): 54 files, two more than 1.2.0. The new ones are `lib/math.cyr` and `lib/slice.cyr`,
+  and `cyrius deps` vendors both from bayan-json's sidecar. So `math` does not return to
+  `[deps] stdlib`, which corrects the note 1.2.0 left in `cyrius.cyml`. `lib/bayan-json.cyr` and
+  `lib/ai-hwaccel.cyr` are byte-identical to their tags' `dist/` bundles, every stdlib file matches
+  the 6.7.18 snapshot, and `cyrius.lock` pins both tag commits. A second vendoring from empty
+  reproduced the lock byte for byte, and `cyrius deps --verify` reports 54 verified, 0 failed.
+- **`cyrius deps` now prints a note about `lib/hashmap_fast.cyr`,** which `lib sync` copies and
+  nothing includes. The file stays in `lib/` and the lock, as ai-hwaccel 2.5.0 left it.
+- **No 6.7.x language change reached samay's code.** The build has 0 warnings, and `cyrius lint
+  --strict` passes on every file in `src/`.
+
+### Known limit — a TPU over 1,024 chips is lost on restore
+
+`profile_from_json` has checked ranges since ai-hwaccel 2.5.5. It caps `tpu_chips` at 1,024, the
+bound it uses for device IDs, and device memory at 16 TiB. A TPU v4 pod has 4,096 chips and a v5p pod
+8,960, and `node_capacity_with_tpu` accepts both. Through 1.2.0 such a node round-tripped. Now it
+comes back without the profile, and it can no longer place that work.
+
+- **The bound is in `lib/`, so samay cannot change it,** and rebuilding the profile by hand would
+  undo a hardening fix.
+- **The loss becomes permanent at the next snapshot.** The snapshot being restored still holds the
+  full profile, but the node in memory does not, so the next snapshot samay writes omits it.
+- **Reported in** [`docs/development/issues/`](docs/development/issues/2026-11-01-ai-hwaccel-profile-bounds.md).
+  ADR-0005 said restoring samay's own snapshot never drops a record. It now carries a dated correction.
+
+### Fixed
+
+- **A profile refused on restore is logged.** `node_capacity_from_jsonv` keeps the node and drops the
+  profile, as it always has for a refused one. That was silent, which broke samay's rule against
+  silent drops once valid profiles could be refused. It is now a `WARN` naming the node
+  (`_log_profile_refused`).
+
+### Changed — what the new deps change on restore
+
+- **A quote or backslash in a device name survives.** ai-hwaccel 2.5.5 escapes strings, so a snapshot
+  no longer omits that accelerator. The `node_capacity_to_jsonv` comment now says so, and its guard
+  stays for any other text that does not parse.
+- **A duplicate object key or a leading-zero number refuses the whole document.** bayan 1.11.1 follows
+  RFC 8259, so `*_from_json_str` answers 0 for them, in any object in the document. samay's writers
+  use unique literal keys, so its own snapshots are not affected. A hand-edited one can be.
+
+### Tests
+
+- **Three new tests, 14 assertions:** `test_json_node_profile_refused` (1,024 chips restore, and at
+  4,096 the node keeps its other profiles), `test_json_node_profile_quoted_name`, and
+  `test_json_refuses_duplicate_and_leading_zero`. The first two fail on 1.2.0's code and deps, and
+  the probe below shows the third's inputs were accepted there. An assert cannot see the new log line,
+  so it was checked by running it.
+
+### Consumers
+
+- **`dist/samay.deps` lists 3 leaves instead of 4.** `chrono` left because it now arrives through
+  `hashmap`, which includes `hashseed`, which includes `chrono`.
+- **A consumer that includes only `bayan-json`, `ai-hwaccel` and `dist/samay.cyr`** compiles on 6.7.18
+  with no undefined functions, runs the scheduler and cron JSON round trips, and reads `1/3` back
+  bit-exact through `ResourceReq_from_json`.
+- **daimon**, which follows this checkout through `path = "../samay"`, builds in a scratch copy on its
+  own 6.6.6 pin with the same warnings as 1.2.0, 72 bytes larger.
+
+### Performance
+
+**Snapshot restore is 57% slower, from bayan 1.11.1.** Its parsers now read through bounds-checked
+slices and keep a set to refuse duplicate keys, and its changelog prices that at about 1.5×. Writing
+a snapshot is 8% slower, because `node_capacity_to_jsonv` and `_rr_node` parse text on the way out.
+`tests/samay.bcyr` has no JSON row, so these two come from a scratch harness over a 5.8 KB snapshot.
+The hot paths did not move.
+
+1.2.0 on cyrius 6.7.9 against 1.2.1 on 6.7.18: 60 rounds, interleaved, shuffled and pinned to one CPU.
+Medians:
+
+| row | 1.2.0 | 1.2.1 | Δ | p |
+|---|---:|---:|---:|---:|
+| `node_can_fit` | 14.68 ns | 14.79 ns | +0.7% | 0.23 |
+| `priority_from_numeric` | 5.33 ns | 5.41 ns | +1.4% | 0.07 |
+| `samay_uuid_v4` | 770.5 ns | 780.0 ns | +1.2% | 0.49 |
+| `scheduled_task_new` | 2.57 µs | 2.59 µs | +0.6% | 0.96 |
+| `cron_expr_matches` | 18.26 ns | 18.00 ns | −1.4% | 0.82 |
+| snapshot restore (scratch) | 130.3 µs | 204.2 µs | **+56.8%** | <0.01 |
+| snapshot write (scratch) | 268.0 µs | 290.6 µs | **+8.5%** | <0.01 |
+
+None of the five suite rows is under p = 0.05. Load rose to about 6 during the run, so the medians
+sit above 1.2.0's table. Read the Δ, not the medians.
+
+### Verified
+
+- **Snapshot differential.** The same program built on both versions, over 6 tasks in 3 states, 9
+  nodes with 9 profiles of 6 accelerator types, and 3 cron entries. A snapshot from either version
+  restores on the other and re-serializes byte-identically.
+- **Probe, 1.2.0 against 1.2.1.** Up to 1,024 chips and 16 TiB of device memory, both versions keep
+  the profile. Past either bound, only 1.2.0 does.
+- CI's steps, run locally on 6.7.18: build, 572/572 tests, fmt and lint over `src/` and `tests/`,
+  every public function called by a test, every allocation guarded (ADR-0009), `dist/` in sync
+  (2,484 lines), and the benchmarks. `cyrius coverage --min 100` passes, 78/78.
+- No symbol collisions: none of samay's 138 functions or its globals is defined in the vendored
+  `lib/` (1,886 functions).
+
 ## [1.2.0] — 2026-11-01
 
 **cyrius 6.7.9, bayan 1.5.13, and `math` out of `[deps] stdlib`.** samay's first release on the
