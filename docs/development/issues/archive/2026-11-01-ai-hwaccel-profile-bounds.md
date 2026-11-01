@@ -1,7 +1,25 @@
+> **ARCHIVED 2026-11-01 — RESOLVED upstream.** ai-hwaccel 2.5.6 gives `tpu_chips` its own
+> bound, `PJ_MAX_TPU_CHIPS`, of 16,384. samay took it in **1.2.2**.
+>
+> **Re-verified on samay 1.2.2** with the same program as below:
+>
+> | chips | 1.2.1 (ai-hwaccel 2.5.5) | 1.2.2 (ai-hwaccel 2.5.6) |
+> |---:|---|---|
+> | 1,024 | profile restored, fits | profile restored, fits |
+> | 4,096 | **profile lost** | profile restored, fits |
+> | 8,960 | **profile lost** | profile restored, fits |
+> | 16,384 | **profile lost** | profile restored, fits |
+> | 16,385 | profile lost, logged | profile lost, logged |
+>
+> **Still refused, and logged:** a profile past 16,384 chips or 16 TiB of device memory, and a
+> TPU past 95 GiB per chip, which rules out a hand-built TPU7x pod (192 GiB per chip).
+> `node_capacity_with_tpu` builds v4 profiles, so it can only reach the first. Upstream
+> records all of this as not changed in 2.5.6.
+
 # ai-hwaccel's profile bounds refuse profiles samay wrote itself
 
-**Status:** open, upstream in ai-hwaccel. Found at samay 1.2.1 (ai-hwaccel 2.5.5).
-**Affects:** any node whose accelerator profile is past the bounds below.
+**Status:** resolved in ai-hwaccel 2.5.6. Found at samay 1.2.1 (ai-hwaccel 2.5.5).
+**Affected:** any node whose accelerator profile was past the bounds below.
 
 ## Defect
 
@@ -36,22 +54,12 @@ healthy after a restore, but it can no longer place the TPU work it could place 
 
 **The loss becomes permanent at the next snapshot.** The snapshot being restored still holds
 the full profile, but the node in memory does not, so the next snapshot samay writes omits
-it. Keep the older snapshot if the profile matters.
+it. 1.2.2 cannot bring back a profile that is no longer in the snapshot.
 
-## What samay does about it
+## What samay did about it
 
 - **Logs it.** Since 1.2.1 a refused profile is a `WARN` naming the node
   (`_log_profile_refused`). The refusal was silent until then, which broke samay's rule
   that it never silently drops.
-- **Does not bypass the check.** Rebuilding the profile by hand would undo a hardening fix.
-- **Pins it.** `test_json_node_profile_refused` asserts the loss at 4,096 chips.
-
-## Asked of ai-hwaccel
-
-Give `tpu_chips` its own bound, above the largest pod `tpu_hbm_per_chip` knows about, rather
-than `PJ_MAX_DEVICE_ID`.
-
-## When this closes
-
-When ai-hwaccel raises the bound, `test_json_node_profile_refused`'s 4096 asserts fail. Then
-update them, and archive this file. Amend ADR-0005's note as well.
+- **Did not bypass the check.** Rebuilding the profile by hand would undo a hardening fix.
+- **Pins it.** `test_json_node_profile_refused` checks real pods, the bound and one chip past it.

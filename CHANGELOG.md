@@ -4,6 +4,89 @@ All notable changes to Samay are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.2.2] — 2026-11-01
+
+**ai-hwaccel 2.5.6: a TPU pod's profile survives a snapshot again.** This fixes the regression 1.2.1
+shipped with. ai-hwaccel now gives `tpu_chips` its own bound of 16,384 instead of the 1,024 it used
+for device IDs. samay's only source change is one comment. **575 tests**, up 3.
+
+### Fixed — a TPU pod's profile is restored
+
+For a node with one TPU profile, after a snapshot round trip:
+
+| chips | 1.2.1 | 1.2.2 |
+|---:|---|---|
+| 1,024 | kept | kept |
+| 4,096 (v4 pod) | **lost** | kept, and still places |
+| 8,960 (v5p pod) | **lost** | kept, and still places |
+| 16,384 (the bound) | **lost** | kept, and still places |
+| 16,385 | lost, logged | lost, logged |
+
+- **A snapshot that still holds the profile restores in full.** A snapshot 1.2.1 wrote with v4 and
+  v5p pods restores on 1.2.2 with no warnings and re-serializes byte-identically.
+- **A snapshot written after a 1.2.1 restore does not hold it, and 1.2.2 cannot bring it back.**
+  1.2.1 dropped the profile from memory, so its next snapshot left it out. Restore from an earlier
+  snapshot, or register the accelerator again with `node_capacity_with_tpu` or
+  `node_capacity_add_accel`. 1.2.1 logged each loss as a `WARN` naming the node:
+  `accelerator profile refused on restore`.
+
+### Changed — dependency pin
+
+| | was | now |
+|---|---|---|
+| ai-hwaccel | 2.5.5 | **2.5.6** (`ccdcd9c`), the latest tag |
+
+cyrius 6.7.18 and bayan 1.11.1 are unchanged, and both are still the latest.
+
+- **`lib/` re-vendored from an empty tree:** 54 files, and only `lib/ai-hwaccel.cyr` changed. It is
+  byte-identical to the tag's `dist/` bundle. A second vendoring from empty reproduced the lock byte
+  for byte, and `cyrius deps --verify` reports 54 verified, 0 failed.
+- **`dist/samay.cyr`** changes its version line and that one comment. `dist/samay.deps` is unchanged.
+
+### Still refused on restore
+
+The logging from 1.2.1 stays, because ai-hwaccel 2.5.6 still refuses a profile past 16,384 chips or
+16 TiB of device memory, and a TPU past 95 GiB per chip. That last one rules out a hand-built TPU7x
+pod (192 GiB per chip). `node_capacity_with_tpu` builds v4 profiles, so of these it can only reach
+the chip count, and no known hardware is that large.
+
+### Tests
+
+- **`test_json_node_profile_refused` moves to the new bound.** v4 and v5p pods and the bound itself
+  place work after a round trip. One chip past it does not, and that node keeps its other profiles.
+  Three of the new asserts fail on 1.2.1.
+
+### Docs
+
+- The upstream report is [archived as resolved](docs/development/issues/archive/2026-11-01-ai-hwaccel-profile-bounds.md),
+  ADR-0005's correction names the new bound, and the roadmap item is gone.
+
+### Performance
+
+No change. 1.2.1 against 1.2.2, both on cyrius 6.7.18: 60 rounds, interleaved, shuffled and pinned to
+one CPU, on a quiet machine. Medians:
+
+| row | 1.2.1 | 1.2.2 | Δ | p |
+|---|---:|---:|---:|---:|
+| `node_can_fit` | 12.18 ns | 12.19 ns | +0.1% | 0.48 |
+| `priority_from_numeric` | 4.06 ns | 4.04 ns | −0.3% | 0.66 |
+| `samay_uuid_v4` | 617.5 ns | 618.0 ns | +0.1% | 0.69 |
+| `scheduled_task_new` | 2.23 µs | 2.24 µs | +0.2% | 0.08 |
+| `cron_expr_matches` | 13.30 ns | 13.37 ns | +0.5% | 0.32 |
+| snapshot restore (scratch) | 196.0 µs | 196.1 µs | 0.0% | 0.56 |
+| snapshot write (scratch) | 279.2 µs | 279.4 µs | +0.1% | 0.83 |
+
+The restore cost 1.2.1 took on from bayan 1.11.1 stays.
+
+### Verified
+
+- **Snapshot differential.** Snapshots from 1.2.0 and 1.2.1 restore on 1.2.2 and re-serialize
+  byte-identically, and a 1.2.2 snapshot of the same data restores on 1.2.1 the same way.
+- CI's steps, run locally on 6.7.18: build, 575/575 tests, fmt and lint over `src/` and `tests/`,
+  every public function called by a test, every allocation guarded (ADR-0009), `dist/` in sync
+  (2,485 lines), and the benchmarks. `cyrius coverage --min 100` passes, 78/78.
+- No symbol collisions: 2.5.6 adds one global, `PJ_MAX_TPU_CHIPS`, and samay does not use the name.
+
 ## [1.2.1] — 2026-11-01
 
 **cyrius 6.7.18, bayan 1.11.1 and ai-hwaccel 2.5.5, the latest of each.** samay builds with 0
@@ -44,7 +127,7 @@ comes back without the profile, and it can no longer place that work.
   undo a hardening fix.
 - **The loss becomes permanent at the next snapshot.** The snapshot being restored still holds the
   full profile, but the node in memory does not, so the next snapshot samay writes omits it.
-- **Reported in** [`docs/development/issues/`](docs/development/issues/2026-11-01-ai-hwaccel-profile-bounds.md).
+- **Reported in** [`docs/development/issues/`](docs/development/issues/archive/2026-11-01-ai-hwaccel-profile-bounds.md).
   ADR-0005 said restoring samay's own snapshot never drops a record. It now carries a dated correction.
 
 ### Fixed

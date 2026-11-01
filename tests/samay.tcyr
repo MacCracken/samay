@@ -1658,29 +1658,37 @@ fn test_json_node_shared_memory() {
     return 0;
 }
 
-# ai-hwaccel 2.5.5 checks a profile's ranges on restore, and its 1024 bound on
-# tpu_chips is below a real pod (TPU v4: 4,096 chips). Through samay 1.2.0 such a
-# node round-tripped. Now its TPU profile is refused: the node must survive with
-# its other profiles. samay logs the loss, which an assert here cannot see. If
-# ai-hwaccel raises the bound, the 4096 asserts fail, and that is the prompt to
-# retire the limit recorded in docs/development/issues.
+# 1 if a node with a `chips`-chip TPU can still place that work after a round trip.
+fn tpu_places_after_round_trip(chips): i64 {
+    var node = node_capacity_with_tpu(node_capacity_new(str_from("tpu"), f64_from(8), 4096, 8192, 0), chips);
+    var back = node_capacity_from_json_str(node_capacity_to_json_str(node));
+    return node_capacity_can_fit(back, resource_req_new(f64_from(1), 1, REQ_TPU, chips, 0, 0));
+}
+
+# ai-hwaccel checks a profile's ranges on restore. 2.5.5 capped tpu_chips at
+# 1,024, which lost a real pod's profile, so a node stopped placing its own TPU
+# work after a round trip (samay 1.2.1). 2.5.6 raised the bound to 16,384. A pod
+# must round trip. Past the bound the profile is refused, and the node must
+# survive with its other profiles. samay logs that loss, which an assert here
+# cannot see.
 fn test_json_node_profile_refused() {
     test_group("json_node_profile_refused");
     var gib = 1073741824;
-    var edge = node_capacity_with_tpu(node_capacity_new(str_from("tpu-1024"), f64_from(8), 4096, 8192, 0), 1024);
-    var edge2 = node_capacity_from_json_str(node_capacity_to_json_str(edge));
-    assert_eq(vec_len(NodeCapacity_accel_profiles(edge2)), 1, "1024 chips restored");
-    var pod = node_capacity_new(str_from("tpu-pod"), f64_from(8), 4096, 8192, 0);
-    node_capacity_add_accel(pod, profile_cuda(0, 24 * gib));
-    node_capacity_with_tpu(pod, 4096);
-    var req = resource_req_new(f64_from(1), 1, REQ_TPU, 4096, 0, 0);
-    assert_eq(node_capacity_can_fit(pod, req), 1, "4096 chips fit before the round trip");
-    var pod2 = node_capacity_from_json_str(node_capacity_to_json_str(pod));
-    assert_eq(pod2 != 0, 1, "node survives a refused profile");
-    var profs = NodeCapacity_accel_profiles(pod2);
+    assert_eq(tpu_places_after_round_trip(4096), 1, "TPU v4 pod still places");
+    assert_eq(tpu_places_after_round_trip(8960), 1, "TPU v5p pod still places");
+    assert_eq(tpu_places_after_round_trip(16384), 1, "the bound itself still places");
+    assert_eq(tpu_places_after_round_trip(16385), 0, "one chip past the bound does not");
+    var over = node_capacity_new(str_from("tpu-over"), f64_from(8), 4096, 8192, 0);
+    node_capacity_add_accel(over, profile_cuda(0, 24 * gib));
+    node_capacity_with_tpu(over, 16385);
+    var req = resource_req_new(f64_from(1), 1, REQ_TPU, 16385, 0, 0);
+    assert_eq(node_capacity_can_fit(over, req), 1, "16385 chips fit before the round trip");
+    var over2 = node_capacity_from_json_str(node_capacity_to_json_str(over));
+    assert_eq(over2 != 0, 1, "node survives a refused profile");
+    var profs = NodeCapacity_accel_profiles(over2);
     assert_eq(vec_len(profs), 1, "only the refused profile is lost");
     assert_eq(profile_accel_type(vec_get(profs, 0)), ACCEL_CUDA, "the CUDA profile stays");
-    assert_eq(node_capacity_can_fit(pod2, req), 0, "the refused profile no longer places");
+    assert_eq(node_capacity_can_fit(over2, req), 0, "the refused profile no longer places");
     return 0;
 }
 

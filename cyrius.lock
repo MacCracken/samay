@@ -1,6 +1,6 @@
-commit	0586202bbdef73fe679ef4643f8459358fd45961	ai-hwaccel	https://github.com/MacCracken/ai-hwaccel.git	2.5.5
+commit	ccdcd9c035e205c1373b3c0d2c5878004da6edbc	ai-hwaccel	https://github.com/MacCracken/ai-hwaccel.git	2.5.6
 commit	965298dfaa16587ac1835e1ced8482184bd864a6	bayan	https://github.com/MacCracken/bayan.git	1.11.1
-f75a412a42475828964430d928634d77081ba692a14de5b98d5d09eba7d68204  lib/ai-hwaccel.cyr
+807532a0cfad2147fdb6ecebea11a5e2224611d89454349545f50b3daed59d9d  lib/ai-hwaccel.cyr
 346716377b00f36e58eb16cf7fe1dd62dd8fe577930d0d0429f822795b35817c  lib/alloc.cyr
 5afd5bb7cba4e49fee331f6a2838f4e01d9781defaf531403f6616f42ac7151b  lib/alloc_agnos.cyr
 57af1877c5082793ecfcfb2bf358c81cda79eaaae4feaa12eb7b963c4cbdf739  lib/alloc_cx.cyr

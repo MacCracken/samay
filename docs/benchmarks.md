@@ -14,6 +14,24 @@ pre-warm off every hot path, and re-measured within noise of the table below
 | `samay_uuid_v4`         | 606 ns   | 613 ns   | getrandom(2) syscall-bound         |
 | `scheduled_task_new`    | 2.07 µs  | 2.06 µs  | alloc + uuid + `dt_now`            |
 
+## v1.2.2 — ai-hwaccel 2.5.5 → 2.5.6
+
+1.2.1 against 1.2.2, both on cyrius 6.7.18, 60 rounds interleaved, shuffled and pinned to one
+CPU (2026-11-01). The machine was quiet (load under 3). Medians:
+
+| Op                      | 1.2.1    | 1.2.2    | Δ      |
+|-------------------------|----------|----------|--------|
+| `priority_from_numeric` | 4.06 ns  | 4.04 ns  | −0.3%  |
+| `node_can_fit`          | 12.18 ns | 12.19 ns | +0.1%  |
+| `cron_expr_matches`     | 13.30 ns | 13.37 ns | +0.5%  |
+| `samay_uuid_v4`         | 617.5 ns | 618.0 ns | +0.1%  |
+| `scheduled_task_new`    | 2.23 µs  | 2.24 µs  | +0.2%  |
+| snapshot restore        | 196.0 µs | 196.1 µs | 0.0%   |
+| snapshot write          | 279.2 µs | 279.4 µs | +0.1%  |
+
+No row is under p = 0.05. The snapshot rows use the same scratch harness and 5.8 KB snapshot as
+v1.2.1. The restore cost v1.2.1 took on from bayan 1.11.1 stays.
+
 ## v1.2.1 — cyrius 6.7.9 → 6.7.18, bayan 1.5.13 → 1.11.1
 
 1.2.0 on cyrius 6.7.9 against 1.2.1 on 6.7.18, 60 rounds interleaved, shuffled and pinned to

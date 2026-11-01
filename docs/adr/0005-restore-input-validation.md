@@ -64,7 +64,8 @@ Validate at the restore boundary, matching Rust serde's fail-closed semantics:
 - Fail-closed on a bad record means a corrupt snapshot loses that record silently. For a
   scheduler restoring its own well-formed snapshot this never triggers; it only drops
   attacker/corruption-injected records, which is the desired posture.
-  **Amended 2026-11-01 (v1.2.1):** this no longer holds for accelerator profiles. ai-hwaccel
-  2.5.5 refuses out-of-range values, including a TPU profile over 1,024 chips that samay
-  wrote itself ([issue](../development/issues/2026-11-01-ai-hwaccel-profile-bounds.md)). The
+  **Amended 2026-11-01 (v1.2.1, v1.2.2):** this does not hold for every accelerator profile.
+  ai-hwaccel refuses out-of-range values since 2.5.5, and that can reach a profile samay
+  wrote itself ([issue](../development/issues/archive/2026-11-01-ai-hwaccel-profile-bounds.md)).
+  2.5.6 raised the bound on TPU chips to 16,384, so real pods restore. Past the bounds the
   node stays without that profile. That is a valid record, not corruption, so samay logs it.

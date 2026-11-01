@@ -487,10 +487,11 @@ fn node_capacity_from_jsonv(v): i64 {
         var i = 0;
         while (i < n) {
             # ai-hwaccel's profile_from_json takes a json_v node directly. Since
-            # 2.5.5 it refuses out-of-range values, and that reaches profiles
-            # samay wrote itself: its 1024 bound on tpu_chips is below a real
-            # TPU pod. The node stays, without that profile, so this is a real
-            # capacity loss and it is logged (samay never silently drops).
+            # 2.5.5 it refuses out-of-range values, and that can reach a profile
+            # samay wrote itself: past 16,384 TPU chips (2.5.6's bound), or past
+            # 16 TiB of device memory. The node stays, without that profile, so
+            # this is a real capacity loss and it is logged (samay never
+            # silently drops).
             var prof = profile_from_json(bayan_json_v_arr_get(arr, i));
             if (prof != 0) {
                 vec_push(profs, prof);
