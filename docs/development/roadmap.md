@@ -1,6 +1,6 @@
 # samay — Roadmap
 
-> **Last refreshed**: 2026-11-02 (v1.4.5)
+> **Last refreshed**: 2026-11-02 (v1.4.6)
 >
 > **Forward-looking only.** Nothing shipped belongs here — per-release detail
 > lives in [`../../CHANGELOG.md`](../../CHANGELOG.md) (complete from 0.1.0), the
@@ -11,10 +11,10 @@
 > 2.0.0. The only unpinned items wait on an event outside this repo:
 > see [Event-gated](#event-gated--no-pin-by-design).
 
-> **Current**: **v1.4.5**, cyrius pin **6.7.18**, floor **6.7.10**, deps ai-hwaccel **2.5.6** +
-> bayan-json **1.11.1**. Gates green: **1,322 assertions**, **11/11 benchmarks**,
+> **Current**: **v1.4.6**, cyrius pin **6.7.18**, floor **6.7.10**, deps ai-hwaccel **2.5.6** +
+> bayan-json **1.11.1**. Gates green: **1,405 assertions**, **13/13 benchmarks**,
 > coverage **87/87** public functions (each called by a test; 6.6.14 stopped counting `main`), lint 0-warn / 0
-> untracked deferrals, fmt clean, `dist/` in sync (3,521 lines), 0 symbol collisions
+> untracked deferrals, fmt clean, `dist/` in sync (3,673 lines), 0 symbol collisions
 > against the vendored deps. `src/` is 9 modules. The 1,479-line Rust oracle was
 > retired after 1.1.5 ([`rust-old-removal.md`](rust-old-removal.md)).
 
@@ -22,29 +22,14 @@
 
 | Version | Theme | Risk | Gate to entry |
 |---|---|---|---|
-| **1.4.6** | A placement pass below O(pending × nodes) | medium | the 100,000 × 100,000 baseline in `benchmarks.md`: this is next |
 | **1.5.0** | Accelerator requests: shared and multi-device | high | consumers on 1.4.x, and an ADR on the unit of sharing |
 | **1.6.0** | Preemption: placed tasks and several victims | medium | an ADR on the new return shape |
 | **1.7.0** | Deadlines and `network`: make them work, or mark them for removal | medium | one ADR each |
 | **1.8.0** | Accounting: stats counters, lifetime totals, failure reasons | low | an ADR on lifetime totals as wire state |
 | **2.0.0** | Removals: `samay_init`, stats meanings, whatever 1.7.0 rejected | high | every consumer on 1.8.x |
 
-The order is by who it helps. 1.4.6 finishes the repairs. New features wait until consumers
-can receive them, because nothing from 1.2 onward has reached one yet.
-
----
-
-## 1.4.x — remaining repairs
-
-### 1.4.6 — a placement pass below O(pending × nodes)
-
-100,000 unplaceable tasks against 100,000 nodes takes 366 s per pass. *Entry gate*: that baseline in
-`benchmarks.md`, measured with `cyrius bench`.
-
-- [ ] **Skip requirements already known not to fit.** Most real queues repeat a few shapes, so a
-  shape that fit nowhere this pass need not walk the nodes again.
-- [ ] **Decisions stay byte-identical.** It ships only if every decision matches 1.4.5 on real
-  binaries, because this is the hottest path that determinism rests on.
+The order is by who it helps. The repairs finished with 1.4.6. New features wait until consumers
+can receive them, because nothing from 1.2 onward has reached one yet: consumer adoption is next.
 
 ---
 
@@ -67,7 +52,9 @@ are no use to a consumer that cannot build them. The toolchain floor and the
 ### 1.5.0 — accelerator requests
 
 *Entry gate*: consumers on 1.4.x, and an ADR on the unit of sharing. Today a task takes one whole GPU,
-or chips of one pod ([ADR-0013](../adr/0013-accelerators-are-reserved.md)).
+or chips of one pod ([ADR-0013](../adr/0013-accelerators-are-reserved.md)). That ADR must keep a pass
+filling nodes only: taking a share can never leave room for a request that had none, or the pass's
+record of what fits nowhere goes wrong ([ADR-0015](../adr/0015-a-pass-only-fills-nodes.md)).
 
 - [ ] **Sharing a device.** "Half a GPU" cannot be said. It needs a new requirement field, and
   exclusive stays the default.

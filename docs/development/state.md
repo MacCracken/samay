@@ -5,6 +5,13 @@
 
 ## Version
 
+**1.4.6** — a pass skips what it already knows fits nowhere
+([ADR-0015](../adr/0015-a-pass-only-fills-nodes.md)). Nodes only fill during a pass, so a pass records
+each requirement that fit no node and the most cpu, memory and disk free on any one, and refuses what
+those rule out without walking the nodes. 100,000 stuck tasks against 100,000 nodes take 0.18 s a
+pass, down from 756 s; a pass that places its tasks costs what it did. Every decision is 1.4.5's, proven by a
+differential against real 1.4.5 binaries. This finishes the 1.4.x repairs. 1,405 assertions.
+
 **1.4.5** — limits that limit ([ADR-0014](../adr/0014-what-a-document-may-cost.md)). A document is
 refused before parsing past 128 MiB, and its parse past ten times its size, through an allocator that
 counts: 10 MB of nested arrays peaks at 126 MiB instead of 868. Every writer refuses past the same
@@ -98,7 +105,7 @@ sweep).
 
 - `src/{uuid,types,scheduler,cronexpr,cron,training,json}.cyr` + `src/lib.cyr`
   aggregation header + `src/main.cyr` demo. The seven `[lib].modules` bundle to
-  3,521 lines in `dist/samay.cyr` (as `cyrius distlib` reports it); `json.cyr` is the largest module.
+  3,673 lines in `dist/samay.cyr` (as `cyrius distlib` reports it); `json.cyr` is the largest module.
 - **Strings are `Str` (ptr+len), not cstr** since **v0.5.0**
   ([ADR-0003](../adr/0003-str-string-representation.md)) — required because
   `#derive(Serialize)` core dumps on a cstr in a `Str`-typed field. Passing a
@@ -112,7 +119,7 @@ sweep).
 
 ## Tests
 
-- `tests/samay.tcyr` — **1322/1322 assertions passing**, on x86_64, aarch64 under qemu, and in bounds-checked mode (`cyrius test`), up from 296 in
+- `tests/samay.tcyr` — **1405/1405 assertions passing**, on x86_64, aarch64 under qemu, and in bounds-checked mode (`cyrius test`), up from 296 in
   v1.0.2. Includes the v1.0.3 additions: the capacity-conservation invariant (the
   assertion whose absence let ADR-0007's defect ship), a cron differential guard pinning
   the optimised matcher to an in-test reference implementation, back-compat snapshot
@@ -148,16 +155,18 @@ sweep).
   Each now rests on 32 entries or a planted value, and each mutant dies on every run measured.
   v1.4.5 adds the limits at their exact byte, the budget allocator's boundaries, the leaf readers
   against the derive's text and seven shapeless documents, and a byte-for-byte round trip for every
-  value a constructor kept and restore changed.
+  value a constructor kept and restore changed. v1.4.6 adds the record of shapes that fit nowhere,
+  tested directly, and passes that must place what a full walk places: a neighbour of a refused shape
+  in each field, and each way a node can gain capacity mid-pass through setters.
 - `tests/samay.fcyr` — restores mutated snapshots and drives each through a working life, checking
   capacity invariants, with a pinned seed. `cyrius fuzz tests/samay.fcyr`. CI runs it.
-- `tests/samay.bcyr` — 11 benchmarks, all green (see `docs/benchmarks.md`). Was dead
+- `tests/samay.bcyr` — 13 benchmarks, all green (see `docs/benchmarks.md`). Was dead
   (SIGSEGV) from v0.5.0 to v1.0.1: the `Str` migration left it passing bare cstring
   literals into `Str`-taking APIs. Now run by CI so it cannot rot silently again.
 - Gates: `cyrius fmt <file> --check` clean, `cyrius lint <file>` 0 warnings and 0
   untracked deferrals, `cyrius distlib --check` in sync. **All four run in CI.** `fmt` and `lint` take a file
   argument, so CI loops over the files.
-- Coverage (v1.4.5): `cyrius coverage --min 100`, **87/87** (cyrius 6.6.14's tool no longer
+- Coverage (v1.4.6): `cyrius coverage --min 100`, **87/87** (cyrius 6.6.14's tool no longer
   counts `src/main.cyr`'s `main`; 1.1.5 read 79/79 on 6.6.6), plus a strict CI check
   that every public function in `[lib].modules` is *called* by a test. The strict
   check exists because the tool counts a name that appears anywhere in the tests,
@@ -195,7 +204,7 @@ sweep).
 - **daimon** — integrated: deleted its duplicated `scheduler.cyr`/`cron.cyr` and
   consumes samay as the single scheduler source of truth (api_sched rewired; 215 assertions).
   The migration surfaced + fixed the `uuid_v4`↔libro collision (samay 1.0.1).
-- Current pins, as of 1.4.5: kavach 3.13.2 → samay `1.1.6`, daimon 2.4.3 → `1.1.3`,
+- Current pins, as of 1.4.6: kavach 3.13.2 → samay `1.1.6`, daimon 2.4.3 → `1.1.3`,
   stiva 3.0.22 → `1.1.2`. daimon also sets `path = "../samay"`, so its local
   builds use this checkout, not the tag. The only samay JSON call among
   them is daimon's `SchedulingDecision_to_json`, which is emit-only. None of them
@@ -211,8 +220,8 @@ sweep).
 ## Next
 
 See [`roadmap.md`](roadmap.md), the single source for forward work, with every item pinned to a
-version. **1.4.5** makes the limits limit, and **1.4.6** cuts the cost of a placement pass. Consumers move up next, then features run
-from **1.5.0** to **1.8.0**, and removals wait for **2.0.0**.
+version. The 1.4.x repairs finished with **1.4.6**. Consumers move up next, then features run from
+**1.5.0** to **1.8.0**, and removals wait for **2.0.0**.
 
 **Concurrency — audited in v1.0.4, see [ADR-0008](../adr/0008-threading-contract.md).**
 Retired as an unknown; now a stated contract with measured backing. Open items from it:
@@ -232,6 +241,9 @@ was considered and not built — worth revisiting if any consumer adopts a threa
 
 **Retired in 1.4.5:** restore's memory. The item limits bounded neither memory nor bytes, and a byte
 limit with a parse budget now does ([ADR-0014](../adr/0014-what-a-document-may-cost.md)).
+
+**Retired in 1.4.6:** the cost of a stuck queue. A pass walked every node for every waiting task
+([ADR-0015](../adr/0015-a-pass-only-fills-nodes.md)). A placed task still walks every node.
 
 **Still unretired:** agnos has no run at all. Replay after a restore can assign a different device than
 the original on a node whose profiles overlap (ADR-0013). Every restore leaves its parse tree, about six

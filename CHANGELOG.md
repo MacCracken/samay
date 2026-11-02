@@ -4,6 +4,75 @@ All notable changes to Samay are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.6] — 2026-11-02
+
+**A pass skips what it already knows fits nowhere.** A placement pass walked every node for every
+pending task, so a stuck queue cost the same walk on every pass for as long as it waited. Now a pass
+records each requirement that fit nowhere and the most any node has free, and refuses what those rule
+out without the walk. Every decision is the one 1.4.5 makes, proven against real 1.4.5 binaries.
+**1,405 tests**, up 83. No public function, argument or wire byte changed. This finishes the 1.4.x
+repairs.
+
+### Changed — a pass only walks the nodes when it might find one ([ADR-0015](docs/adr/0015-a-pass-only-fills-nodes.md))
+
+Within a pass nodes only fill: a placement takes capacity and a device, and nothing comes back until
+the next pass. So a requirement that fit no node earlier in the pass fits none later.
+
+- **Shapes that fit nowhere are recorded.** A later requirement asking for the same cores, memory,
+  accelerator, chips and disk is refused without a walk. Most stuck queues repeat a few shapes.
+- **The most cpu, memory and disk free on any one node** are taken once per pass. A requirement past
+  any of them is refused the first time too, which is how a full fleet refuses most of its queue.
+- **A placement that leaves a node with more than it had resets both.** Only setters can build one: a
+  negative amount, a node a hair below zero cores, a TPU profile with fewer than no chips.
+- Every stuck task is still logged on every pass, as before.
+
+| One pass, pinned, logs to `/dev/null` | 1.4.5 | 1.4.6 |
+|---|---|---|
+| 100,000 stuck tasks, one shape, 100,000 nodes | 756 s | 0.18 s |
+| 20,000 stuck, one shape, 20,000 nodes | 9.54 s | 42.9 ms |
+| 20,000 stuck, each a different size past every node | 9.54 s | 41.5 ms |
+| 20,000 stuck on a full fleet, 1,024 shapes | 9.50 s | 42.8 ms |
+| 20,000 stuck, each a different shape inside every limit (the worst case) | 12.50 s | 12.57 s |
+| `schedule_pending_place_500`: 500 tasks placed on 500 nodes | 18.2 ms | 18.2 ms |
+
+What a stuck pass costs now is mostly its log lines. The other bench rows are unchanged, except
+`cron_expr_matches`, 18.46 to 19.11 ns, whose source did not change: 1.4.5 with the new code compiled
+in and never called runs it at 19.04 ns, so it is where the code sits, not what it does
+([benchmarks](docs/benchmarks.md#v146--a-pass-that-skips-what-fits-nowhere)).
+
+### Not changed — every decision
+
+- **A differential against real 1.4.5 binaries**, both built from the same harness: 3,000 seeded
+  scenarios of four passes each and 16 probes, printing every decision and score, every log line and
+  every node's state. 2,332,935 lines, 110,874 of them decisions, identical. It is not vacuous: at 300
+  seeds each of 15 planted mistakes made it differ, among them dropping any one field from the shape,
+  `<=` for `<` on any limit, and ignoring growth in any one of cpu, memory, disk or devices.
+- **What is still O(placed × nodes):** a task that is placed still walks every node for its best fit,
+  and so does each stuck shape the first time it is seen inside the limits, up to 512 a pass.
+- `task_scheduler_schedule_pending` uses 8 KiB more stack, for the record. Cyrius threads get 2 MiB.
+
+### Tests
+
+- **The record itself:** which fields make a shape, 0 and -0, NaN, where shapes start and that every
+  field moves it, limits taken from each of 32 nodes in turn and lifted by a NaN node, filling to half
+  and stopping, two shapes sharing a start, and a probe that wraps past the last slot.
+- **What counts as growth:** taking only cores, memory, disk or a device does not; each of the five
+  ways setters can give capacity back does.
+- **A pass that skips soundly:** a neighbour of a refused shape in each of five fields is placed; each
+  way capacity can grow mid-pass, through the record and through a limit, lets the same shape in after;
+  1,200 stuck tasks of 600 shapes are all refused and logged; a refused shape is tried again next pass.
+- **Two benchmark rows:** `schedule_pending_stuck_2000` and `schedule_pending_place_500`.
+- **Whole-source mutation**, run locally: 1,322 mutants, 1,155 killed, 159 survive, 8 do not compile.
+  The first run left 16 new survivors in the new code; tests now kill 9 of them. The other 7
+  are read and accepted: two `>=` swaps in a running maximum, a loop bound one past the node table
+  (five of those were already accepted), a skipped `knowing = 1`, which only makes every walk rebuild
+  the record, and three returns nothing reads. One mutant was killed only on a retry once; 180
+  targeted reruns killed it every time.
+
+### Not verified
+
+- **No consumer was rebuilt.** kavach, daimon and stiva are still on 1.1.x.
+
 ## [1.4.5] — 2026-11-02
 
 **Limits that limit.** A document is refused before parsing past a byte limit, and the parse is refused

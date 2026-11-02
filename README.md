@@ -5,7 +5,7 @@ accelerator-conscious** task placement. Cyrius port of the original Rust library
 
 - **Language**: Cyrius (toolchain 6.7.18, floor 6.7.10) · **License**: GPL-3.0-only
 - **Consumers**: daimon (task scheduling), kavach (sandboxed execution), stiva (scheduled containers)
-- **Status**: **v1.4.5** — port complete, P-1 and concurrency audited. Real cron
+- **Status**: **v1.4.6** — port complete, P-1 and concurrency audited. Real cron
   (Vixie DOM/DOW), ai-hwaccel placement, JSON snapshot/restore, deterministic
   scheduling, fail-closed and memory-bounded restore, conserved node capacity. Downstream consumers
   kavach, daimon and stiva are integrated.
@@ -19,9 +19,11 @@ accelerator-conscious** task placement. Cyrius port of the original Rust library
   availability: each node carries ai-hwaccel device profiles (CUDA / ROCm / TPU /
   Gaudi / Neuron), and a placed task holds its device, or its chips of a TPU pod,
   until it finishes. Placement is best-fit by utilization: an accelerator task never
-  lands on a node without a free matching device
+  lands on a node without a free matching device, and a pass does not search again for a
+  requirement it already knows fits nowhere
   ([ADR-0002](docs/adr/0002-ai-hwaccel-profile-placement.md),
-  [ADR-0013](docs/adr/0013-accelerators-are-reserved.md)).
+  [ADR-0013](docs/adr/0013-accelerators-are-reserved.md),
+  [ADR-0015](docs/adr/0015-a-pass-only-fills-nodes.md)).
 - **Real cron expressions** — standard 5-field (`min hour dom month dow`) with
   `*`, ranges, lists, `*/step`, month/day names, and `@hourly`…`@yearly`
   shortcuts, **validated at parse time**. Missed schedules follow an explicit
@@ -36,7 +38,7 @@ accelerator-conscious** task placement. Cyrius port of the original Rust library
 cyrius deps                          # resolve stdlib + ai-hwaccel into lib/
 cyrius build src/main.cyr build/samay
 ./build/samay                        # runnable demo
-cyrius test  tests/samay.tcyr        # 1322/1322 assertions
+cyrius test  tests/samay.tcyr        # 1405/1405 assertions
 cyrius bench tests/samay.bcyr
 ```
 
@@ -47,7 +49,7 @@ Consumers declare the dep and include the committed bundle:
 ```toml
 [deps.samay]
 git = "https://github.com/MacCracken/samay.git"
-tag = "1.4.5"
+tag = "1.4.6"
 modules = ["dist/samay.cyr"]
 ```
 

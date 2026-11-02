@@ -37,3 +37,4 @@ Decisions about samay — what we chose, the context, and the consequences we ac
 | [0012](0012-cron-burst-budget.md) | An exact due count, and a burst budget that holds entries instead of dropping them | Accepted (v1.4.1) — closes audit F8 and F9 |
 | [0013](0013-accelerators-are-reserved.md) | Accelerators are reserved, and preemption has to help | Accepted (v1.4.3) — what 0002's availability has to mean |
 | [0014](0014-what-a-document-may-cost.md) | A document has a byte limit and a parse budget, and writers keep to both | Accepted (v1.4.5) — what 0005's item limit could not bound |
+| [0015](0015-a-pass-only-fills-nodes.md) | A pass only fills nodes, so it skips what it already knows fits nowhere | Accepted (v1.4.6) — decisions unchanged, proven against 1.4.5 binaries |

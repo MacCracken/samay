@@ -14,6 +14,61 @@ pre-warm off every hot path, and re-measured within noise of the table below
 | `samay_uuid_v4`         | 606 ns   | 613 ns   | getrandom(2) syscall-bound         |
 | `scheduled_task_new`    | 2.07 µs  | 2.06 µs  | alloc + uuid + `dt_now`            |
 
+## v1.4.6 — a pass that skips what fits nowhere
+
+[ADR-0015](adr/0015-a-pass-only-fills-nodes.md). Measured on cyrius 6.7.18 (2026-11-02), each case its own
+process, pinned to one CPU with nothing else running, timing one `schedule_pending` with `bench_new`.
+Every task is stuck, so nothing is placed, and each logs its line to stderr, sent to `/dev/null`.
+
+**The entry gate: 100,000 stuck tasks against 100,000 nodes.** Nodes have 8 cores and 16 GiB, and
+every task asks for 16 cores.
+
+| | 1.4.5 | 1.4.6 |
+|---|---|---|
+| One pass | 756 s | 0.18 s |
+
+The roadmap carried 366 s for this from the 1.4.3 sweep, whose setup was not recorded; this is the
+setup above. At this size the walk is cache-bound, 76 ns a pair against 24 ns at 2,000 nodes. What
+1.4.6 leaves is mostly the 100,000 log lines.
+
+**Four kinds of stuck queue, 20,000 tasks against 20,000 nodes.** Medians of three runs, interleaved:
+
+| Queue | 1.4.5 | 1.4.6 |
+|---|---|---|
+| One shape, more cores than any node has | 9.54 s | 42.9 ms |
+| Every task a different size, each too big for any node | 9.54 s | 41.5 ms |
+| A full fleet, and a queue of 1,024 shapes from 1 to 64 cores | 9.50 s | 42.8 ms |
+| Every task a different shape inside every limit, fitting nowhere | 12.50 s | 12.57 s |
+
+The second and third are refused by the limits, so nothing repeats and nothing is recorded. The last
+is the worst case: half the nodes have the cores and half the memory, the record fills at 512 shapes,
+and every task after walks the nodes as before. It costs 0.6%, within the runs' spread (12.48 to
+12.94 s on 1.4.6, 12.48 to 12.60 s on 1.4.5).
+
+**`tests/samay.bcyr`, 1.4.5 against 1.4.6**, the same bench file built against each `src/`, seven
+rounds interleaved and shuffled on one pinned CPU. Medians:
+
+| Op | 1.4.5 | 1.4.6 | Δ |
+|---|---|---|---|
+| `node_can_fit` | 16.08 ns | 16.11 ns | +0.1% |
+| `priority_from_numeric` | 4.58 ns | 4.63 ns | +1.0% |
+| `samay_uuid_v4` | 661 ns | 668 ns | +1.1% |
+| `scheduled_task_new` | 2.38 µs | 2.40 µs | +0.9% |
+| `cron_expr_matches` | 18.46 ns | 19.11 ns | **+3.5%** |
+| `pending_tasks_2000` | 349 µs | 350 µs | +0.1% |
+| `cron_count_window` | 24.7 µs | 24.8 µs | +0.2% |
+| `scheduled_task_to_jsonv` | 2.52 µs | 2.54 µs | +0.8% |
+| `cron_entry_to_jsonv` | 2.63 µs | 2.63 µs | 0.0% |
+| `node_can_fit_gpu` | 168 ns | 167 ns | -0.6% |
+| `best_fit_tpu_100_nodes` | 13.7 µs | 13.6 µs | -0.3% |
+| `schedule_pending_stuck_2000` | 93.3 ms | 1.89 ms | **-98.0%** |
+| `schedule_pending_place_500` | 18.2 ms | 18.2 ms | -0.2% |
+
+The two pass rows are new: 2,000 stuck tasks of one shape on 2,000 nodes, and 500 tasks placed on 500
+nodes, with log lines sent to a hook that drops them. `cron_expr_matches` did not change, and its runs
+do not overlap. Built from 1.4.5 with the new code compiled in and never called, it runs at 19.04 ns
+(median of five), so the cost is where the code now sits in the binary, not what it does.
+
 ## v1.4.5 — what a document may cost
 
 Measured with a harness that restores a file and reads its own peak RSS, on cyrius 6.7.18 with bayan
@@ -346,10 +401,12 @@ win is allocator pressure, which matters because nothing here is reclaimed.
 
 ## Still open
 
-The placement pass walks every node for every pending task. The 1.4.3 sweep measured 100,000
-unplaceable tasks against 100,000 nodes at 366 s a pass, outside `cyrius bench`. The roadmap's 1.4.6
-starts by recording that here. (The accelerator path this section used to list has had rows since
-1.4.3, and the insertion sorts were replaced in 1.4.0.)
+A task that is placed still walks every node for its best fit, so a pass that places `p` tasks is
+O(p × nodes): `schedule_pending_place_500` above. So is each stuck shape the first time a pass sees it
+inside the limits, up to 512 shapes a pass, and every one past that. 1.4.6 removed only the walks whose
+answer was already known. Finding the least-used node that fits without a walk needs an index of the
+nodes by what they have free, and [ADR-0015](adr/0015-a-pass-only-fills-nodes.md) records why 1.4.6
+did not build one.
 
 Re-run and update on any hot-path change. Never claim a performance win without
 before/after numbers (project rule).

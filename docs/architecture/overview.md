@@ -30,7 +30,8 @@ submit_task ─► tasks map (Queued)
 schedule_pending ──►  reconcile reservations (release anything no longer
                       │                        Scheduled/Running)
                       ├─ sort pending (priority desc, created_at asc, task_id)
-                      └─ per task: preferred node → best_fit (min utilization, can_fit)
+                      └─ per task: preferred node → known to fit nowhere? → best_fit
+                                     │                (min utilization, can_fit)
                                      └─ reserve node · task→Scheduled · reserved_on
                                         · SchedulingDecision
 complete_task ────►  transition to Completed/Failed ─► release reserved_on
@@ -47,6 +48,14 @@ return it at once. A task finished through a raw transition returns it at the ne
 the transition, because `scheduled_task_transition` is public — a consumer can
 drive a task terminal without calling any scheduler API
 ([ADR-0007](../adr/0007-reservation-lifecycle.md)).
+
+**A pass only fills nodes.** Between reconciliation and the end of a pass, a placement takes capacity
+and nothing gives any back, so a requirement that fit no node earlier in the pass fits none later. The
+pass relies on that: it records each requirement that fit nowhere, and the most cpu, memory and disk
+free on any node, and refuses what those already rule out without walking the nodes. A placement that
+leaves a node with more than it had, which only setters can arrange, resets both. Anything that gives
+capacity back during a pass has to reset them too, or decisions change
+([ADR-0015](../adr/0015-a-pass-only-fills-nodes.md)).
 
 ## Representation notes
 

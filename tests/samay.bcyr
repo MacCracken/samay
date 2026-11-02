@@ -138,7 +138,61 @@ fn main(): i64 {
     bench_batch_stop(b11, 20000);
     bench_report(b11);
 
+    # A whole pass, two ways. Each stuck task logs a line, so the log goes to a hook
+    # that drops it: the rows time samay's work, not a terminal's. Last, for the same
+    # reason as above.
+    sakshi_set_emit_hook(&_bench_drop_log);
+
+    # 2,000 tasks no node fits against 2,000 nodes. Nothing is placed, so every
+    # pass is the same pass.
+    var stuck = task_scheduler_new();
+    i = 0;
+    while (i < 2000) {
+        task_scheduler_register_node(stuck, node_capacity_new(_bench_id("n-", i), f64_from(8), 16384, 102400, 0));
+        task_scheduler_submit_task(stuck, scheduled_task_new(t_name, t_desc, t_agent, 1 + i % 10,
+            resource_req_new(f64_from(16), 4096, REQ_NONE, 0, 0, 0)));
+        i = i + 1;
+    }
+    var b12 = bench_new("schedule_pending_stuck_2000");
+    bench_batch_start(b12);
+    i = 0;
+    while (i < 10) { task_scheduler_schedule_pending(stuck); i = i + 1; }
+    bench_batch_stop(b12, 10);
+    bench_report(b12);
+
+    # 500 tasks placed on 500 nodes: what the skip costs a pass where everything
+    # fits. A pass places them, so each round builds its own scheduler, untimed.
+    var b13 = bench_new("schedule_pending_place_500");
+    var round = 0;
+    while (round < 10) {
+        var fresh = task_scheduler_new();
+        i = 0;
+        while (i < 500) {
+            task_scheduler_register_node(fresh, node_capacity_new(_bench_id("p-", i), f64_from(8), 16384, 102400, 0));
+            task_scheduler_submit_task(fresh, scheduled_task_new(t_name, t_desc, t_agent, 1 + i % 10,
+                resource_req_new(f64_from(1 + i % 4), 1024 * (1 + i % 8), REQ_NONE, 0, 0, 0)));
+            i = i + 1;
+        }
+        bench_start(b13);
+        task_scheduler_schedule_pending(fresh);
+        bench_stop(b13);
+        round = round + 1;
+    }
+    bench_report(b13);
+    sakshi_clear_emit_hook();
+
     return 0;
+}
+
+fn _bench_drop_log(ts, level, category, msg, msg_len, fields): i64 {
+    return 0;
+}
+
+fn _bench_id(prefix, i): i64 {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, prefix);
+    str_builder_add_int(sb, i);
+    return str_builder_build(sb);
 }
 
 var r = main();

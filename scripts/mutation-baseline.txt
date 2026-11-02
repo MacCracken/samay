@@ -88,11 +88,18 @@ src/scheduler.cyr	<-><=	while (i < cap) {
 src/scheduler.cyr	<-><=	while (i < cap) {
 src/scheduler.cyr	<-><=	while (i < cap) {
 src/scheduler.cyr	<-><=	while (i < cap) {
+src/scheduler.cyr	<-><=	while (i < cap) {
 src/scheduler.cyr	<-><=	while (t < cap) {
+src/scheduler.cyr	>->>=	if (d > disk) { disk = d; }
+src/scheduler.cyr	>->>=	if (m > mem) { mem = m; }
 src/scheduler.cyr	>->>=	if (n > 128) { n = 128; }
+src/scheduler.cyr	delete-stmt	knowing = 1;
 src/scheduler.cyr	delete-stmt	vec_sort_by(out, &_placement_cmp);
+src/scheduler.cyr	return 0->1	if (count >= _KNOWN_MOST) { return 0; }
 src/scheduler.cyr	return 0->1	if (stale == 0) { return 0; }
 src/scheduler.cyr	return 0->1	if (was == node) { return 0; }
+src/scheduler.cyr	return 0->1	return 0;
+src/scheduler.cyr	return 0->1	return 0;
 src/scheduler.cyr	return 0->1	return 0;
 src/scheduler.cyr	return 0->1	return 0;
 src/scheduler.cyr	return 0->1	return 0;
