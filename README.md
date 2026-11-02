@@ -3,9 +3,9 @@
 Task scheduler for AGNOS — real cron scheduling with **resource-aware,
 accelerator-conscious** task placement. Cyrius port of the original Rust library.
 
-- **Language**: Cyrius (toolchain 6.7.18) · **License**: GPL-3.0-only
+- **Language**: Cyrius (toolchain 6.7.18, floor 6.7.10) · **License**: GPL-3.0-only
 - **Consumers**: daimon (task scheduling), kavach (sandboxed execution), stiva (scheduled containers)
-- **Status**: **v1.4.3** — port complete, P-1 and concurrency audited. Real cron
+- **Status**: **v1.4.4** — port complete, P-1 and concurrency audited. Real cron
   (Vixie DOM/DOW), ai-hwaccel placement, JSON snapshot/restore, deterministic
   scheduling, fail-closed restore, conserved node capacity. Downstream consumers
   kavach, daimon and stiva are integrated.
@@ -36,7 +36,7 @@ accelerator-conscious** task placement. Cyrius port of the original Rust library
 cyrius deps                          # resolve stdlib + ai-hwaccel into lib/
 cyrius build src/main.cyr build/samay
 ./build/samay                        # runnable demo
-cyrius test  tests/samay.tcyr        # 1224/1224 assertions
+cyrius test  tests/samay.tcyr        # 1232/1232 assertions
 cyrius bench tests/samay.bcyr
 ```
 
@@ -47,9 +47,11 @@ Consumers declare the dep and include the committed bundle:
 ```toml
 [deps.samay]
 git = "https://github.com/MacCracken/samay.git"
-tag = "1.4.3"
+tag = "1.4.4"
 modules = ["dist/samay.cyr"]
 ```
+
+samay needs cyrius 6.7.10 or later at its pinned deps, bayan 1.11.1 and ai-hwaccel 2.5.6.
 
 Then call the API — e.g. register an accelerator node, schedule a GPU job, and a
 weekday cron with catch-up:
@@ -96,7 +98,10 @@ yields `decisions=1`.
 If you store `last_fired` yourself, read it back from the entries after a check. A burst past
 the budget is held with its old watermark, and writing `now` over that deletes what it owed.
 
-See `src/main.cyr` for a worked demo and `tests/samay.tcyr` for the full API in use.
+See [`docs/examples/`](docs/examples/) for runnable examples, `src/main.cyr` for a worked demo, and
+`tests/samay.tcyr` for the full API in use. Coming from 1.1.x? Read the
+[migration note](docs/guides/migrating-to-1.4.md): accelerator tasks that used to share a device now
+queue.
 
 ## Thread safety
 
@@ -118,5 +123,5 @@ in cyrius 6.5.37, so the function now does nothing and stays only because it is 
 
 ## Documentation
 
-- [Architecture overview](docs/architecture/overview.md) · [ADRs](docs/adr/) · [Getting started](docs/guides/getting-started.md)
+- [Architecture overview](docs/architecture/overview.md) · [ADRs](docs/adr/) · [Getting started](docs/guides/getting-started.md) · [Migrating to 1.4](docs/guides/migrating-to-1.4.md)
 - [Roadmap](docs/development/roadmap.md) · [State](docs/development/state.md) · [Benchmarks](docs/benchmarks.md)

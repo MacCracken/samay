@@ -2831,6 +2831,20 @@ fn test_det_schedule_pending() {
     return 0;
 }
 
+# `n` nodes named `prefix`0, `prefix`1, ..., half full but for node `free`; -1 leaves them all
+# idle. Enough that the table's order, which changes per process, cannot land on the answer.
+fn _best_fit_among(prefix, n, free) {
+    var s = task_scheduler_new();
+    var i = 0;
+    while (i < n) {
+        var node = make_node(str_cstr(_numbered(prefix, i)), f64_from(8), 8192);
+        if (free != 0 - 1 && i != free) { node_capacity_reserve(node, make_req(f64_from(4), 1)); }
+        task_scheduler_register_node(s, node);
+        i = i + 1;
+    }
+    return _best_fit_node(TaskScheduler_nodes(s), make_req(f64_from(1), 1));
+}
+
 # best-fit tie: one task, two equal-utilization nodes -> lowest node_id, both orders.
 fn test_det_best_fit_tie() {
     test_group("det_best_fit");
@@ -2846,6 +2860,11 @@ fn test_det_best_fit_tie() {
     var nb = SchedulingDecision_assigned_node(vec_get(task_scheduler_schedule_pending(b), 0));
     assert_eq(str_eq_cstr(na, "node-a"), 1, "tie -> node-a (order 1)");
     assert_eq(str_eq_cstr(nb, "node-a"), 1, "tie -> node-a (order 2)");
+    # Two nodes can pass with the tie-break gone, when the table happens to agree.
+    assert_eq(str_eq(_best_fit_among("a-", 32, 0 - 1), str_from("a-0")), 1, "32 equal nodes -> smallest id");
+    assert_eq(str_eq(_best_fit_among("b-", 32, 0 - 1), str_from("b-0")), 1, "and in another table order");
+    # An id only breaks a tie: a busier node never takes over from an emptier one.
+    assert_eq(str_eq(_best_fit_among("a-", 32, 9), str_from("a-9")), 1, "the emptiest beats every smaller id");
     return 0;
 }
 
@@ -5065,6 +5084,15 @@ fn test_restore_settles_capacity() {
     # Running, placed, and the reservation lost: it still occupies its node.
     var lost = _snap(_v1(_snap_task("a", TASK_RUNNING, 8, 0, "n")), _snap_node("8.0", 8192, 0));
     assert_eq(_cpu_milli(map_get(TaskScheduler_nodes(lost), str_from("n"))), 0, "its capacity is charged");
+    # Every such task, wherever the table put it.
+    var strays = vec_new();
+    var st = 0;
+    while (st < 32) {
+        vec_push(strays, _snap_task(str_cstr(_numbered("t-", st)), TASK_RUNNING, 0, 0, "n"));
+        st = st + 1;
+    }
+    var lost_all = _snap(strays, _snap_node("8.0", 8192, 0));
+    assert_eq(NodeCapacity_running_tasks(map_get(TaskScheduler_nodes(lost_all), str_from("n"))), 32, "all of them are charged");
 
     # A finished task not yet reconciled is charged until the next pass, whatever the
     # node says, so it cannot credit back what was never taken.
@@ -5081,6 +5109,15 @@ fn test_restore_settles_capacity() {
     # Holds on either side of a node, in id order, belong to no one else.
     var both = _snap(_v2(_snap_task("a", TASK_RUNNING, 1, "a-node", "a-node"), _snap_task("b", TASK_RUNNING, 1, "z-node", "z-node")), _snap_node("8.0", 8192, 0));
     assert_eq(_cpu_milli(map_get(TaskScheduler_nodes(both), str_from("n"))), 8000, "neighbours in sort order are not picked up");
+
+    # Several in a row on a missing node must not skip past the real one that follows.
+    var ghosts = vec_new();
+    vec_push(ghosts, _snap_task("a", TASK_RUNNING, 1, "a-gone", "a-gone"));
+    vec_push(ghosts, _snap_task("b", TASK_RUNNING, 1, "b-gone", "b-gone"));
+    vec_push(ghosts, _snap_task("c", TASK_RUNNING, 1, "c-gone", "c-gone"));
+    vec_push(ghosts, _snap_task("d", TASK_RUNNING, 1, "n", "n"));
+    var g3 = _snap(ghosts, _snap_node("7.0", 8192, 1));
+    assert_eq(_cpu_milli(map_get(TaskScheduler_nodes(g3), str_from("n"))), 7000, "the real hold is found");
 
     # Over-committed, it floors at zero rather than going negative.
     var over = _snap(_v2(_snap_task("a", TASK_RUNNING, 6, "n", "n"), _snap_task("b", TASK_RUNNING, 6, "n", "n")), _snap_node("0.0", 8192, 2));
@@ -5118,6 +5155,12 @@ fn test_restore_keeps_a_good_snapshot_exact() {
     var bn = map_get(TaskScheduler_nodes(back), str_from("n"));
     assert_eq(NodeCapacity_available_cpu(bn) == NodeCapacity_available_cpu(node), 1, "to the bit");
     assert_eq(NodeCapacity_running_tasks(bn), 9, "and its count stands");
+    # Whether those sums differ rests on where uuids sort, so plant one that does: within
+    # rounding of what replay reaches, it keeps its own bits.
+    var near = _snap(_v1(_snap_task("a", TASK_RUNNING, 1, "n", "n")), _snap_node("6.99999999999", 8192, 1));
+    var nn = map_get(TaskScheduler_nodes(near), str_from("n"));
+    assert_eq(f64_eq(NodeCapacity_available_cpu(nn), f64_from(7)), 0, "a sum within rounding is not replaced");
+    assert_eq(f64_lt(f64_sub(f64_from(7), NodeCapacity_available_cpu(nn)), f64_div(f64_from(1), f64_from(1000000))), 1, "nor rebuilt");
     return 0;
 }
 
@@ -5548,32 +5591,45 @@ fn test_restore_replays_in_placement_order() {
     return 0;
 }
 
+# `n` running tasks of one priority filling a node, created at 100, 101, ...
+fn _tied_running(n) {
+    var s = task_scheduler_new();
+    task_scheduler_register_node(s, make_node("n", f64_from(n), 8192));
+    var i = 0;
+    while (i < n) {
+        task_scheduler_submit_task(s, _det_task(str_cstr(_numbered("t-", i)), 2, 100 + i));
+        i = i + 1;
+    }
+    var placed = task_scheduler_schedule_pending(s);
+    i = 0;
+    while (i < n) {
+        scheduled_task_transition(task_scheduler_get_task(s, SchedulingDecision_task_id(vec_get(placed, i))), TASK_RUNNING);
+        i = i + 1;
+    }
+    return s;
+}
+
 fn test_preempt_tie_breaks() {
     test_group("preempt_tie_breaks");
-    # Equal priority: the newest goes, then the smallest id.
-    var s = task_scheduler_new();
-    task_scheduler_register_node(s, make_node("n", f64_from(2), 8192));
-    var old = _det_task("old", 2, 100);
-    var young = _det_task("young", 2, 200);
-    task_scheduler_submit_task(s, old);
-    task_scheduler_submit_task(s, young);
-    task_scheduler_schedule_pending(s);
-    scheduled_task_transition(old, TASK_RUNNING);
-    scheduled_task_transition(young, TASK_RUNNING);
-    var act = task_scheduler_preempt_if_needed(s, make_task("hi", 10));
-    assert_eq(str_eq(PreemptionAction_preempted_task_id(act), str_from("young")), 1, "the newest of equals");
+    # Equal priority: the newest goes, then the smallest id. Enough tasks that the
+    # table's order, which changes per process, cannot land on the answer by luck.
+    var act = task_scheduler_preempt_if_needed(_tied_running(32), make_task("hi", 10));
+    assert_eq(str_eq(PreemptionAction_preempted_task_id(act), str_from("t-31")), 1, "the newest of equals");
 
-    var s2 = task_scheduler_new();
-    task_scheduler_register_node(s2, make_node("n", f64_from(2), 8192));
-    var low = _det_task("low", 1, 200);
-    var mid = _det_task("mid", 3, 100);
-    task_scheduler_submit_task(s2, low);
-    task_scheduler_submit_task(s2, mid);
-    task_scheduler_schedule_pending(s2);
-    scheduled_task_transition(low, TASK_RUNNING);
-    scheduled_task_transition(mid, TASK_RUNNING);
+    var ids = _tied_running(32);
+    var all = map_values(TaskScheduler_tasks(ids));
+    var i = 0;
+    while (i < vec_len(all)) {
+        ScheduledTask_set_created_at(vec_get(all, i), 7);
+        i = i + 1;
+    }
+    var a3 = task_scheduler_preempt_if_needed(ids, make_task("hi", 10));
+    assert_eq(str_eq(PreemptionAction_preempted_task_id(a3), str_from("t-0")), 1, "then the smallest id");
+
+    var s2 = _tied_running(32);
+    ScheduledTask_set_priority(task_scheduler_get_task(s2, str_from("t-5")), 1);
     var a2 = task_scheduler_preempt_if_needed(s2, make_task("hi", 10));
-    assert_eq(str_eq(PreemptionAction_preempted_task_id(a2), str_from("low")), 1, "the lowest priority first");
+    assert_eq(str_eq(PreemptionAction_preempted_task_id(a2), str_from("t-5")), 1, "the lowest priority comes first");
 
     # A running task with no reservation, or on a node that has gone, frees nothing.
     var s3 = task_scheduler_new();

@@ -6,6 +6,9 @@ license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/samay"
 language = "cyrius"
 cyrius = "6.7.18"
+# The oldest toolchain this builds and passes on at the deps pinned below: the
+# bayan and ai-hwaccel pins need 6.7.10. CI checks it (scripts/check-floor.sh).
+cyrius_floor = "6.7.10"
 
 [build]
 entry = "src/main.cyr"
@@ -30,8 +33,8 @@ modules = [
 ]
 
 # ── Dependencies ─────────────────────────────────────────────────
-# Cyrius stdlib modules vendored into lib/ by `cyrius lib sync` (NOT
-# `cyrius deps` — that resolves [deps.NAME] git deps only). lib/ is
+# Cyrius stdlib modules, vendored into lib/ by `cyrius deps` along with the
+# [deps.NAME] git deps. It works from an empty lib/, and lib/ is
 # committed, not gitignored. The set is the union of what samay's own src
 # needs (chrono/random/result/hashmap/bayan/…) and what the ai-hwaccel
 # dist bundle forward-references (sakshi/thread/process/fs/… — its own

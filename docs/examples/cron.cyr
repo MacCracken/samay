@@ -1,0 +1,48 @@
+# cron.cyr: what each missed-schedule policy does after three hours of downtime.
+#
+#   cyrius run docs/examples/cron.cyr
+#
+# check_due_at takes the clock as an argument, so this is deterministic. CRON_CATCHUP
+# fires every occurrence it missed, and CRON_SKIP fires once and logs the rest. Exits
+# non-zero if that stops being true, and CI runs it.
+
+include "src/lib.cyr"
+
+var MINUTE = 60000000000;
+
+fn _show(label, n): i64 {
+    syscall(1, 1, label, strlen(label));
+    print_num(n);
+    syscall(1, 1, "\n", 1);
+    return 0;
+}
+
+fn _hourly(policy): i64 {
+    var c = cron_scheduler_new();
+    var tmpl = cron_task_template_new(str_from("backup"), str_from("hourly backup"), str_from("agent"), 5,
+      resource_req_default());
+    cron_scheduler_add(c, str_from("backup"), str_from("0 * * * *"), tmpl, 1, policy);
+    return c;
+}
+
+# Fires at 12:00, then sees nothing until 15:30.
+fn _after_downtime(policy): i64 {
+    var noon = 1798804800000000000;     # 2027-01-01 12:00 UTC
+    var c = _hourly(policy);
+    cron_scheduler_check_due_at(c, noon);
+    return vec_len(cron_scheduler_check_due_at(c, noon + 210 * MINUTE));
+}
+
+fn main(): i64 {
+    alloc_init();
+    var catchup = _after_downtime(CRON_CATCHUP);
+    var skip = _after_downtime(CRON_SKIP);
+    _show("catch-up fired: ", catchup);
+    _show("skip fired:     ", skip);
+    if (catchup != 3) { return 1; }
+    if (skip != 1) { return 1; }
+    return 0;
+}
+
+var r = main();
+syscall(60, r);

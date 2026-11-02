@@ -1,0 +1,51 @@
+# placement.cyr: place tasks on a GPU node, and see a device held until it is free.
+#
+#   cyrius run docs/examples/placement.cyr
+#
+# One GPU takes one task. The second waits in the queue, logged, and is placed once the
+# first finishes. Exits non-zero if that stops being true, and CI runs it.
+
+include "src/lib.cyr"
+
+fn _show(label, n): i64 {
+    syscall(1, 1, label, strlen(label));
+    print_num(n);
+    syscall(1, 1, "\n", 1);
+    return 0;
+}
+
+fn _gpu_task(name): i64 {
+    return scheduled_task_new(str_from(name), str_from("train a model"), str_from("agent"), 5,
+      resource_req_new(f64_from(2), 4096, REQ_GPU, 0, 0, 1024));
+}
+
+fn main(): i64 {
+    alloc_init();
+    var s = task_scheduler_new();
+
+    # 16 cores, 64 GB and a single 16 GB GPU.
+    task_scheduler_register_node(s, node_capacity_add_accel(
+        node_capacity_new(str_from("gpu-1"), f64_from(16), 65536, 102400, 0),
+        profile_cuda(0, 17179869184)));
+
+    var first = _gpu_task("first");
+    task_scheduler_submit_task(s, first);
+    task_scheduler_submit_task(s, _gpu_task("second"));
+
+    # Plenty of CPU and memory for both, but only one device.
+    var placed = vec_len(task_scheduler_schedule_pending(s));
+    _show("placed with the GPU free: ", placed);
+
+    # Finishing returns the device along with the CPU and memory.
+    scheduled_task_transition(first, TASK_RUNNING);
+    task_scheduler_complete_task(s, ScheduledTask_task_id(first), TASK_COMPLETED);
+    var next = vec_len(task_scheduler_schedule_pending(s));
+    _show("placed once it came free: ", next);
+
+    if (placed != 1) { return 1; }
+    if (next != 1) { return 1; }
+    return 0;
+}
+
+var r = main();
+syscall(60, r);

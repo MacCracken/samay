@@ -98,9 +98,9 @@ nothing since cyrius 6.6.0, so that argument has gone. The decision stands on th
 `Err` already have meanings, so an out-of-memory host would be reported as a bad record or a
 malformed expression.
 
-Adding an OOM `Err` arm to `task_scheduler_submit_task` would also be actively
-unsafe today: daimon reads the payload with no tag check, so an `Err(1)` would be
-read as a `Str` and fault — after daimon had already emitted HTTP 201.
+Adding an OOM `Err` arm to `task_scheduler_submit_task` was also actively unsafe then:
+daimon read the payload with no tag check, so an `Err(1)` would have been read as a `Str`
+and faulted, after daimon had already emitted HTTP 201. daimon checks the tag now.
 
 ## Consequences
 

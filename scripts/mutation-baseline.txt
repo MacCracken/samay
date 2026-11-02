@@ -1,0 +1,149 @@
+src/cron.cyr	- 1->- 2	if (_cron_over_budget(fire_n, spent) == 1) { return 0 - 1; }
+src/cron.cyr	- 1->- 2	if (la < lb) { return 0 - 1; }
+src/cron.cyr	- 1->- 2	var per_day = 0 - 1;    # worked out once, and only if a whole day is in range
+src/cron.cyr	<-><=	if (fire_n < 2) { return 0; }
+src/cron.cyr	<-><=	if (per_day < 0) { per_day = _cron_day_total(expr); }
+src/cron.cyr	<-><=	if (priority < 1) { priority = 1; }
+src/cron.cyr	<-><=	while (slot < cap) {
+src/cron.cyr	>->>=	if (due > 0) { _cron_log_outcome(e, due, skip, clamped, now_secs); }
+src/cron.cyr	>->>=	if (fire_n > 1) { fire_n = 1; }
+src/cron.cyr	>->>=	if (last > end) { last = end; }
+src/cron.cyr	>->>=	if (n > 0) {
+src/cron.cyr	>->>=	if (n > 64) { n = 64; }
+src/cron.cyr	>->>=	if (now_ns > CronEntry_last_fired(e)) { CronEntry_set_last_fired(e, now_ns); }
+src/cron.cyr	>->>=	if (priority > 10) { priority = 10; }
+src/cron.cyr	>->>=	} elif (fire_n > CRON_CATCHUP_CAP) {
+src/cron.cyr	delete-stmt	CronEntry_set_last_fired(p, 0);
+src/cron.cyr	return 0->1	return 0;
+src/cron.cyr	return 0->1	return 0;
+src/cron.cyr	return 0->1	return 0;
+src/cron.cyr	return 0->1	return 0;
+src/cron.cyr	return 0->1	return 0;
+src/cron.cyr	return 0->1	return 0;
+src/cron.cyr	return 0->1	return 0;
+src/cron.cyr	return 0->1	return 0;
+src/cron.cyr	return 0->1	return 0;
+src/cron.cyr	return 0->1	return 0;
+src/cron.cyr	return 0->1	return 0;
+src/cron.cyr	return 0->1	return 0;
+src/cron.cyr	return 0->1	return 0;
+src/cron.cyr	return 0->1	return 0;
+src/cron.cyr	return 0->1	return 0;
+src/cronexpr.cyr	- 1->- 2	if (c < 48) { return 0 - 1; }
+src/cronexpr.cyr	- 1->- 2	if (c > 57) { return 0 - 1; }
+src/cronexpr.cyr	- 1->- 2	if (end - start != 3) { return 0 - 1; }
+src/cronexpr.cyr	- 1->- 2	if (end - start > 9) { return 0 - 1; }   # reject overlong fields (overflow guard)
+src/cronexpr.cyr	- 1->- 2	if (end <= start) { return 0 - 1; }
+src/cronexpr.cyr	- 1->- 2	if (start >= end) { return 0 - 1; }
+src/cronexpr.cyr	- 1->- 2	if (tmask == 0 - 1) { return 0 - 1; }
+src/cronexpr.cyr	- 1->- 2	return 0 - 1;
+src/cronexpr.cyr	- 1->- 2	return 0 - 1;
+src/cronexpr.cyr	- 1->- 2	return 0 - 1;
+src/cronexpr.cyr	<-><=	if (tend < 0) { tend = end; }
+src/cronexpr.cyr	<-><=	while (i < end) {
+src/cronexpr.cyr	<-><=	while (i < end) {
+src/cronexpr.cyr	<-><=	while (i < len) {
+src/cronexpr.cyr	<-><=	while (i < len) {
+src/cronexpr.cyr	<-><=	while (k < count) {
+src/cronexpr.cyr	<-><=	while (t < limit) {
+src/cronexpr.cyr	<-><=	while (t < next_day) {
+src/cronexpr.cyr	<=-><	if (c >= 97) { if (c <= 122) { return c - 32; } }
+src/cronexpr.cyr	<=-><	if (end <= start) { return 0 - 1; }
+src/cronexpr.cyr	<=-><	if (end <= start) { return 0 - 1; }
+src/cronexpr.cyr	>->>=	if (len > 0) {
+src/cronexpr.cyr	>->>=	while (len > 0) {
+src/cronexpr.cyr	>->>=	while (len > 0) {
+src/cronexpr.cyr	>=->>	if (dash >= 0) {
+src/cronexpr.cyr	>=->>	if (i >= len) { break; }
+src/cronexpr.cyr	>=->>	if (nf >= 5) { return Err(1); }
+src/cronexpr.cyr	>=->>	if (slash >= 0) {
+src/cronexpr.cyr	>=->>	if (slash >= 0) { rhi = hi; } else { rhi = n; }
+src/cronexpr.cyr	delete-stmt	rhi = hi;
+src/cronexpr.cyr	delete-stmt	rlo = lo;
+src/cronexpr.cyr	delete-stmt	store64(star_out, 0);
+src/json.cyr	<-><=	if (st < TASK_QUEUED) { st = TASK_QUEUED; }
+src/json.cyr	<-><=	if (x < 0) { return 0; }
+src/json.cyr	<-><=	if (x < lo) { return dflt; }
+src/json.cyr	<-><=	if (x < lo) { return lo; }
+src/json.cyr	>->>=	if (adisk > tdisk) { adisk = tdisk; }
+src/json.cyr	>->>=	if (amem > tmem) { amem = tmem; }
+src/json.cyr	>->>=	if (st > TASK_PREEMPTED) { st = TASK_QUEUED; }
+src/json.cyr	>->>=	if (x > hi) { return dflt; }
+src/json.cyr	>->>=	if (x > hi) { return hi; }
+src/json.cyr	delete-stmt	_log_profile_skip(NodeCapacity_node_id(node));
+src/json.cyr	return 0->1	if (n == 0) { return 0; }
+src/json.cyr	return 0->1	return 0;
+src/json.cyr	return 0->1	return 0;
+src/json.cyr	return 0->1	return 0;
+src/json.cyr	return 0->1	return 0;
+src/scheduler.cyr	- 1->- 2	if (ca < cb) { return 0 - 1; }
+src/scheduler.cyr	- 1->- 2	if (pa > pb) { return 0 - 1; }
+src/scheduler.cyr	- 1->- 2	if (sa < sb) { return 0 - 1; }
+src/scheduler.cyr	<-><=	if (ms < 0) { ms = 0; }
+src/scheduler.cyr	<-><=	if (wms < 0) { wms = 0; }
+src/scheduler.cyr	<-><=	while (i < cap) {
+src/scheduler.cyr	<-><=	while (i < cap) {
+src/scheduler.cyr	<-><=	while (i < cap) {
+src/scheduler.cyr	<-><=	while (i < cap) {
+src/scheduler.cyr	<-><=	while (t < cap) {
+src/scheduler.cyr	>->>=	if (n > 128) { n = 128; }
+src/scheduler.cyr	delete-stmt	vec_sort_by(out, &_placement_cmp);
+src/scheduler.cyr	return 0->1	if (stale == 0) { return 0; }
+src/scheduler.cyr	return 0->1	if (was == 0) { return 0; }
+src/scheduler.cyr	return 0->1	if (was == node) { return 0; }
+src/scheduler.cyr	return 0->1	return 0;
+src/scheduler.cyr	return 0->1	return 0;
+src/scheduler.cyr	return 0->1	return 0;
+src/scheduler.cyr	return 0->1	return 0;
+src/scheduler.cyr	return 0->1	return 0;
+src/scheduler.cyr	return 0->1	return 0;
+src/scheduler.cyr	return 0->1	return 0;
+src/scheduler.cyr	return 0->1	return 0;
+src/training.cyr	>->>=	if (max > headroom) {
+src/training.cyr	delete-stmt	ScheduledTask_set_deadline(task, 0);
+src/training.cyr	return 0->1	return 0;
+src/types.cyr	- 1->- 2	if (ca < cb) { return 0 - 1; }
+src/types.cyr	- 1->- 2	return 0 - 1;
+src/types.cyr	<-><=	if (disk < 0) { disk = 0; }
+src/types.cyr	<-><=	if (lb < n) { n = lb; }
+src/types.cyr	<-><=	if (mem < 0) { mem = 0; }
+src/types.cyr	<-><=	if (prio < 1) { prio = 1; }
+src/types.cyr	<-><=	if (req_chips < 1) { return 1; }
+src/types.cyr	<-><=	if (rt < 0) { rt = 0; }
+src/types.cyr	<-><=	if (rt < 9223372036854775807) { NodeCapacity_set_running_tasks(node, rt + 1); }
+src/types.cyr	<-><=	if (x < 0) { return 0; }
+src/types.cyr	<-><=	while (i < n) {
+src/types.cyr	<=-><	if (p >= 1) { if (p <= 3) { return PRIO_NORMAL; } }
+src/types.cyr	>->>=	if (prio > 10) { prio = 10; }
+src/types.cyr	>->>=	if (req_chips > chips) { return chips; }
+src/types.cyr	>=->>	if (held >= total - available) { return total; }
+src/types.cyr	>=->>	if (p >= 1) { if (p <= 3) { return PRIO_NORMAL; } }
+src/types.cyr	delete-stmt	NodeCapacity_set_running_tasks(p, 0);
+src/types.cyr	delete-stmt	ScheduledTask_set_assigned_node(p, 0);
+src/types.cyr	delete-stmt	ScheduledTask_set_completed_at(p, 0);
+src/types.cyr	delete-stmt	ScheduledTask_set_deadline(p, 0);
+src/types.cyr	delete-stmt	ScheduledTask_set_fail_reason(p, 0);
+src/types.cyr	delete-stmt	ScheduledTask_set_requested_node(p, 0);
+src/types.cyr	delete-stmt	ScheduledTask_set_reserved_on(p, 0);
+src/types.cyr	delete-stmt	ScheduledTask_set_scheduled_at(p, 0);
+src/types.cyr	delete-stmt	ScheduledTask_set_started_at(p, 0);
+src/types.cyr	delete-stmt	ScheduledTask_set_status(p, TASK_QUEUED);
+src/types.cyr	delete-stmt	SchedulerStats_set_average_run_time_ms(p, 0);
+src/types.cyr	delete-stmt	SchedulerStats_set_average_wait_time_ms(p, 0);
+src/types.cyr	delete-stmt	SchedulerStats_set_completed(p, 0);
+src/types.cyr	delete-stmt	SchedulerStats_set_failed(p, 0);
+src/types.cyr	delete-stmt	SchedulerStats_set_queued(p, 0);
+src/types.cyr	delete-stmt	SchedulerStats_set_running(p, 0);
+src/types.cyr	delete-stmt	SchedulerStats_set_total_tasks(p, 0);
+src/types.cyr	delete-stmt	cpu = _f64_min(cpu, NodeCapacity_total_cpu(node));
+src/types.cyr	return 0->1	if (ResourceReq_accel_req(req) == REQ_NONE) { return 0; }
+src/types.cyr	return 0->1	if (ar == REQ_NONE) { return 0; }
+src/types.cyr	return 0->1	if (i < 0) { return 0; }
+src/types.cyr	return 0->1	return 0;
+src/types.cyr	return 0->1	return 0;
+src/types.cyr	return 0->1	return 0;
+src/types.cyr	return 0->1	return 0;
+src/types.cyr	return 0->1	return 0;
+src/types.cyr	return 0->1	return 0;
+src/types.cyr	return 0->1	return 0;
+src/uuid.cyr	delete-stmt	store8(out + op, 0);

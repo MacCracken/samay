@@ -65,12 +65,15 @@ cyrius test                              # run tests/*.tcyr
 **`fmt` and `lint` take a FILE argument**, so loop:
 
 ```sh
-for f in src/*.cyr tests/*.tcyr tests/*.bcyr tests/*.fcyr; do cyrius fmt "$f" --check; done
+for f in src/*.cyr tests/*.tcyr tests/*.bcyr tests/*.fcyr docs/examples/*.cyr; do cyrius fmt "$f" --check; done
 for f in src/*.cyr; do cyrius lint "$f"; done   # 0 warnings AND 0 untracked deferrals
 cyrius test                                     # all pass
 cyrius test --bounds tests/samay.tcyr           # all pass, bounds-checked
 cyrius test --aarch64 tests/samay.tcyr          # all pass, under qemu
 cyrius fuzz tests/samay.fcyr                    # fuzz: ok
+./scripts/check-readme.sh                       # the README example compiles and gives decisions=1
+./scripts/check-floor.sh                        # builds and passes on cyrius_floor
+for f in docs/examples/*.cyr; do cyrius run "$f"; done   # each exits 0
 cyrius coverage --min 100                       # every public fn named in tests/*.tcyr
 cyrius bench tests/samay.bcyr                   # every row reports
 cyrius distlib                                  # regenerate dist/samay.cyr
@@ -82,8 +85,10 @@ a longer name that contains it. CI adds a stricter check: every public fn in
 `[lib].modules` must be *called* (`name(` outside a comment) by a `.tcyr`. A new public
 function ships with a test that calls it.
 
-Then: compile and run the README example, and scan new public symbols against the vendored
-deps for collisions. CI does not cover every line above yet; the roadmap says which.
+Then: scan new public symbols against the vendored deps for collisions. CI runs everything
+above except the collision scan. If `src/` or the tests changed, run `python3 scripts/mutate.py`
+too and read any new survivor. It takes about 13 minutes on 12 workers, so it gates a release, not
+a push.
 
 ## Rules (Hard Constraints)
 
@@ -98,6 +103,7 @@ deps for collisions. CI does not cover every line above yet; the roadmap says wh
 - [`docs/adr/`](docs/adr/) — Architecture Decision Records (*why X over Y?*)
 - [`docs/architecture/`](docs/architecture/) — Non-obvious constraints
 - [`docs/guides/`](docs/guides/) — Task-oriented how-tos
+- [`docs/examples/`](docs/examples/) — Runnable examples
 - [`docs/benchmarks.md`](docs/benchmarks.md) — Measured numbers
 - [`docs/audit/`](docs/audit/) — Audit reports
 - [`docs/development/state.md`](docs/development/state.md) — Live state

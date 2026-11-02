@@ -1,6 +1,6 @@
 # samay — Roadmap
 
-> **Last refreshed**: 2026-11-01 (v1.4.3)
+> **Last refreshed**: 2026-11-01 (v1.4.4)
 >
 > **Forward-looking only.** Nothing shipped belongs here — per-release detail
 > lives in [`../../CHANGELOG.md`](../../CHANGELOG.md) (complete from 0.1.0), the
@@ -11,8 +11,8 @@
 > 2.0.0. The only unpinned items wait on an event outside this repo:
 > see [Event-gated](#event-gated--no-pin-by-design).
 
-> **Current**: **v1.4.3**, cyrius pin **6.7.18**, deps ai-hwaccel **2.5.6** +
-> bayan-json **1.11.1**. Gates green: **1,224 assertions**, **11/11 benchmarks**,
+> **Current**: **v1.4.4**, cyrius pin **6.7.18**, floor **6.7.10**, deps ai-hwaccel **2.5.6** +
+> bayan-json **1.11.1**. Gates green: **1,232 assertions**, **11/11 benchmarks**,
 > coverage **82/82** public functions (each called by a test; 6.6.14 stopped counting `main`), lint 0-warn / 0
 > untracked deferrals, fmt clean, `dist/` in sync (3,353 lines), 0 symbol collisions
 > against the vendored deps. `src/` is 9 modules. The 1,479-line Rust oracle was
@@ -22,8 +22,7 @@
 
 | Version | Theme | Risk | Gate to entry |
 |---|---|---|---|
-| **1.4.4** | Standing gates, toolchain floor, migration note | low | none: this is next |
-| **1.4.5** | Limits that actually limit | medium | peak memory measured for each limit |
+| **1.4.5** | Limits that actually limit | medium | peak memory measured for each limit: this is next |
 | **1.4.6** | A placement pass below O(pending × nodes) | medium | the 100,000 × 100,000 baseline in `benchmarks.md` |
 | **1.5.0** | Accelerator requests: shared and multi-device | high | consumers on 1.4.x, and an ADR on the unit of sharing |
 | **1.6.0** | Preemption: placed tasks and several victims | medium | an ADR on the new return shape |
@@ -31,36 +30,12 @@
 | **1.8.0** | Accounting: stats counters, lifetime totals, failure reasons | low | an ADR on lifetime totals as wire state |
 | **2.0.0** | Removals: `samay_init`, stats meanings, whatever 1.7.0 rejected | high | every consumer on 1.8.x |
 
-The order is by who it helps. 1.4.4 stops the last sweep's work rotting and lets consumers move.
-1.4.5 and 1.4.6 finish the repairs. New features wait until consumers can receive them, because
-nothing from 1.2 onward has reached one yet.
+The order is by who it helps. 1.4.5 and 1.4.6 finish the repairs. New features wait until consumers
+can receive them, because nothing from 1.2 onward has reached one yet.
 
 ---
 
 ## 1.4.x — remaining repairs
-
-### 1.4.4 — standing gates, toolchain floor, migration note
-
-No behaviour change. Each of these ran by hand and can rot the way the benchmarks, the fuzz stub and
-the README example did.
-
-- [ ] **CI runs the fuzz harness.** It has been real since 1.4.3, and a harness nobody runs is how the
-  last one stayed a stub.
-- [ ] **CI runs the suite on aarch64 and in bounds-checked mode.** Both pass by hand today.
-- [ ] **CI compiles and runs the README example.** It stopped compiling for several releases while
-  claiming to run before each one. Declined as "not now" on 2026-11-01; this is its pin.
-- [ ] **Whole-source mutation as a release check.** Commit the script, and run it at release rather
-  than on every push: a run takes about 20 minutes. It found more than any audit before it.
-- [ ] **State the real toolchain floor.** bayan 1.11.1 does not parse on cyrius 6.6.10, so the floor
-  rose during 1.2.x and nothing records it. Find it by building, put it in the README, and have CI
-  build on it.
-- [ ] **Migration note.** `docs/guides/migrating-to-1.4.md`, covering what changed under consumers:
-  accelerator tasks queue instead of sharing, `preempt_if_needed` returns less, `submit_task` refuses
-  a duplicate id, and a restored node can be rebuilt from its tasks.
-- [ ] **Tidying.** `docs/examples/` is empty: fill it from `src/main.cyr` or delete it. Point the
-  kavach and daimon version stamps in `overview.md` and `state.md` at the real pins. Correct the
-  vendoring comment in `cyrius.cyml`. Resolve `lib/hashmap_fast.cyr`, which is outside the declared
-  footprint and is noted on every resolve.
 
 ### 1.4.5 — limits that actually limit
 
@@ -93,8 +68,8 @@ chosen from numbers.
 ## Consumer adoption — gate to 1.5.0
 
 Not a samay release. **Nothing from 1.2 to 1.4 has reached a consumer**, and new requirement fields
-are no use to a consumer that cannot build them. Needs the toolchain floor and migration note from
-1.4.4.
+are no use to a consumer that cannot build them. The toolchain floor and the
+[migration note](../guides/migrating-to-1.4.md) are in place, so this can start at any time.
 
 - [ ] **kavach** moves up from 1.1.6.
 - [ ] **daimon** moves up from 1.1.3. Its node route reaches the re-registering fix in 1.4.3.

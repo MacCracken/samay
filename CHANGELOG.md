@@ -4,6 +4,103 @@ All notable changes to Samay are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.4] — 2026-11-01
+
+**Standing gates: what was checked by hand now fails the build, and `src/` did not change.** CI runs
+the fuzz harness, the suite on aarch64 and in bounds-checked mode, the README example, the examples,
+and a build on the toolchain floor, which is now known: **cyrius 6.7.10**. Whole-source mutation gates
+a release. Every gate was shown to fail on a planted defect. **1,232 tests**, up 8. The toolchain, deps
+and wire format are unchanged, and the bundle differs from 1.4.3 only in its version line.
+
+### Added — CI ([`ci.yml`](.github/workflows/ci.yml))
+
+A check that has never failed proves nothing, so each was run against a defect put there on purpose.
+
+| Gate | Planted defect | Result |
+|---|---|---|
+| `cyrius fuzz tests/samay.fcyr` | a release that overflows | exit 1, "disk below zero at round 1081" |
+| | no settling on restore | exit 1, "idle node short of disk at round 21" |
+| | a crash | exit 1 |
+| `cyrius test --bounds` | a write past a fixed array | exit 134 with a message. Without the flag it writes anyway |
+| `cyrius test --aarch64` | a failing assertion | exit 1, from a real ARM ELF under qemu |
+| `scripts/check-readme.sh` | a compile break, a wrong outcome | exit 1 for each |
+| `docs/examples/*.cyr` | a wrong expectation | exit 1 |
+| `scripts/check-floor.sh` | cyrius 6.7.9 | exit 1. 6.7.10 passes |
+| `scripts/mutate.py` | seven uuid assertions removed | exit 1, naming the survivors |
+
+The fmt loop now also covers `tests/*.fcyr` and `docs/examples/*.cyr`. The new jobs `aarch64` and
+`floor` read their versions from `cyrius.cyml`, so no version lives in the YAML.
+
+### Added — a toolchain floor
+
+`cyrius.cyml` now has `cyrius_floor = "6.7.10"`, and the floor job builds and tests on it. The figure
+came from building every toolchain against the pinned deps, from an empty `lib/`:
+
+| cyrius | Result |
+|---|---|
+| 6.7.10, 6.7.11, 6.7.12, 6.7.18 | builds, and the suite passes |
+| 6.7.5 to 6.7.9 | `str_builder_add_json_cstr` undefined, reachable from the library. 6.7.8 and below also lack `f64_parse_n` |
+| 6.7.3, 6.7.4 | `lib/bayan-json.cyr:1227:10: expected '=', got '{'` |
+| 6.7.0 and below | `lib/bayan-json.cyr:535:7: expected '=', got identifier 'JSON_PAIR_SIZE'` |
+
+The floor is for the pinned deps. `dist/samay.cyr` alone still compiles against a consumer's older
+deps, as daimon's does on 6.6.6, but that is not gated.
+
+### Added — whole-source mutation gates a release
+
+`scripts/mutate.py` breaks `src/` one line at a time and runs the suite on each.
+`scripts/mutation-baseline.txt` lists the survivors already read and accepted, and a survivor not on
+that list fails the [release workflow](.github/workflows/release.yml). It is too slow for every push,
+so `--file` runs one module in seconds to minutes. Of 1,184 mutants, 8 do not compile and 149
+survive, all read and accepted. Two full runs on different seeds found the same 149, taking about
+13 minutes each on 12 workers.
+
+A kill can depend on the per-process hash seed, and that cannot be pinned from outside `lib/`. So a
+survivor gets two more runs, one kill counts, and a kill that needed a retry is printed by name.
+
+### Fixed — four tests that passed by luck
+
+Comparing whole mutation runs found four mutants that came and went. Each was caught by a test
+resting on the hash seed or on where random uuids sorted, so the line it guarded was only sometimes
+guarded, and a baseline would have failed releases at random.
+
+| Mutant | Survived before | After | The gap |
+|---|---|---|---|
+| Preemption's priority `<` as `<=` | 1 of 2 | 0 of 12 | three tasks are few enough for table order to land on the answer |
+| Best-fit's tie-break `==` as `!=` | 2 of 16 | 0 of 16 | with two equal nodes, ADR-0004's tie-break could go and the table sometimes picked the same node |
+| `_settle_node` keeping a snapshot's own CPU bits, deleted | 8 of 20 | 0 of 20 | whether the sums differed rested on where uuids sorted |
+| `_settle_capacity` walking every other slot | 11 of 20 | 0 of 20 | one task with a lost reservation sat on an even slot half the time |
+
+Those tests now use 32 entries or a planted value. No mutant here found a bug in `src/`. Several
+ghost holds in a row gained a test too, which kills a skip-loop mutant that had survived 1.4.3.
+
+### Added — docs
+
+- **`docs/examples/placement.cyr` and `cron.cyr`** run under `cyrius run`, and exit non-zero if the
+  behaviour they show breaks.
+- **[`migrating-to-1.4.md`](docs/guides/migrating-to-1.4.md)** tells a consumer on 1.1.x what moved:
+  the steps to take first, accelerators queueing, each call that answers differently, what no longer
+  needs doing, and a note per consumer.
+
+### Removed
+
+- **`lib/hashmap_fast.cyr`**, and its lock line. Nothing used it and it was outside the declared
+  footprint. `cyrius deps` does not bring it back, and `cyrius lib sync` would.
+
+### Changed — tidying
+
+- `CLAUDE.md`'s gate list matches CI, and says when to run mutation by hand.
+- Stale kavach and daimon version stamps are gone from `overview.md` and `state.md`. ADR-0009's claim that daimon ignored the `Err` tag is now past tense.
+- The vendoring comment in `cyrius.cyml` names `cyrius deps`. CI's comment that a bare
+  `cyrius fmt --check` exits 0 is gone: the current toolchain exits 1 on a bare `fmt` or `lint`.
+
+### Not verified
+
+- **The new CI jobs have not run on a real runner.** Each step was run locally. `aarch64` depends on
+  `qemu-user` from apt, and `mutation` has only been timed locally.
+- **No consumer was rebuilt.** The bundle's code is unchanged, so this is the same answer as 1.4.3:
+  stiva's full suite cannot run on its pin, and kavach and daimon are still on 1.1.x.
+
 ## [1.4.3] — 2026-11-01
 
 **A P(-1) sweep, the first since 1.0.3: accelerators are now actually reserved, restore checks its

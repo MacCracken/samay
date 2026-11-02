@@ -5,6 +5,13 @@
 
 ## Version
 
+**1.4.4** — standing gates, and no change to `src/`. CI now runs the fuzz harness, the suite on aarch64
+and in bounds-checked mode, the README example, the examples, and a build on the toolchain floor,
+**cyrius 6.7.10**, found by building. Whole-source mutation gates a release. Each gate was shown to
+fail on a planted defect. `docs/examples/` holds two runnable examples, and
+[`migrating-to-1.4.md`](../guides/migrating-to-1.4.md) tells consumers what moved under them. 1,232
+assertions: comparing mutation runs found four tests that passed by luck, now closed.
+
 **1.4.3** — a P(-1) sweep. Accelerators are reserved ([ADR-0013](../adr/0013-accelerators-are-reserved.md)):
 through 1.4.2 one GPU went to four tasks. `preempt_if_needed` names a victim only if that places the
 task. Restore checks nodes against tasks, so a real 1.0.2 snapshot no longer strands capacity, and it
@@ -98,7 +105,7 @@ sweep).
 
 ## Tests
 
-- `tests/samay.tcyr` — **1224/1224 assertions passing**, on x86_64, aarch64 under qemu, and in bounds-checked mode (`cyrius test`), up from 296 in
+- `tests/samay.tcyr` — **1232/1232 assertions passing**, on x86_64, aarch64 under qemu, and in bounds-checked mode (`cyrius test`), up from 296 in
   v1.0.2. Includes the v1.0.3 additions: the capacity-conservation invariant (the
   assertion whose absence let ADR-0007's defect ship), a cron differential guard pinning
   the optimised matcher to an in-test reference implementation, back-compat snapshot
@@ -128,15 +135,18 @@ sweep).
   over 4,000 `ResourceReq` and `CronExpr` values must match the derive byte for byte, which is the
   only thing keeping the two writers of those shapes together. All 23 mutations are caught. v1.4.3
   was driven by whole-source mutation, with 151 of 1,176 surviving, all read. It adds tests for
-  accelerators, preemption, restore, stats, disk and every snapshot field.
+  accelerators, preemption, restore, stats, disk and every snapshot field. v1.4.4 closes four
+  tests that passed by luck, whose mutants came and went with the hash seed or where uuids sorted:
+  the preemption and best-fit ties, a restore keeping a snapshot's own bits, and a lost reservation.
+  Each now rests on 32 entries or a planted value, and each mutant dies on every run measured.
 - `tests/samay.fcyr` — restores mutated snapshots and drives each through a working life, checking
-  capacity invariants, with a pinned seed. `cyrius fuzz tests/samay.fcyr`. Not yet in CI.
+  capacity invariants, with a pinned seed. `cyrius fuzz tests/samay.fcyr`. CI runs it.
 - `tests/samay.bcyr` — 11 benchmarks, all green (see `docs/benchmarks.md`). Was dead
   (SIGSEGV) from v0.5.0 to v1.0.1: the `Str` migration left it passing bare cstring
   literals into `Str`-taking APIs. Now run by CI so it cannot rot silently again.
 - Gates: `cyrius fmt <file> --check` clean, `cyrius lint <file>` 0 warnings and 0
-  untracked deferrals, `cyrius distlib --check` in sync. **All four now run in CI** —
-  note `fmt`/`lint` take a file argument, so a bare `cyrius fmt --check` gates nothing.
+  untracked deferrals, `cyrius distlib --check` in sync. **All four run in CI.** `fmt` and `lint` take a file
+  argument, so CI loops over the files.
 - Coverage (v1.4.3): `cyrius coverage --min 100`, **82/82** (cyrius 6.6.14's tool no longer
   counts `src/main.cyr`'s `main`; 1.1.5 read 79/79 on 6.6.6), plus a strict CI check
   that every public function in `[lib].modules` is *called* by a test. The strict
@@ -165,17 +175,17 @@ sweep).
   sakshi, process, args, thread, assert, bench.
   (`math` left this list in 1.2.0, and samay calls nothing in it or in `slice`.
   `cyrius deps` vendors both from bayan-json's sidecar.) `cyrius deps` vendors all of it from an empty `lib/`.
-  `cyrius lib sync` also copies the unused `lib/hashmap_fast.cyr`; `cyrius deps` prints a note about
-  that file, and it stays in `lib/` and the lock.
+  `cyrius lib sync` also copies the unused `lib/hashmap_fast.cyr`, so do not run it here: 1.4.4 took
+  that file out of `lib/` and the lock.
 
 ## Consumers
 
-- **kavach 3.8.0** — integrated: sizes sandboxes from a samay `ResourceReq`
+- **kavach** — integrated: sizes sandboxes from a samay `ResourceReq`
   (`kavach/src/samay_bridge.cyr`), 436 assertions green against `dist/samay.cyr`.
-- **daimon 2.0.0** — integrated: deleted its duplicated `scheduler.cyr`/`cron.cyr` and
+- **daimon** — integrated: deleted its duplicated `scheduler.cyr`/`cron.cyr` and
   consumes samay as the single scheduler source of truth (api_sched rewired; 215 assertions).
   The migration surfaced + fixed the `uuid_v4`↔libro collision (samay 1.0.1).
-- Current pins, as of 1.4.0: kavach 3.13.2 → samay `1.1.6`, daimon 2.4.3 → `1.1.3`,
+- Current pins, as of 1.4.4: kavach 3.13.2 → samay `1.1.6`, daimon 2.4.3 → `1.1.3`,
   stiva 3.0.22 → `1.1.2`. daimon also sets `path = "../samay"`, so its local
   builds use this checkout, not the tag. The only samay JSON call among
   them is daimon's `SchedulingDecision_to_json`, which is emit-only. None of them
@@ -191,8 +201,7 @@ sweep).
 ## Next
 
 See [`roadmap.md`](roadmap.md), the single source for forward work, with every item pinned to a
-version. **1.4.4** is standing gates, the toolchain floor and a migration note; **1.4.5** makes the
-limits limit; **1.4.6** cuts the cost of a placement pass. Consumers move up next, then features run
+version. **1.4.5** makes the limits limit, and **1.4.6** cuts the cost of a placement pass. Consumers move up next, then features run
 from **1.5.0** to **1.8.0**, and removals wait for **2.0.0**.
 
 **Concurrency — audited in v1.0.4, see [ADR-0008](../adr/0008-threading-contract.md).**
@@ -207,7 +216,7 @@ was considered and not built — worth revisiting if any consumer adopts a threa
   reserved ([ADR-0013](../adr/0013-accelerators-are-reserved.md)), and it now has benchmark rows.
 - **Test correctness** has a number: whole-source mutation, recorded in the CHANGELOG. A second audit
   read every assertion against an authority other than the code.
-- **aarch64** passes the whole suite under qemu, and so does bounds-checked mode. Neither is in CI.
+- **aarch64** passes the whole suite under qemu, and so does bounds-checked mode. CI gates both.
 - **Fuzzing** is real: `tests/samay.fcyr` restores mutated snapshots and then drives them through a
   working life. It was a stub until 1.4.3.
 
