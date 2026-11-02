@@ -4,6 +4,115 @@ All notable changes to Samay are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.5] — 2026-11-02
+
+**Limits that limit.** A document is refused before parsing past a byte limit, and the parse is refused
+past ten times its size, so restore's memory is bounded whatever the text looks like. Writers refuse
+instead of exiting, the derived leaf types gain readers that refuse, and every constructor now settles
+the domain restore reads. **1,322 tests**, up 90. The toolchain, deps and wire format are unchanged.
+**⚠ A few calls answer differently:** see *Changed* below.
+
+### Added — what a document may cost ([ADR-0014](docs/adr/0014-what-a-document-may-cost.md))
+
+`SAMAY_JSON_MAX_ITEMS` was checked after the parse, and bayan's tree costs far more than the text it
+came from. Measured, in heap bytes per byte of input:
+
+| Document | Tree per byte |
+|---|---|
+| What samay writes: tasks, nodes, GPU nodes, cron entries | 4.9 to 5.9 |
+| The worst samay writes: one-letter names, zeroed numbers | 7.2 |
+| `[[],[],…]` | 65 |
+| `[[[…]]]` nested 120 deep, repeated | 88 |
+
+- **`SAMAY_JSON_MAX_BYTES` = 128 MiB**, checked before the parse. 100,000 tasks and 100,000 nodes, both
+  item limits at once, write 73 MB.
+- **`SAMAY_JSON_MAX_EXPANSION` = 10.** The tree is built through an allocator that counts, and a parse
+  past ten times its input plus 4 KiB is refused, whatever bayan returned.
+- **A key samay does not read counts too.** It had no limit at all.
+- Both are `var`s, like the item limit, so a consumer can lower them.
+
+| 10 MB of `[[[…]]]` | 1.4.4 | 1.4.5 |
+|---|---|---|
+| Peak memory | 868 MiB | 126 MiB |
+| Time to refuse | 0.9 s | 0.1 s |
+
+### Fixed — a writer exited the process instead of refusing
+
+`bayan_json_v_build` exits past `ALLOC_MAX` (2 GiB), so a snapshot within the item limit could kill
+its writer. Every `*_to_json_str` now builds through a budget of six times the byte limit, and answers
+0 with a log line for text past the limit, as the container writers already did past the item limit.
+A real out of memory still panics ([ADR-0009](docs/adr/0009-oom-policy.md)).
+
+### Added — leaf readers that refuse
+
+The five `#derive(Serialize)` types decode through code the compiler emits, and it cannot refuse: `{}`
+gave a `SchedulingDecision` of null Strs, and writing it back segfaulted (exit 139, checked on 1.4.4).
+`resource_req_from_json_str`, `cron_expr_from_json_str`, `scheduling_decision_from_json_str`,
+`preemption_action_from_json_str` and `scheduler_stats_from_json_str` read the same text, require every
+field the derive writes, and answer 0 for one missing or of the wrong type. The derive's own decoders
+stay, unchecked.
+
+### Fixed — constructors and restore disagreed ([ADR-0005](docs/adr/0005-restore-input-validation.md))
+
+| Value | Constructor through 1.4.4 | Restore | Now, both |
+|---|---|---|---|
+| Node cores past 1e18 | kept | 0 | stop at 1e18, as a requirement's do |
+| Node cores NaN | kept, written as `null` | node dropped | 0 |
+| Node cores, memory or disk negative | kept | 0 | 0 |
+| Node id empty | registered | record dropped | `register_node` answers 1, logs, registers nothing |
+| Training method samay does not know | kept: "unknown", GPU or TPU | LoRA: GPU only | kept |
+| Missed-schedule policy not `CRON_SKIP` | kept | `CRON_CATCHUP` | `CRON_CATCHUP`, as it already acted |
+| `network` not 0 or 1 | kept | 1 | 1 |
+
+Each now comes back from a round trip byte for byte.
+
+### Changed — what answers differently
+
+- **`task_scheduler_register_node` answers 1 for an empty id**, and registers nothing. It answered 0
+  for everything. daimon's node route already answers 400 for an empty id before it gets here.
+- **Every `*_to_json_str` can answer 0**, past the byte limit. Through 1.4.4 only the three container
+  writers could, past the item limit.
+- **Restore refuses a document past 128 MiB, or one whose parse passes ten times its size.**
+- **`node_capacity_new`, `cron_entry_new` and `resource_req_new` settle their values** as the table
+  above says. A requirement built with `network` 5 now writes 1.
+- **An unknown training method survives a restore.**
+
+### Performance
+
+1.4.4 against 1.4.5, interleaved on one pinned CPU, five runs each. One indirect call per tree
+allocation costs 1.4 to 2.9%. Peak memory is unchanged.
+
+| | 1.4.4 | 1.4.5 |
+|---|---|---|
+| Restore, 100,000 tasks (52 MB) | 2.20 s | 2.25 s |
+| Restore, 100,000 nodes (21 MB) | 1.02 s | 1.03 s |
+| Restore, 100,000 cron entries (44 MB) | 1.92 s | 1.97 s |
+| Write, 100,000 tasks | 1.91 s | 1.95 s |
+
+### Tests
+
+- **The byte limit at its exact byte**, for readers and for a writer, and the budget path past it.
+  Every writer refuses at 10 bytes.
+- **The expansion limit:** 3 KB of empty arrays is refused, a real snapshot is refused at 5 times and
+  read at 8, and the worst shape samay writes reads back at 8.
+- **The budget allocator:** its boundary, a request past `ALLOC_MAX`, and its unused entries.
+- **The leaf readers:** each reads the derive's text, and refuses seven shapeless documents and a
+  missing or wrong-typed field.
+- **Round trips byte for byte** for each row of the constructor table, and `register_node` refusing an
+  empty id.
+- **Whole-source mutation**, run locally: 1,244 mutants, 1,084 killed, 152 survive, 8 do not compile.
+  It found three checks in the new leaf readers that no test reached, now tested. The six new
+  survivors are read and accepted: two stores of zero into fresh memory, three log helpers' returns
+  that nothing reads, and a request of exactly 2 GiB, too large to make in the suite. Two runs on
+  different seeds agree.
+- **Restore and write against 1.4.4, byte for byte**, over 12 documents including the three real
+  old-release snapshots in `tests/fixtures/`: identical.
+
+### Not verified
+
+- **No consumer was rebuilt.** kavach, daimon and stiva are still on 1.1.x. daimon's node route was
+  read, not run: it refuses an empty id itself.
+
 ## [1.4.4] — 2026-11-01
 
 **Standing gates: what was checked by hand now fails the build, and `src/` did not change.** CI runs

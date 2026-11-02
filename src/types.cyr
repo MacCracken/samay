@@ -231,6 +231,8 @@ fn resource_req_new(cpu_cores, memory_mb, accel_req, accel_min_chips, network, d
     ResourceReq_set_memory_mb(p, _req_amount(memory_mb));
     ResourceReq_set_accel_req(p, accel_req);
     ResourceReq_set_accel_min_chips(p, _req_amount(accel_min_chips));
+    # A flag, as restore reads it: anything non-zero is 1.
+    if (network != 0) { network = 1; }
     ResourceReq_set_network(p, network);
     ResourceReq_set_disk_mb(p, _req_amount(disk_mb));
     return p;
@@ -394,12 +396,16 @@ fn node_capacity_new(node_id, total_cpu, total_memory_mb, total_disk_mb, gpu_ava
     var p = alloc(88);   # 11 fields * 8 — MUST track node_capacity_from_jsonv
     if (p == 0) { panic("samay: out of memory in node_capacity_new"); }
     NodeCapacity_set_node_id(p, _samay_own(node_id, "samay: out of memory in node_capacity_new"));
-    NodeCapacity_set_total_cpu(p, total_cpu);
-    NodeCapacity_set_available_cpu(p, total_cpu);
-    NodeCapacity_set_total_memory_mb(p, total_memory_mb);
-    NodeCapacity_set_available_memory_mb(p, total_memory_mb);
-    NodeCapacity_set_total_disk_mb(p, total_disk_mb);
-    NodeCapacity_set_available_disk_mb(p, total_disk_mb);
+    # The domain restore reads back, so a node comes back as it was built: NaN or a
+    # negative amount is none, and cores stop at 1e18. Through 1.4.4 a node past 1e18
+    # restored with no cores at all, and one with negative memory with none.
+    var cpu = _req_cpu(total_cpu);
+    NodeCapacity_set_total_cpu(p, cpu);
+    NodeCapacity_set_available_cpu(p, cpu);
+    NodeCapacity_set_total_memory_mb(p, _req_amount(total_memory_mb));
+    NodeCapacity_set_available_memory_mb(p, _req_amount(total_memory_mb));
+    NodeCapacity_set_total_disk_mb(p, _req_amount(total_disk_mb));
+    NodeCapacity_set_available_disk_mb(p, _req_amount(total_disk_mb));
     # vec_new returns 0 on OOM (lib/vec.cyr:35) and this used to store it
     # straight into the struct, which was then returned looking healthy. For a
     # CPU node the gpu_available branch below is skipped, so nothing ever

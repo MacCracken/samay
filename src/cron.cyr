@@ -65,6 +65,8 @@ fn cron_entry_new(name, expr, task_template, enabled, missed_policy): i64 {
     if (enabled != 0) { enabled = 1; }
     CronEntry_set_enabled(p, enabled);
     CronEntry_set_last_fired(p, 0);
+    # Anything but CRON_SKIP catches up, and restore reads it back as CRON_CATCHUP.
+    if (missed_policy != CRON_SKIP) { missed_policy = CRON_CATCHUP; }
     CronEntry_set_missed_policy(p, missed_policy);
     return p;
 }

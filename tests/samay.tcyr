@@ -3093,10 +3093,13 @@ fn test_sec_identity_and_flags() {
     assert_eq(e != 0, 1, "entry restored");
     assert_eq(CronEntry_enabled(e), 1, "truthy enabled normalised to 1");
     assert_eq(CronExpr_dom_star(CronEntry_expr(e)), 1, "truthy dom_star normalised to 1");
-    # An out-of-range training method must land back in the enum.
+    # A method samay does not know comes back as the constructor kept it. Through 1.4.4 it
+    # read back as LoRA, so a job that asked for a GPU or a TPU asked for a GPU alone.
     var tj = training_job_template_from_json_str(str_from("{\"model_id\":\"m\",\"dataset\":\"d\",\"method\":424242}"));
     assert_eq(tj != 0, 1, "training restored");
-    assert_eq(TrainingJobTemplate_method(tj), TM_LORA, "out-of-range method clamped");
+    assert_eq(TrainingJobTemplate_method(tj), 424242, "an unknown method is kept");
+    var job = training_job_to_scheduled_task(tj, str_from("a"));
+    assert_eq(ResourceReq_accel_req(ScheduledTask_resource_requirements(job)), REQ_GPU_OR_TPU, "and still asks for either");
     return 0;
 }
 
@@ -5436,6 +5439,57 @@ fn test_constructors_share_the_restore_domain() {
     var job = training_job_template_new(str_from("m"), TM_LORA, str_from("d"), 0, 0 - 5, 0 - 6);
     assert_eq(TrainingJobTemplate_max_duration_secs(job), 0, "a negative duration is none");
     assert_eq(TrainingJobTemplate_checkpoint_interval_secs(job), 0, "a negative interval is none");
+
+    # v1.4.5: a node, an entry, a requirement and a training job come back byte for byte.
+    # Through 1.4.4 a node past 1e18 cores restored with none, a negative amount wrote
+    # negative and read 0, and the others read back as something else.
+    var most = f64_from(1000000000000000000);
+    var big = node_capacity_new(str_from("big"), f64_from(2000000000000000000), 1, 1, 0);
+    assert_eq(f64_eq(NodeCapacity_total_cpu(big), most), 1, "cores stop at 1e18");
+    assert_eq(f64_eq(NodeCapacity_available_cpu(big), most), 1, "free ones too");
+    _same_node_back(big, "the 1e18 node comes back");
+    var neg = node_capacity_new(str_from("neg"), f64_from(0 - 4), 0 - 5, 0 - 6, 0);
+    assert_eq(f64_eq(NodeCapacity_total_cpu(neg), f64_from(0)), 1, "negative cores are none");
+    assert_eq(NodeCapacity_total_memory_mb(neg), 0, "negative memory is none");
+    assert_eq(NodeCapacity_available_memory_mb(neg), 0, "free memory too");
+    assert_eq(NodeCapacity_total_disk_mb(neg), 0, "negative disk is none");
+    assert_eq(NodeCapacity_available_disk_mb(neg), 0, "free disk too");
+    _same_node_back(neg, "the negative node comes back");
+    var nan = node_capacity_new(str_from("nan"), 0x7FF8000000000000, 8, 8, 0);
+    assert_eq(f64_eq(NodeCapacity_total_cpu(nan), f64_from(0)), 1, "NaN cores are none");
+    _same_node_back(nan, "the NaN node comes back");
+    var _o_t, _o_v = cron_expr_parse(str_from("0 3 * * *"));
+    var odd = cron_entry_new(str_from("e"), result_unwrap(_o_t, _o_v),
+      cron_task_template_new(str_from("t"), str_from("d"), str_from("a"), 5, resource_req_default()), 1, 7);
+    assert_eq(CronEntry_missed_policy(odd), CRON_CATCHUP, "an unknown policy is catch-up, as it acts");
+    var ejs = cron_entry_to_json_str(odd);
+    assert_eq(str_eq(cron_entry_to_json_str(cron_entry_from_json_str(ejs)), ejs), 1, "the entry comes back");
+    var net = resource_req_new(f64_from(1), 1, REQ_NONE, 0, 5, 0);
+    assert_eq(ResourceReq_network(net), 1, "network is a flag");
+    var rsb = str_builder_new();
+    ResourceReq_to_json(net, rsb);
+    var rjs = str_builder_build(rsb);
+    var rsb2 = str_builder_new();
+    ResourceReq_to_json(resource_req_from_json_str(rjs), rsb2);
+    assert_eq(str_eq(str_builder_build(rsb2), rjs), 1, "the requirement comes back");
+    var job99 = training_job_template_new(str_from("m"), 99, str_from("d"), 0, 0, 0);
+    var tjs = training_job_template_to_json_str(job99);
+    assert_eq(str_eq(training_job_template_to_json_str(training_job_template_from_json_str(tjs)), tjs), 1, "the job comes back");
+
+    # An empty node id is refused where restore would drop it.
+    var s = task_scheduler_new();
+    _logs_start();
+    assert_eq(task_scheduler_register_node(s, make_node("", f64_from(8), 8192)), 1, "an empty id is refused");
+    assert_eq(_logged("an empty id"), 1, "and says so");
+    _logs_stop();
+    assert_eq(vec_len(map_values(TaskScheduler_nodes(s))), 0, "nothing was registered");
+    assert_eq(task_scheduler_register_node(s, make_node("n", f64_from(8), 8192)), 0, "a real id still is");
+    return 0;
+}
+
+fn _same_node_back(node, what) {
+    var js = node_capacity_to_json_str(node);
+    assert_eq(str_eq(node_capacity_to_json_str(node_capacity_from_json_str(js)), js), 1, what);
     return 0;
 }
 
@@ -5826,6 +5880,253 @@ fn test_f64_is_finite() {
     return 0;
 }
 
+# --- v1.4.5: what a document may cost (ADR-0014) ---
+
+# An empty snapshot of exactly `n` bytes, padded by a key samay does not read.
+fn _padded_snapshot(n) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"tasks\":[],\"nodes\":[],\"x\":\"");
+    var i = 30;
+    while (i < n) {
+        str_builder_add_cstr(sb, "a");
+        i = i + 1;
+    }
+    str_builder_add_cstr(sb, "\"}");
+    return str_builder_build(sb);
+}
+
+# `n` empty arrays under a key samay does not read. Each costs about 196 bytes of tree
+# for its 3 bytes of text.
+fn _nested_junk(n) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"tasks\":[],\"nodes\":[],\"junk\":[[]");
+    var i = 1;
+    while (i < n) {
+        str_builder_add_cstr(sb, ",[]");
+        i = i + 1;
+    }
+    str_builder_add_cstr(sb, "]}");
+    return str_builder_build(sb);
+}
+
+fn _chars(c, n) {
+    var sb = str_builder_new();
+    var i = 0;
+    while (i < n) {
+        str_builder_add_cstr(sb, c);
+        i = i + 1;
+    }
+    return str_builder_build(sb);
+}
+
+fn test_json_byte_limit() {
+    test_group("json_byte_limit");
+    var keep = SAMAY_JSON_MAX_BYTES;
+    SAMAY_JSON_MAX_BYTES = 300;
+    var at = _padded_snapshot(300);
+    assert_eq(str_len(at), 300, "the padding is exact");
+    assert_eq(task_scheduler_from_json_str(at) != 0, 1, "a document at the limit is read");
+    _logs_start();
+    assert_eq(task_scheduler_from_json_str(_padded_snapshot(301)), 0, "one byte past it is refused");
+    assert_eq(_logged("301 bytes, past the limit of 300"), 1, "and says so");
+    _logs_stop();
+    assert_eq(scheduled_task_from_json_str(_padded_snapshot(301)), 0, "by every reader");
+    assert_eq(resource_req_from_json_str(_padded_snapshot(301)), 0, "the leaves too");
+
+    # A writer refuses what no reader would take, at the same byte.
+    var t0 = cron_task_template_new(str_from("n"), str_from(""), str_from("a"), 5, make_req(f64_from(1), 1));
+    var base = str_len(cron_task_template_to_json_str(t0));
+    SAMAY_JSON_MAX_BYTES = base + 50;
+    var fits = cron_task_template_new(str_from("n"), _chars("d", 50), str_from("a"), 5, make_req(f64_from(1), 1));
+    var out = cron_task_template_to_json_str(fits);
+    assert_eq(out != 0, 1, "text at the limit is written");
+    assert_eq(str_len(out), base + 50, "all of it");
+    assert_eq(cron_task_template_from_json_str(out) != 0, 1, "and reads back");
+    var over = cron_task_template_new(str_from("n"), _chars("d", 51), str_from("a"), 5, make_req(f64_from(1), 1));
+    _logs_start();
+    assert_eq(cron_task_template_to_json_str(over), 0, "one byte more is refused");
+    assert_eq(_logged("past the limit of"), 1, "and says so");
+    _logs_stop();
+
+    # Far past the limit the build itself stops, on its budget, before it finishes.
+    SAMAY_JSON_MAX_BYTES = 100;
+    var huge = cron_task_template_new(str_from("n"), _chars("d", 5000), str_from("a"), 5, make_req(f64_from(1), 1));
+    _logs_start();
+    assert_eq(cron_task_template_to_json_str(huge), 0, "a build past its budget is refused");
+    assert_eq(_logged("its text runs past the limit of 100 bytes"), 1, "and says so");
+    _logs_stop();
+
+    # Every writer: none of these fits in 10 bytes.
+    SAMAY_JSON_MAX_BYTES = 10;
+    var tmpl = cron_task_template_new(str_from("t"), str_from("d"), str_from("a"), 5, resource_req_default());
+    var _e_t, _e_v = cron_expr_parse(str_from("0 3 * * *"));
+    var entry = cron_entry_new(str_from("e"), result_unwrap(_e_t, _e_v), tmpl, 1, CRON_SKIP);
+    var cs = cron_scheduler_new();
+    cron_scheduler_add_entry(cs, entry);
+    assert_eq(task_scheduler_to_json_str(task_scheduler_new()), 0, "scheduler");
+    assert_eq(cron_scheduler_to_json_str(cs), 0, "cron scheduler");
+    assert_eq(scheduled_task_to_json_str(make_task("t", 5)), 0, "task");
+    assert_eq(node_capacity_to_json_str(make_node("n", f64_from(8), 8192)), 0, "node");
+    assert_eq(cron_entry_to_json_str(entry), 0, "entry");
+    assert_eq(cron_task_template_to_json_str(tmpl), 0, "template");
+    assert_eq(training_job_template_to_json_str(training_job_template_new(str_from("m"), TM_LORA, str_from("d"), 0, 0, 0)), 0, "training job");
+    SAMAY_JSON_MAX_BYTES = keep;
+    assert_eq(task_scheduler_to_json_str(task_scheduler_new()) != 0, 1, "and back at the default, they write");
+    return 0;
+}
+
+fn test_json_expansion_limit() {
+    test_group("json_expansion_limit");
+    # A few empty arrays fit the 4 KiB every document gets.
+    assert_eq(task_scheduler_from_json_str(_nested_junk(10)) != 0, 1, "a little junk is read past");
+    # 3 KB of them would take about 200 KB: refused before the tree is built.
+    var junk = _nested_junk(1000);
+    _logs_start();
+    assert_eq(task_scheduler_from_json_str(junk), 0, "text that parses to 65 times its size is refused");
+    assert_eq(_logged("takes more than 10 times that"), 1, "and says so");
+    _logs_stop();
+    assert_eq(scheduled_task_from_json_str(junk), 0, "by every reader");
+    assert_eq(scheduler_stats_from_json_str(junk), 0, "the leaves too");
+
+    # What samay writes stays well inside: a real snapshot takes about 6 times its size.
+    var s = task_scheduler_new();
+    task_scheduler_register_node(s, make_node("n", f64_from(64), 524288));
+    var i = 0;
+    while (i < 200) {
+        task_scheduler_submit_task(s, make_task("t", 5));
+        i = i + 1;
+    }
+    task_scheduler_schedule_pending(s);
+    var js = task_scheduler_to_json_str(s);
+    var keep = SAMAY_JSON_MAX_EXPANSION;
+    SAMAY_JSON_MAX_EXPANSION = 5;
+    assert_eq(task_scheduler_from_json_str(js), 0, "the limit is enforced: 5 times is too few");
+    SAMAY_JSON_MAX_EXPANSION = 8;
+    assert_eq(task_scheduler_from_json_str(js) != 0, 1, "8 is enough");
+    # The worst shape samay writes: one-letter names, short numbers. 7.2 times, measured.
+    var c = cron_scheduler_new();
+    var e = 0;
+    while (e < 300) {
+        var t = cron_task_template_new(str_from("r"), str_from("d"), str_from("a"), 1, resource_req_new(f64_from(0), 0, 0, 0, 0, 0));
+        cron_scheduler_add(c, _numbered("", e), str_from("30 2 * * 1-5"), t, 1, CRON_SKIP);
+        e = e + 1;
+    }
+    var cjs = cron_scheduler_to_json_str(c);
+    var back = cron_scheduler_from_json_str(cjs);
+    assert_eq(back != 0, 1, "the worst honest shape reads back within 8");
+    assert_eq(vec_len(map_values(CronScheduler_entries(back))), 300, "all of it");
+    SAMAY_JSON_MAX_EXPANSION = keep;
+    return 0;
+}
+
+fn test_json_budget_allocator() {
+    test_group("json_budget_allocator");
+    var al = _budget(100);
+    assert_eq(alloc_via(al, 64) != 0, 1, "within the budget");
+    assert_eq(alloc_via(al, 36) != 0, 1, "up to it exactly");
+    assert_eq(_budget_refused(al), 0, "nothing refused yet");
+    assert_eq(alloc_via(al, 8), 0, "one past it is refused");
+    assert_eq(_budget_refused(al), 1, "and remembered");
+    # Past ALLOC_MAX plain alloc() answers 0 too, and bayan_json_v_build exits on it.
+    # Here it is a refusal: the writer answers 0 and the process lives.
+    var big = _budget(ALLOC_MAX * 4);
+    assert_eq(alloc_via(big, ALLOC_MAX + 1), 0, "past ALLOC_MAX is refused");
+    assert_eq(_budget_refused(big), 1, "as a refusal, not out of memory");
+    var st = allocator_state(al);
+    assert_eq(_budget_realloc(st, 0, 0, 8), 0, "a realloc is refused, not copied");
+    assert_eq(_budget_free(st, 0), 0, "free does nothing");
+    assert_eq(_budget_reset(st), 0, "reset does nothing");
+    assert_eq(_budget_refused(al), 1, "and leaves the refusal standing");
+    return 0;
+}
+
+fn test_leaf_decoders_check() {
+    test_group("leaf_decoders_check");
+    # Each reads what the derive writes.
+    var d = scheduling_decision_new(str_from("task-abc"), str_from("node-1"), str_from("best-fit selection"),
+      f64_div(f64_from(2), f64_from(3)));
+    var sb = str_builder_new();
+    SchedulingDecision_to_json(d, sb);
+    var d2 = scheduling_decision_from_json_str(str_builder_build(sb));
+    assert_eq(d2 != 0, 1, "decision read");
+    assert_eq(str_eq(SchedulingDecision_task_id(d2), str_from("task-abc")), 1, "its task");
+    assert_eq(str_eq(SchedulingDecision_assigned_node(d2), str_from("node-1")), 1, "its node");
+    assert_eq(str_eq(SchedulingDecision_reason(d2), str_from("best-fit selection")), 1, "its reason");
+    assert_eq(SchedulingDecision_score(d2) == SchedulingDecision_score(d), 1, "its score, to the bit");
+    var a = preemption_action_new(str_from("victim"), str_from("aggressor"), str_from("why"));
+    var ab = str_builder_new();
+    PreemptionAction_to_json(a, ab);
+    var a2 = preemption_action_from_json_str(str_builder_build(ab));
+    assert_eq(a2 != 0, 1, "action read");
+    assert_eq(str_eq(PreemptionAction_preempted_task_id(a2), str_from("victim")), 1, "its victim");
+    assert_eq(str_eq(PreemptionAction_preempting_task_id(a2), str_from("aggressor")), 1, "its cause");
+    assert_eq(str_eq(PreemptionAction_reason(a2), str_from("why")), 1, "its reason");
+    var st = scheduler_stats_new();
+    SchedulerStats_set_total_tasks(st, 9);
+    SchedulerStats_set_queued(st, 1);
+    SchedulerStats_set_running(st, 2);
+    SchedulerStats_set_completed(st, 3);
+    SchedulerStats_set_failed(st, 4);
+    SchedulerStats_set_average_wait_time_ms(st, 5);
+    SchedulerStats_set_average_run_time_ms(st, 6);
+    var stb = str_builder_new();
+    SchedulerStats_to_json(st, stb);
+    var st2 = scheduler_stats_from_json_str(str_builder_build(stb));
+    assert_eq(st2 != 0, 1, "stats read");
+    assert_eq(SchedulerStats_total_tasks(st2) + SchedulerStats_queued(st2) * 10 + SchedulerStats_running(st2) * 100
+      + SchedulerStats_completed(st2) * 1000 + SchedulerStats_failed(st2) * 10000
+      + SchedulerStats_average_wait_time_ms(st2) * 100000 + SchedulerStats_average_run_time_ms(st2) * 1000000,
+      6543219, "every count in its place");
+    var r = resource_req_new(f64_from(3), 512, REQ_GPU, 2, 1, 64);
+    var rb = str_builder_new();
+    ResourceReq_to_json(r, rb);
+    var r2 = resource_req_from_json_str(str_builder_build(rb));
+    assert_eq(r2 != 0, 1, "requirement read");
+    assert_eq(f64_eq(ResourceReq_cpu_cores(r2), f64_from(3)), 1, "its cores");
+    assert_eq(ResourceReq_memory_mb(r2) + ResourceReq_accel_req(r2) * 10000 + ResourceReq_accel_min_chips(r2) * 100000
+      + ResourceReq_network(r2) * 1000000 + ResourceReq_disk_mb(r2) * 10000000,
+      512 + REQ_GPU * 10000 + 200000 + 1000000 + 640000000, "and the rest, each in its place");
+    var _c_t, _c_v = cron_expr_parse(str_from("30 2 * * 1-5"));
+    var ce = result_unwrap(_c_t, _c_v);
+    var cb = str_builder_new();
+    CronExpr_to_json(ce, cb);
+    var ce2 = cron_expr_from_json_str(str_builder_build(cb));
+    assert_eq(ce2 != 0, 1, "expression read");
+    assert_eq(CronExpr_minute_mask(ce2) == CronExpr_minute_mask(ce) && CronExpr_dow_mask(ce2) == CronExpr_dow_mask(ce), 1, "its masks");
+
+    # And refuse what they cannot read. The derive's own reader gives `{}` null Strs.
+    var bad = vec_new();
+    vec_push(bad, str_from("{}"));
+    vec_push(bad, str_from("[]"));
+    vec_push(bad, str_from("5"));
+    vec_push(bad, str_from("null"));
+    vec_push(bad, str_from("\"x\""));
+    vec_push(bad, str_from("{"));
+    vec_push(bad, 0);
+    var i = 0;
+    var took = 0;
+    while (i < vec_len(bad)) {
+        var doc = vec_get(bad, i);
+        took = took + (scheduling_decision_from_json_str(doc) != 0) + (preemption_action_from_json_str(doc) != 0)
+        + (scheduler_stats_from_json_str(doc) != 0) + (resource_req_from_json_str(doc) != 0)
+        + (cron_expr_from_json_str(doc) != 0);
+        i = i + 1;
+    }
+    assert_eq(took, 0, "nothing shapeless is read");
+    assert_eq(scheduling_decision_from_json_str(str_from("{\"task_id\":5,\"assigned_node\":\"n\",\"reason\":\"r\",\"score\":1.0}")), 0, "a number for a Str");
+    assert_eq(scheduling_decision_from_json_str(str_from("{\"task_id\":\"t\",\"assigned_node\":\"n\",\"reason\":\"r\"}")), 0, "a missing score");
+    assert_eq(scheduling_decision_from_json_str(str_from("{\"task_id\":\"t\",\"assigned_node\":\"n\",\"reason\":\"r\",\"score\":\"1\"}")), 0, "a Str for a score");
+    assert_eq(scheduling_decision_from_json_str(str_from("{\"task_id\":\"t\",\"reason\":\"r\",\"score\":1.0}")), 0, "a missing node");
+    assert_eq(scheduling_decision_from_json_str(str_from("{\"task_id\":\"t\",\"assigned_node\":\"n\",\"score\":1.0}")), 0, "a missing reason");
+    assert_eq(preemption_action_from_json_str(str_from("{\"preempted_task_id\":\"v\",\"reason\":\"r\"}")), 0, "a missing cause");
+    assert_eq(preemption_action_from_json_str(str_from("{\"preempted_task_id\":\"v\",\"preempting_task_id\":\"p\"}")), 0, "an action without its reason");
+    assert_eq(scheduler_stats_from_json_str(str_from("{\"total_tasks\":1,\"queued\":0,\"running\":0,\"completed\":0,\"failed\":0,\"average_wait_time_ms\":0}")), 0, "a missing count");
+    assert_eq(scheduler_stats_from_json_str(str_from("{\"total_tasks\":1,\"queued\":0,\"running\":0,\"completed\":0,\"failed\":\"0\",\"average_wait_time_ms\":0,\"average_run_time_ms\":0}")), 0, "a Str for a count");
+    assert_eq(resource_req_from_json_str(str_from("{\"memory_mb\":1}")), 0, "a requirement without cores");
+    assert_eq(cron_expr_from_json_str(str_from("{\"minute_mask\":1}")), 0, "an expression without its masks");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_uuid_format();
@@ -6049,6 +6350,10 @@ fn main() {
     test_restore_settles_many_nodes();
     test_cron_window_boundary();
     test_f64_is_finite();
+    test_json_byte_limit();
+    test_json_expansion_limit();
+    test_json_budget_allocator();
+    test_leaf_decoders_check();
     return assert_summary();
 }
 

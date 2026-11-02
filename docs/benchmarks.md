@@ -14,6 +14,40 @@ pre-warm off every hot path, and re-measured within noise of the table below
 | `samay_uuid_v4`         | 606 ns   | 613 ns   | getrandom(2) syscall-bound         |
 | `scheduled_task_new`    | 2.07 µs  | 2.06 µs  | alloc + uuid + `dt_now`            |
 
+## v1.4.5 — what a document may cost
+
+Measured with a harness that restores a file and reads its own peak RSS, on cyrius 6.7.18 with bayan
+1.11.1 (2026-11-02). It is not a `cyrius bench` row: each case is a whole process.
+
+**What the parse tree costs**, in heap bytes per byte of input, counted with `alloc_used()` around
+`bayan_json_v_parse_buf`. These numbers chose the limits in
+[ADR-0014](adr/0014-what-a-document-may-cost.md):
+
+| Document | Size | Tree per byte |
+|---|---|---|
+| 100,000 tasks, 64,000 placed, on 1,000 nodes | 52.4 MB | 4.95 |
+| 100,000 nodes | 20.7 MB | 5.24 |
+| 10,000 nodes with 8 GPUs each | 11.5 MB | 5.67 |
+| 100,000 cron entries | 44.0 MB | 5.88 |
+| Cron entries with one-letter names and zeroed numbers | 1.8 MB | 7.15 |
+| `[0,0,…]` | 10 MB | 25.4 |
+| `[[],[],…]` | 10 MB | 65.4 |
+| `[[[…]]]` nested 120 deep, repeated | 10 MB | 87.7 |
+
+**Restore and write, 1.4.4 against 1.4.5**, interleaved and shuffled on one pinned CPU, five runs each,
+medians. Times are whole processes, including reading the file.
+
+| Case | 1.4.4 | 1.4.5 | Δ | Peak, both |
+|---|---|---|---|---|
+| Restore 100,000 tasks | 2.20 s | 2.25 s | +2.4% | 420 MiB |
+| Restore 100,000 nodes | 1.02 s | 1.03 s | +1.4% | 230 MiB |
+| Restore 100,000 cron entries | 1.92 s | 1.97 s | +2.9% | 402 MiB |
+| Write 100,000 tasks | 1.91 s | 1.95 s | +2.1% | 768 MiB |
+| Refuse 10 MB of `[[[…]]]` | 0.9 s, 868 MiB | 0.1 s, 126 MiB | | |
+| Refuse 10 MB of `[[],[],…]` | 0.6 s, 650 MiB | 0.1 s, 126 MiB | | |
+
+The cost is one indirect call per allocation, through the allocator that counts.
+
 ## v1.4.3 — what the P(-1) fixes cost
 
 1.4.2 against 1.4.3, both on cyrius 6.7.18, interleaved, shuffled and pinned to one CPU, with the
@@ -312,14 +346,10 @@ win is allocator pressure, which matters because nothing here is reclaimed.
 
 ## Still open
 
-`node_can_fit` benches the `REQ_NONE` common path (the accelerator check short-circuits
-before touching profiles); the accelerator path adds one `find_satisfying_profile` scan
-over the node's profile vec (M3, ADR-0002) and is **not** benchmarked — the numbers above
-understate the cost of exactly the workload the domain principles are written about.
-
-The four insertion sorts (audit F5) are untouched: measured ~85× slower than a merge sort
-at n=8000, but ADR-0004's determinism guarantee rides on those comparators and v1.0.3 was
-already cron- and JSON-heavy. Tracked in [`development/roadmap.md`](development/roadmap.md).
+The placement pass walks every node for every pending task. The 1.4.3 sweep measured 100,000
+unplaceable tasks against 100,000 nodes at 366 s a pass, outside `cyrius bench`. The roadmap's 1.4.6
+starts by recording that here. (The accelerator path this section used to list has had rows since
+1.4.3, and the insertion sorts were replaced in 1.4.0.)
 
 Re-run and update on any hot-path change. Never claim a performance win without
 before/after numbers (project rule).

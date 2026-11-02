@@ -39,6 +39,12 @@ a task takes a whole device, or its chips of a TPU pod, and holds it until it fi
 | `*_from_json_str` | 1.4.3 | Refuses wrong types and duplicate ids, and rebuilds a node that disagrees with its tasks | restore a hand-edited snapshot, watch the log |
 | `resource_req_new` | 1.4.3 | Negative and NaN become 0, and cores stop at 1e18 | relied on a negative requirement, stop |
 | `cron_expr_next_after` | 1.4.3 | `-1` now means never, not "not within ten years" | treated `-1` as a horizon, it no longer is one |
+| `task_scheduler_register_node` | 1.4.5 | Answers `1` for an empty id, and registers nothing | take ids from a client, check the answer |
+| `*_to_json_str` | 1.4.5 | Every writer answers `0` past 128 MiB of text, and none exits the process | write snapshots, check for `0` as above |
+| `*_from_json_str` | 1.4.5 | Refuses past 128 MiB, or a parse past ten times the text ([ADR-0014](../adr/0014-what-a-document-may-cost.md)) | restore something larger, raise `SAMAY_JSON_MAX_BYTES` |
+| `node_capacity_new` | 1.4.5 | Negative and NaN become 0, and cores stop at 1e18, as for a requirement | built a node with negative capacity to keep work off it, stop |
+| `cron_entry_new` | 1.4.5 | A policy other than `CRON_SKIP` is stored as `CRON_CATCHUP`, which is how it already acted | read the policy back expecting your own value, expect `CRON_CATCHUP` |
+| `resource_req_new` | 1.4.5 | `network` is stored as 0 or 1 | compared it with another number, compare with 1 |
 
 ## Things that used to need work from you
 
@@ -49,6 +55,9 @@ a task takes a whole device, or its chips of a TPU pod, and holds it until it fi
   task's requirement afterwards, use `ScheduledTask_resource_requirements(t)`, not your own pointer.
 - **Constructors own every `Str` they keep** since 1.1.3, and `ScheduledTask_set_node_preference` and
   `target_node` since 1.4.3.
+- **The leaf types have readers that refuse** since 1.4.5. `scheduling_decision_from_json_str` and its
+  four siblings answer `0` for a missing or wrong-typed field. The derive's own
+  `SchedulingDecision_from_json` cannot refuse: `{}` gives null Strs, which crash the next writer.
 
 ## Node fields
 
@@ -84,7 +93,8 @@ in the table until you remove it.
 - **kavach** reads `ResourceReq` fields through `samay_bridge.cyr`, so only the toolchain and pins
   apply.
 - **daimon**: `POST /v1/scheduler/nodes` reaches the re-registering fix, and `gpu_available` nodes now
-  run one GPU task at a time. Its `submit_task` route already checks the tag. Its own `started_at`
+  run one GPU task at a time. It already answers 400 for an empty `node_id`, so the 1.4.5 refusal never
+  reaches it. Its `submit_task` route already checks the tag. Its own `started_at`
   stamp in `src/sched.cyr` can go. To report where a task runs, read `ScheduledTask_assigned_node`.
 - **stiva**: `cron_due_at` runs CRON_SKIP and writes `now` back, which is safe because a SKIP entry is
   never held. Adding CRON_CATCHUP would need it to read watermarks back. The comment in `src/fleet.cyr`

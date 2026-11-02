@@ -105,12 +105,23 @@ fn _holding_tasks(s): i64 {
 
 # --- registration / submission / lookup ---
 
-# Register a node. An id already known replaces its description, which is what a
-# node agent reconnecting does, so what its tasks hold is carried onto the new one.
-# Through 1.4.2 the replacement came up empty, and the same capacity was sold twice.
+fn _log_empty_node_id(): i64 {
+    var msg = str_from("node refused: an empty id, which no snapshot could restore");
+    sakshi_warn(str_data(msg), str_len(msg));
+    return 0;
+}
+
+# Register a node: 0, or 1 if its id is empty, which restore drops and so must be
+# refused here too (1.4.5). An id already known replaces its description, which is
+# what a node agent reconnecting does, so what its tasks hold is carried onto the new
+# one. Through 1.4.2 the replacement came up empty, and the same capacity was sold twice.
 fn task_scheduler_register_node(s, node): i64 {
     var nodes = TaskScheduler_nodes(s);
     var id = NodeCapacity_node_id(node);
+    if (str_len(id) == 0) {
+        _log_empty_node_id();
+        return 1;
+    }
     var was = map_get(nodes, id);
     map_set(nodes, id, node);
     if (was == 0) { return 0; }

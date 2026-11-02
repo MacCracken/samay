@@ -1,6 +1,6 @@
 # samay — Roadmap
 
-> **Last refreshed**: 2026-11-01 (v1.4.4)
+> **Last refreshed**: 2026-11-02 (v1.4.5)
 >
 > **Forward-looking only.** Nothing shipped belongs here — per-release detail
 > lives in [`../../CHANGELOG.md`](../../CHANGELOG.md) (complete from 0.1.0), the
@@ -11,10 +11,10 @@
 > 2.0.0. The only unpinned items wait on an event outside this repo:
 > see [Event-gated](#event-gated--no-pin-by-design).
 
-> **Current**: **v1.4.4**, cyrius pin **6.7.18**, floor **6.7.10**, deps ai-hwaccel **2.5.6** +
-> bayan-json **1.11.1**. Gates green: **1,232 assertions**, **11/11 benchmarks**,
-> coverage **82/82** public functions (each called by a test; 6.6.14 stopped counting `main`), lint 0-warn / 0
-> untracked deferrals, fmt clean, `dist/` in sync (3,353 lines), 0 symbol collisions
+> **Current**: **v1.4.5**, cyrius pin **6.7.18**, floor **6.7.10**, deps ai-hwaccel **2.5.6** +
+> bayan-json **1.11.1**. Gates green: **1,322 assertions**, **11/11 benchmarks**,
+> coverage **87/87** public functions (each called by a test; 6.6.14 stopped counting `main`), lint 0-warn / 0
+> untracked deferrals, fmt clean, `dist/` in sync (3,521 lines), 0 symbol collisions
 > against the vendored deps. `src/` is 9 modules. The 1,479-line Rust oracle was
 > retired after 1.1.5 ([`rust-old-removal.md`](rust-old-removal.md)).
 
@@ -22,36 +22,19 @@
 
 | Version | Theme | Risk | Gate to entry |
 |---|---|---|---|
-| **1.4.5** | Limits that actually limit | medium | peak memory measured for each limit: this is next |
-| **1.4.6** | A placement pass below O(pending × nodes) | medium | the 100,000 × 100,000 baseline in `benchmarks.md` |
+| **1.4.6** | A placement pass below O(pending × nodes) | medium | the 100,000 × 100,000 baseline in `benchmarks.md`: this is next |
 | **1.5.0** | Accelerator requests: shared and multi-device | high | consumers on 1.4.x, and an ADR on the unit of sharing |
 | **1.6.0** | Preemption: placed tasks and several victims | medium | an ADR on the new return shape |
 | **1.7.0** | Deadlines and `network`: make them work, or mark them for removal | medium | one ADR each |
 | **1.8.0** | Accounting: stats counters, lifetime totals, failure reasons | low | an ADR on lifetime totals as wire state |
 | **2.0.0** | Removals: `samay_init`, stats meanings, whatever 1.7.0 rejected | high | every consumer on 1.8.x |
 
-The order is by who it helps. 1.4.5 and 1.4.6 finish the repairs. New features wait until consumers
+The order is by who it helps. 1.4.6 finishes the repairs. New features wait until consumers
 can receive them, because nothing from 1.2 onward has reached one yet.
 
 ---
 
 ## 1.4.x — remaining repairs
-
-### 1.4.5 — limits that actually limit
-
-Measured in the 1.4.3 sweep. *Entry gate*: peak memory measured against each limit, so a ceiling is
-chosen from numbers.
-
-- [ ] **A byte limit before parsing.** `SAMAY_JSON_MAX_ITEMS` bounds neither memory nor bytes. bayan's
-  tree costs about 64 bytes per array element, so 30 MB of `[[],[],...]` reaches 1.9 GB, and it is
-  refused only after the parse. An unknown key is not capped at all.
-- [ ] **A writer refuses instead of dying.** Past bayan's 2 GiB build limit the process exits, though
-  the snapshot is within the item limit. It should answer 0, as it does for items.
-- [ ] **Leaf decoders reject what they cannot read.** `SchedulingDecision_from_json("{}")` returns a
-  struct with null Strs that crashes on the way back out. samay's own readers never use these.
-- [ ] **Constructors and restore agree on every value.** A node with `total_cpu` past 1e18 restores
-  with none, `register_node` accepts an empty id that restore drops, and training method 99 becomes
-  LORA.
 
 ### 1.4.6 — a placement pass below O(pending × nodes)
 

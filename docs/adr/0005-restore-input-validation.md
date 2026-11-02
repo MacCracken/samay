@@ -6,6 +6,10 @@ container is now checked, a collection of the wrong type refuses the snapshot, t
 key refuse it, a node past the profile limit refuses its scheduler, and a dropped record is counted
 and logged. Restore also checks each node against its tasks
 ([ADR-0007](0007-reservation-lifecycle.md)).
+**Amended** 2026-11-02 (v1.4.5): point 3 bounded neither bytes nor memory, and
+[ADR-0014](0014-what-a-document-may-cost.md) replaces its claim. Constructors now settle the same domain
+restore reads, so a value comes back as it was built, and the derived leaf types gain readers that
+refuse. See *Constructors agree with restore* below.
 
 ## Context
 
@@ -67,7 +71,10 @@ Validate at the restore boundary, matching Rust serde's fail-closed semantics:
   of these to a finite worst case; eliminating the residual is deferred rather than risk a
   sort rewrite destabilising the M5 determinism guarantee ([ADR-0004](0004-deterministic-tie-breaks.md)).
   F5 closed in v1.4.0 ([ADR-0011](0011-bounded-task-history.md)) and F8/F9 in v1.4.1
-  ([ADR-0012](0012-cron-burst-budget.md)).
+  ([ADR-0012](0012-cron-burst-budget.md)). **Amended 2026-11-02 (v1.4.5):** "the size cap bounds all
+  of these to a finite worst case" was not true of memory. The cap is checked after the parse, and
+  bayan's tree takes up to 88 times the text, so 10 MB took 868 MiB first. ADR-0014 limits the bytes
+  and the parse itself.
 - Fail-closed on a bad record means a corrupt snapshot loses that record silently. For a
   scheduler restoring its own well-formed snapshot this never triggers; it only drops
   attacker/corruption-injected records, which is the desired posture.
@@ -76,3 +83,29 @@ Validate at the restore boundary, matching Rust serde's fail-closed semantics:
   wrote itself ([issue](../development/issues/archive/2026-11-01-ai-hwaccel-profile-bounds.md)).
   2.5.6 raised the bound on TPU chips to 16,384, so real pods restore. Past the bounds the
   node stays without that profile. That is a valid record, not corruption, so samay logs it.
+
+## Constructors agree with restore (v1.4.5)
+
+Clamping on restore only helps if the constructors clamp to the same domain. Where they did not, a
+value went out as one thing and came back as another, and nothing said so:
+
+| Value | Constructor through 1.4.4 | Restore | Now, both |
+|---|---|---|---|
+| Node cores past 1e18 | kept | 0 | stop at 1e18, as a requirement's do |
+| Node cores NaN | kept, written as `null` | node dropped | 0 |
+| Node cores, memory or disk negative | kept | 0 | 0 |
+| Node id empty | registered | record dropped | `register_node` answers 1, logs, registers nothing |
+| Training method samay does not know | kept: "unknown", GPU or TPU | LoRA: GPU only | kept |
+| Missed-schedule policy not `CRON_SKIP` | kept | `CRON_CATCHUP` | `CRON_CATCHUP`, as it already acted |
+| `network` not 0 or 1 | kept | 1 | 1 |
+
+Restore keeps an unknown training method rather than the constructor refusing one, for the reason it
+keeps an unknown `accel_req`: a newer samay may know it, and what this one does with it, ask for a GPU
+or a TPU, is the safe reading.
+
+The five types with `#derive(Serialize)` decode through code the compiler emits, which cannot refuse
+anything: `{}` gives a `SchedulingDecision` of null Strs, which crashes the first writer it meets.
+samay's own readers never used it. `resource_req_from_json_str`, `cron_expr_from_json_str`,
+`scheduling_decision_from_json_str`, `preemption_action_from_json_str` and
+`scheduler_stats_from_json_str` read the same text, require every field the derive writes, and answer
+0 for one missing or of the wrong type.
