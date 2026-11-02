@@ -6,9 +6,10 @@
 > lives in [`../../CHANGELOG.md`](../../CHANGELOG.md) (complete from 0.1.0), the
 > decisions in [`../adr/`](../adr/), and live state in [`state.md`](state.md).
 >
-> Version pins below are **targets that fix ordering, not commitments to dates**.
-> An item moves when its dependencies are met; a trigger-gated item has no pin at
-> all, deliberately — see [Trigger-gated](#trigger-gated--no-pin-by-design).
+> **Every forward item has a version.** A pin fixes the order, not a date. An item moves when
+> its gate is met. Repairs stay in the 1.4.x line, features take a minor, and removals wait for
+> 2.0.0. The only unpinned items wait on an event outside this repo:
+> see [Event-gated](#event-gated--no-pin-by-design).
 
 > **Current**: **v1.4.3**, cyrius pin **6.7.18**, deps ai-hwaccel **2.5.6** +
 > bayan-json **1.11.1**. Gates green: **1,224 assertions**, **11/11 benchmarks**,
@@ -17,103 +18,154 @@
 > against the vendored deps. `src/` is 9 modules. The 1,479-line Rust oracle was
 > retired after 1.1.5 ([`rust-old-removal.md`](rust-old-removal.md)).
 
-## Next
+## The arc at a glance
 
-Nothing here is blocked. In order of who it helps.
+| Version | Theme | Risk | Gate to entry |
+|---|---|---|---|
+| **1.4.4** | Standing gates, toolchain floor, migration note | low | none: this is next |
+| **1.4.5** | Limits that actually limit | medium | peak memory measured for each limit |
+| **1.4.6** | A placement pass below O(pending × nodes) | medium | the 100,000 × 100,000 baseline in `benchmarks.md` |
+| **1.5.0** | Accelerator requests: shared and multi-device | high | consumers on 1.4.x, and an ADR on the unit of sharing |
+| **1.6.0** | Preemption: placed tasks and several victims | medium | an ADR on the new return shape |
+| **1.7.0** | Deadlines and `network`: make them work, or mark them for removal | medium | one ADR each |
+| **1.8.0** | Accounting: stats counters, lifetime totals, failure reasons | low | an ADR on lifetime totals as wire state |
+| **2.0.0** | Removals: `samay_init`, stats meanings, whatever 1.7.0 rejected | high | every consumer on 1.8.x |
 
-### Reach: the work has not reached anyone
-
-- [ ] **State samay's real toolchain floor.** bayan 1.11.1 does not parse on cyrius 6.6.10, so the
-  floor rose during 1.2.x and nothing records it. A consumer finds out from a compile error. This
-  blocks the next item.
-- [ ] **Move the consumers forward.** kavach is on 1.1.6, daimon on 1.1.3 and stiva on 1.1.2, so
-  **nothing from 1.2 to 1.4 has reached a consumer**. stiva runs the cron code 1.4.1 and 1.4.3
-  repaired. daimon registers nodes through a route that re-registering used to corrupt. The work is in
-  those repos; samay's part is a migration note, and 1.4.3 needs one most: accelerator tasks that
-  used to share a device now queue.
-- [ ] **Run stiva's full suite against current samay.** Only its `cron_due_at` has been checked,
-  because samay's deps do not load on its pin. This closes when stiva moves.
-
-### Decisions the sweep left open
-
-Each of these is a feature, or changes meaning, so each needs a choice before any code.
-
-- [ ] **Deadlines.** A task carries one and restore keeps it, but nothing schedules by it. 1.4.3
-  stopped the README claiming otherwise. Either order by it or say plainly that it is only stored.
-- [ ] **`ResourceReq.network`** is stored and affects nothing.
-- [ ] **Sharing a device, and asking for several.** A task takes one whole GPU, or chips of one pod
-  ([ADR-0013](../adr/0013-accelerators-are-reserved.md)). Neither "half a GPU" nor "four GPUs" can be
-  said. Both need new requirement fields.
-- [ ] **Preempting placed work, and more than one victim.** A SCHEDULED task holds capacity and
-  cannot be chosen, and one running victim has to be enough.
-- [ ] **Keep CPU work off the only GPU node.** A tie can leave a GPU node's CPU full and a CPU node
-  idle while accelerator work waits for it.
-- [ ] **What `task_scheduler_stats` calls things.** Cancelled counts as completed, and placed counts
-  as queued. Both labels go back to the oracle, and neither is what the word means.
-- [ ] **A way to fail a task with a reason.** `complete_task(TASK_FAILED)` has nowhere to put one.
-
-### Limits that do not yet limit
-
-Measured in the 1.4.3 sweep. None is reachable without a hostile or absurd snapshot, and no consumer
-restores one across a trust boundary, so these wait on that event or on a real workload.
-
-- [ ] **`SAMAY_JSON_MAX_ITEMS` does not bound memory or bytes.** bayan's tree costs about 64 bytes per
-  array element, so 30 MB of `[[],[],...]` reaches 1.9 GB, and it is refused only after the parse.
-  An unknown key is not capped at all. A byte limit before parsing would help, and bayan would need
-  to help with the rest.
-- [ ] **A writer can die instead of refusing.** Past bayan's 2 GiB build limit the process exits,
-  though the snapshot is within the item limit. It should answer 0 as it does for items.
-- [ ] **A pass is O(pending × nodes).** 100,000 unplaceable tasks against 100,000 nodes takes 366 s
-  per pass. Skipping requirements already known not to fit would cut this for most real queues.
-- [ ] **Public leaf decoders accept anything.** `SchedulingDecision_from_json("{}")` returns a struct
-  with null Strs that crashes on the way back out. samay's own readers never use these.
-- [ ] **Values only the constructors allow.** A node with `total_cpu` past 1e18 restores with none, a
-  node with an empty id is dropped on restore, with a log line, and training method 99 becomes LORA.
-
-### Make the checks permanent
-
-Each of these ran by hand and can rot the way the benchmarks, the fuzz stub and the README example
-did.
-
-- [ ] **CI on aarch64 and in bounds-checked mode.** Both pass today and neither is gated.
-- [ ] **CI runs the fuzz harness.** It is real since 1.4.3, and a harness no one runs is how the last
-  one stayed a stub.
-- [ ] **CI compiles the README example.** It stopped compiling for several releases while claiming
-  to be run before each one. Declined for now on 2026-11-01; recorded because the failure was silent.
-- [ ] **Whole-source mutation as a release gate.** It found more than any audit before it. The
-  script is small, and a run takes about 20 minutes.
-
-### Tidying
-
-- [ ] **`docs/examples/` is empty**, though CLAUDE.md lists it as runnable examples. Fill it from
-  `src/main.cyr`, or drop the link.
-- [ ] **CLAUDE.md**: the `Goal` is still a TODO and needs the owner's words. The roadmap link still
-  says "Milestones through v1.0", the gate list carries a benchmark count, which is state, and two
-  statements are out of date: `Ok`/`Err` have not allocated since cyrius 6.6.0, and a bare
-  `cyrius fmt --check` now fails loudly.
-- [ ] **Version-stamped prose goes stale.** `docs/architecture/overview.md` and `state.md` still say
-  kavach 3.8.0 and daimon 2.0.0. Point them at the pins.
-- [ ] **`lib/hashmap_fast.cyr`** is outside the declared footprint and is noted on every resolve.
-- [ ] **stiva's `src/fleet.cyr`** says samay's ledger leaks because only `cancel_task` releases. That
-  stopped being true in 1.0.3, and it is a reason given for not adopting `NodeCapacity`.
+The order is by who it helps. 1.4.4 stops the last sweep's work rotting and lets consumers move.
+1.4.5 and 1.4.6 finish the repairs. New features wait until consumers can receive them, because
+nothing from 1.2 onward has reached one yet.
 
 ---
 
-## Trigger-gated — no pin, by design
+## 1.4.x — remaining repairs
 
-Pinning these would be theatre: none can start until an external event occurs, and a version number
-would just rot. Each names the event.
+### 1.4.4 — standing gates, toolchain floor, migration note
+
+No behaviour change. Each of these ran by hand and can rot the way the benchmarks, the fuzz stub and
+the README example did.
+
+- [ ] **CI runs the fuzz harness.** It has been real since 1.4.3, and a harness nobody runs is how the
+  last one stayed a stub.
+- [ ] **CI runs the suite on aarch64 and in bounds-checked mode.** Both pass by hand today.
+- [ ] **CI compiles and runs the README example.** It stopped compiling for several releases while
+  claiming to run before each one. Declined as "not now" on 2026-11-01; this is its pin.
+- [ ] **Whole-source mutation as a release check.** Commit the script, and run it at release rather
+  than on every push: a run takes about 20 minutes. It found more than any audit before it.
+- [ ] **State the real toolchain floor.** bayan 1.11.1 does not parse on cyrius 6.6.10, so the floor
+  rose during 1.2.x and nothing records it. Find it by building, put it in the README, and have CI
+  build on it.
+- [ ] **Migration note.** `docs/guides/migrating-to-1.4.md`, covering what changed under consumers:
+  accelerator tasks queue instead of sharing, `preempt_if_needed` returns less, `submit_task` refuses
+  a duplicate id, and a restored node can be rebuilt from its tasks.
+- [ ] **Tidying.** `docs/examples/` is empty: fill it from `src/main.cyr` or delete it. Point the
+  kavach and daimon version stamps in `overview.md` and `state.md` at the real pins. Correct the
+  vendoring comment in `cyrius.cyml`. Resolve `lib/hashmap_fast.cyr`, which is outside the declared
+  footprint and is noted on every resolve.
+
+### 1.4.5 — limits that actually limit
+
+Measured in the 1.4.3 sweep. *Entry gate*: peak memory measured against each limit, so a ceiling is
+chosen from numbers.
+
+- [ ] **A byte limit before parsing.** `SAMAY_JSON_MAX_ITEMS` bounds neither memory nor bytes. bayan's
+  tree costs about 64 bytes per array element, so 30 MB of `[[],[],...]` reaches 1.9 GB, and it is
+  refused only after the parse. An unknown key is not capped at all.
+- [ ] **A writer refuses instead of dying.** Past bayan's 2 GiB build limit the process exits, though
+  the snapshot is within the item limit. It should answer 0, as it does for items.
+- [ ] **Leaf decoders reject what they cannot read.** `SchedulingDecision_from_json("{}")` returns a
+  struct with null Strs that crashes on the way back out. samay's own readers never use these.
+- [ ] **Constructors and restore agree on every value.** A node with `total_cpu` past 1e18 restores
+  with none, `register_node` accepts an empty id that restore drops, and training method 99 becomes
+  LORA.
+
+### 1.4.6 — a placement pass below O(pending × nodes)
+
+100,000 unplaceable tasks against 100,000 nodes takes 366 s per pass. *Entry gate*: that baseline in
+`benchmarks.md`, measured with `cyrius bench`.
+
+- [ ] **Skip requirements already known not to fit.** Most real queues repeat a few shapes, so a
+  shape that fit nowhere this pass need not walk the nodes again.
+- [ ] **Decisions stay byte-identical.** It ships only if every decision matches 1.4.5 on real
+  binaries, because this is the hottest path that determinism rests on.
+
+---
+
+## Consumer adoption — gate to 1.5.0
+
+Not a samay release. **Nothing from 1.2 to 1.4 has reached a consumer**, and new requirement fields
+are no use to a consumer that cannot build them. Needs the toolchain floor and migration note from
+1.4.4.
+
+- [ ] **kavach** moves up from 1.1.6.
+- [ ] **daimon** moves up from 1.1.3. Its node route reaches the re-registering fix in 1.4.3.
+- [ ] **stiva** moves up from 1.1.2. It runs the cron code 1.4.1 and 1.4.3 repaired. Its full suite
+  then runs against current samay for the first time, and the comment in `src/fleet.cyr` saying
+  samay's ledger leaks can go: that stopped being true in 1.0.3.
+
+---
+
+## 1.5.0 onward — features
+
+### 1.5.0 — accelerator requests
+
+*Entry gate*: consumers on 1.4.x, and an ADR on the unit of sharing. Today a task takes one whole GPU,
+or chips of one pod ([ADR-0013](../adr/0013-accelerators-are-reserved.md)).
+
+- [ ] **Sharing a device.** "Half a GPU" cannot be said. It needs a new requirement field, and
+  exclusive stays the default.
+- [ ] **Several devices.** "Four GPUs" cannot be said either: `accel_min_chips` applies to TPUs only.
+- [ ] **Keep CPU work off the only GPU node.** A tie can fill a GPU node's CPU with CPU work while a
+  CPU node sits idle and accelerator work waits for it.
+
+### 1.6.0 — preemption
+
+*Entry gate*: an ADR on the new return shape, since `PreemptionAction` names one victim.
+
+- [ ] **Placed tasks can be chosen.** A SCHEDULED task holds capacity and cannot be preempted today.
+- [ ] **More than one victim.** A task needing 8 cores on a node holding two 4-core tasks gets no
+  answer today, because one victim has to be enough.
+
+### 1.7.0 — deadlines and `network`
+
+*Entry gate*: one ADR each. Both are stored, serialized and read by nothing, so each must start doing
+something or be marked for removal in 2.0.0.
+
+- [ ] **Deadlines.** Order by them within a priority, or say plainly that they are only stored.
+- [ ] **`ResourceReq.network`.** Give nodes a network capability to match it against, or retire it.
+
+### 1.8.0 — accounting
+
+*Entry gate*: an ADR on lifetime totals, which are new wire state.
+
+- [ ] **Stats that say what they mean.** Add `cancelled` and `scheduled` alongside today's fields.
+  Today cancelled counts as completed and placed counts as queued. The old meanings go in 2.0.0.
+- [ ] **Lifetime totals.** Pruning lowers `task_scheduler_stats`, because samay keeps none
+  ([ADR-0011](../adr/0011-bounded-task-history.md)).
+- [ ] **Failing a task with a reason.** `complete_task(TASK_FAILED)` has nowhere to put one.
+
+---
+
+## 2.0.0 — removals
+
+*Entry gate*: every consumer on 1.8.x. This is the only release allowed to break a public name.
+
+- [ ] **Remove `samay_init`.** It has done nothing since 1.4.3, and stays until now only because it
+  is public.
+- [ ] **`completed` and `queued` stop including cancelled and placed tasks.** 1.8.0 adds the honest
+  counters first, so consumers can move before the meanings change.
+- [ ] **Remove whatever 1.7.0 rejected.**
+
+---
+
+## Event-gated — no pin, by design
+
+Only these two: each waits on something outside this repo, and a version number would just rot.
 
 - [ ] **Opt-in concurrent-entry detector** — a debug mode that notices two threads inside one
   scheduler and aborts. Considered in the 1.0.4 audit and deliberately not built
-  ([ADR-0008](../adr/0008-threading-contract.md)). *Trigger*: any consumer adopting a threaded shape.
+  ([ADR-0008](../adr/0008-threading-contract.md)). *Event*: a consumer adopting a threaded shape.
 - [ ] **agnos verification** — no agnos run exists. aarch64 passes; NaN/Inf handling is the part most
-  likely to differ. *Trigger*: an agnos consumer.
-- [ ] **Lifetime counters in `task_scheduler_stats`** — pruning lowers the totals, because samay keeps
-  none ([ADR-0011](../adr/0011-bounded-task-history.md)). They would be new wire state. *Trigger*: a
-  consumer that prunes and needs lifetime counts.
-- [ ] **Remove `samay_init`.** It has done nothing since 1.4.3 and stays because it is public.
-  *Trigger*: the next major version.
+  likely to differ. *Event*: an agnos consumer.
 
 ---
 
@@ -144,9 +196,7 @@ Recorded so they are not re-proposed. Each was measured, not argued.
   would be false safety while the query API returns interior pointers
   ([ADR-0008](../adr/0008-threading-contract.md)).
 
-> **Trigger discipline.** Every trigger above names an event that actually occurs. Self-referential
-> triggers ("at the next rewrite") never arrive, and a trigger that fires only after the mistake is
-> not one. When one fires, check first whether the item has already shipped. An item that needs no
-> external event does not belong under a trigger at all: this file held aarch64 there for months with
-> qemu installed. And check them on every refresh: two items here were still waiting on upstream
-> fixes that had already shipped.
+> **Pin discipline.** A new item gets a version when it is written down. Event-gated is for things
+> this repo cannot make happen, and the event has to be one that actually occurs. Check those on
+> every refresh: 1.4.3 found two items still waiting on upstream fixes that had already shipped, and
+> aarch64 held behind a trigger with qemu installed.

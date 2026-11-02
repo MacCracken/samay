@@ -190,14 +190,10 @@ sweep).
 
 ## Next
 
-See [`roadmap.md`](roadmap.md) — it carries the full backlog with version pins and
-is the single source for forward work. In brief: **1.1.0** shipped the one
-deferral of three that survived verification (capped counts report as floors);
-**1.1.1** is checked `alloc()`; **1.2.0** took the cyrius 6.7 bump; **1.3.0**
-split `node_preference`; **1.4.0** closed F5 (the stdlib sort, task removal and
-refused oversized snapshots); **1.4.1** closed F8/F9 (the exact due count and the
-burst budget); **1.4.2** shipped the write-side JSON codec; **1.4.3** was the P(-1)
-sweep. Nothing is version-pinned now.
+See [`roadmap.md`](roadmap.md), the single source for forward work, with every item pinned to a
+version. **1.4.4** is standing gates, the toolchain floor and a migration note; **1.4.5** makes the
+limits limit; **1.4.6** cuts the cost of a placement pass. Consumers move up next, then features run
+from **1.5.0** to **1.8.0**, and removals wait for **2.0.0**.
 
 **Concurrency — audited in v1.0.4, see [ADR-0008](../adr/0008-threading-contract.md).**
 Retired as an unknown; now a stated contract with measured backing. Open items from it:
