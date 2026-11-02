@@ -1,6 +1,9 @@
 # ADR 0008 — samay is single-threaded by contract
 
-**Status**: accepted (2026-08-30, v1.0.4).
+**Status**: accepted (2026-08-30, v1.0.4). **Amended** 2026-11-01 (v1.4.1): cron evaluation
+no longer calls `epoch_to_date`, so samay no longer reaches the chrono window in item 3.
+`samay_init()` stays as a public function, and now protects only a consumer whose own threads
+call chrono ([ADR-0012](0012-cron-burst-budget.md)).
 
 ## Context
 

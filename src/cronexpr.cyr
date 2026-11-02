@@ -14,7 +14,7 @@
 # the starred field's mask must still be applied, not discarded: `*/N` also
 # sets the star flag and its mask is NOT all-ones.
 #
-# Requires: str, string, alloc, chrono (epoch_to_date), result.
+# Requires: str, string, alloc, result.
 
 var _CRON_MONTHS = "JANFEBMARAPRMAYJUNJULAUGSEPOCTNOVDEC";
 var _CRON_DAYS = "SUNMONTUEWEDTHUFRISAT";
@@ -275,28 +275,40 @@ fn _cron_dow(epoch_secs): i64 {
     return d;
 }
 
-# True (1) if the given epoch-seconds instant matches the expression.
-# Pre-1970 (negative) instants are not schedulable and never match (also
-# avoids a `1 << -1` on epoch_to_date's unguarded negative decomposition).
-fn cron_expr_matches(expr, epoch_secs): i64 {
-    if (epoch_secs < 0) { return 0; }
+# Month (1-12) and day of month for a day count since 1970-01-01 (days >= 0),
+# packed as month * 32 + day. epoch_to_date gives the same answer, but it
+# allocates 48 bytes that are never freed and walks the years from 1970, and
+# cron evaluation runs for every entry on every check. This is the Gregorian
+# civil-from-days conversion: O(1), no allocation, and no month table. Counting
+# the year from March puts the leap day last, so no month length is needed.
+fn _cron_month_day(days): i64 {
+    var doe = (days + 719468) % 146097;     # day of the 400-year cycle
+    var yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    var doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    var mp = (5 * doy + 2) / 153;           # months since March
+    var day = doy - (153 * mp + 2) / 5 + 1;
+    var month = mp + 3;
+    if (month > 12) { month = month - 12; }
+    return month * 32 + day;
+}
 
-    # Alloc-free prefilter. epoch_to_date() allocates 48 bytes through a bump
-    # allocator that never frees, and walks year-by-year from 1970, so the
-    # common miss path must not reach it — a catch-up window scan calls this
-    # once per minute. These two identities are exact for epoch_secs >= 0
-    # (UTC, no leap seconds); see lib/chrono.cyr:216-221. Every test here is a
-    # side-effect-free conjunctive filter, so reordering them changes only
-    # which one short-circuits, never the result.
+# True (1) if the time of day of `epoch_secs` (>= 0) passes the minute and hour
+# fields. Exact for UTC, which has no leap seconds here.
+fn _cron_time_matches(expr, epoch_secs): i64 {
     var minute = (epoch_secs / 60) % 60;
     if ((CronExpr_minute_mask(expr) & (1 << minute)) == 0) { return 0; }
     var hour = (epoch_secs / 3600) % 24;
     if ((CronExpr_hour_mask(expr) & (1 << hour)) == 0) { return 0; }
+    return 1;
+}
 
-    # _cron_dow is alloc-free too, so day-of-week also stays ahead of the
-    # calendar decomposition. Under the Vixie AND branch a DOW miss settles
-    # the result; under the OR branch it does NOT (DOM may still match), so
-    # this early exit is guarded on either_star.
+# True (1) if the UTC day holding `epoch_secs` (>= 0) passes the month and
+# day fields. The whole calendar half of a match, and the unit _cron_count_due
+# steps by, so a count cannot disagree with cron_expr_matches.
+fn _cron_day_matches(expr, epoch_secs): i64 {
+    # Under the Vixie AND branch a DOW miss settles the result; under the OR
+    # branch it does NOT (DOM may still match), so this early exit is guarded
+    # on either_star.
     var dow = _cron_dow(epoch_secs);
     var dow_ok = 0;
     if ((CronExpr_dow_mask(expr) & (1 << dow)) != 0) { dow_ok = 1; }
@@ -305,10 +317,9 @@ fn cron_expr_matches(expr, epoch_secs): i64 {
     if (CronExpr_dow_star(expr) == 1) { either_star = 1; }
     if (either_star == 1) { if (dow_ok == 0) { return 0; } }
 
-    # Only now is the calendar decomposition unavoidable (day + month).
-    var dt = epoch_to_date(epoch_secs);
-    var day = load64(dt + 16);
-    var month = load64(dt + 8);
+    var md = _cron_month_day(epoch_secs / 86400);
+    var day = md % 32;
+    var month = md / 32;
     if ((CronExpr_month_mask(expr) & (1 << month)) == 0) { return 0; }
 
     var dom_ok = 0;
@@ -320,6 +331,15 @@ fn cron_expr_matches(expr, epoch_secs): i64 {
     if (either_star == 1) { return dom_ok; }
     if (dom_ok == 1) { return 1; }
     return dow_ok;
+}
+
+# True (1) if the given epoch-seconds instant matches the expression.
+# Pre-1970 (negative) instants are not schedulable and never match. Neither half
+# allocates, on a hit or a miss.
+fn cron_expr_matches(expr, epoch_secs): i64 {
+    if (epoch_secs < 0) { return 0; }
+    if (_cron_time_matches(expr, epoch_secs) == 0) { return 0; }
+    return _cron_day_matches(expr, epoch_secs);
 }
 
 # Next matching epoch-seconds strictly after `epoch_secs` (minute-aligned),

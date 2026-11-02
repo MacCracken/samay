@@ -974,45 +974,33 @@ fn test_cron_next_after() {
     assert_eq(cron_expr_next_after(never, mar_2026), 0 - 1, "and has no next occurrence: -1");
     return 0;
 }
-# --- v1.1.0: a capped due-count is a floor, and says so ---
+# --- v1.4.1: the due count is exact ---
 
-fn test_cron_count_capped_flag() {
-    test_group("cron_count_capped");
-    # _cron_count_due short-circuits at CRON_MAX_COUNT. When it does, the value
-    # it returns is a FLOOR, not the true count -- the window holds 527,040
-    # minutes, so a per-minute expression really has 527,040 due occurrences
-    # while this reports 100,000. Before v1.1.0 the caller stated that figure as
-    # exact, making the operator-facing number wrong by 427,040. The cap is
-    # deliberately kept (raising it costs ~5x on this expression); what changed
-    # is that the logs now say ">=".
+fn test_cron_count_exact() {
+    test_group("cron_count_exact");
+    # Through 1.4.0 _cron_count_due stopped at 100,000 matches, so a per-minute
+    # expression reported 100,000 of its 527,041 and the logs had to say ">=".
+    # Stepping by day made the stop pointless. The window includes both ends.
     var now_s = _chrono_ymd_to_epoch_secs(2026, 8, 30, 12, 0, 0);
     var old_s = now_s - CRON_SCAN_WINDOW_SECS * 5;
     var clamped = 0;
-    var capped = 0;
 
     var _every_t, _every_v = cron_expr_parse(str_from("* * * * *"));
     var every = result_unwrap(_every_t, _every_v);
-    var n = _cron_count_due(every, old_s, now_s, &clamped, &capped);
-    assert_eq(capped, 1, "per-minute expression trips the count cap");
-    assert_eq(n, CRON_MAX_COUNT, "capped count returns exactly the cap");
-    assert_eq(clamped, 1, "and the pre-window clamp is reported too");
-    assert_eq(n < CRON_SCAN_WINDOW_SECS / 60, 1, "capped value really is a floor, not the truth");
+    var n = _cron_count_due(every, old_s, now_s, &clamped);
+    assert_eq(n, CRON_SCAN_WINDOW_SECS / 60 + 1, "per-minute count over the whole window");
+    assert_eq(clamped, 1, "and the pre-window clamp is reported");
 
-    # A daily expression scans the same window without ever reaching the cap,
-    # so its count is exact and must NOT be flagged as a floor.
     var _daily_t, _daily_v = cron_expr_parse(str_from("0 3 * * *"));
     var daily = result_unwrap(_daily_t, _daily_v);
     var clamped2 = 0;
-    var capped2 = 0;
-    var n2 = _cron_count_due(daily, old_s, now_s, &clamped2, &capped2);
-    assert_eq(capped2, 0, "daily expression does not trip the cap");
+    var n2 = _cron_count_due(daily, old_s, now_s, &clamped2);
     assert_eq(n2, 366, "exact count over the 366-day window");
+    assert_eq(clamped2, 1, "same clamp for a daily expression");
 
-    # A short, recent window is exact and unflagged on both counts.
+    # A short, recent window is exact and unclamped.
     var clamped3 = 0;
-    var capped3 = 0;
-    var n3 = _cron_count_due(daily, now_s - 86400 * 3, now_s, &clamped3, &capped3);
-    assert_eq(capped3, 0, "short window not capped");
+    var n3 = _cron_count_due(daily, now_s - 86400 * 3, now_s, &clamped3);
     assert_eq(clamped3, 0, "short window not clamped");
     assert_eq(n3, 3, "three daily occurrences in three days");
     return 0;
@@ -1194,8 +1182,7 @@ fn _diff_add(v, e) {
     return 0;
 }
 
-fn test_cron_matcher_differential() {
-    test_group("cron_matcher_differential");
+fn _diff_exprs() {
     var v = vec_new();
     _diff_add(v, "* * * * *");    _diff_add(v, "@hourly");      _diff_add(v, "@daily");
     _diff_add(v, "@weekly");      _diff_add(v, "@monthly");     _diff_add(v, "@yearly");
@@ -1204,6 +1191,12 @@ fn test_cron_matcher_differential() {
     _diff_add(v, "0 0 15,* * 1"); _diff_add(v, "0 12 29 2 *");  _diff_add(v, "0 0 30 2 *");
     _diff_add(v, "5 0-6/2 * JAN-MAR MON-WED");                  _diff_add(v, "*/7 */3 */5 */2 */2");
     _diff_add(v, "0 0 * * 7");    _diff_add(v, "30 3 * * 1-5"); _diff_add(v, "*/15 3,15 * * 1-5");
+    return v;
+}
+
+fn test_cron_matcher_differential() {
+    test_group("cron_matcher_differential");
+    var v = _diff_exprs();
     var ne = vec_len(v);
 
     # Minute-by-minute sweep, plus boundary instants (epoch 0, negatives, leap
@@ -1246,16 +1239,122 @@ fn test_cron_matcher_differential() {
     assert_eq(mism, 0, "optimised matcher agrees with reference on every pair");
     assert_eq(hits > 1000, 1, "differential actually exercised the match path");
 
-    # The prefilter's reason for existing: epoch_to_date allocates 48 bytes
-    # with no free, so a miss must not reach it. 20k misses used to cost
-    # ~960 KB; the ceiling here is deliberately far below that.
+    return 0;
+}
+
+# --- v1.4.1: cron evaluation allocates nothing, and the day-stepped count ---
+
+fn test_cron_month_day_calendar() {
+    test_group("cron_month_day");
+    # Every day for over four centuries against chrono's year walk, which covers
+    # each leap rule: the 4-year, the 100-year and the 400-year.
+    var bad = 0;
+    var days = 0;
+    while (days < 160000) {
+        var dt = epoch_to_date(days * 86400);
+        var md = _cron_month_day(days);
+        if (md / 32 != load64(dt + 8)) { bad = bad + 1; }
+        if (md % 32 != load64(dt + 16)) { bad = bad + 1; }
+        days = days + 1;
+    }
+    assert_eq(bad, 0, "agrees with epoch_to_date on every day");
+    assert_eq(_cron_month_day(0), 1 * 32 + 1, "1970-01-01");
+    var leap = _chrono_ymd_to_epoch_secs(2024, 2, 29, 0, 0, 0) / 86400;
+    assert_eq(_cron_month_day(leap), 2 * 32 + 29, "2024-02-29");
+    assert_eq(_cron_month_day(leap + 1), 3 * 32 + 1, "2024-03-01");
+    var century = _chrono_ymd_to_epoch_secs(2100, 2, 28, 0, 0, 0) / 86400;
+    assert_eq(_cron_month_day(century + 1), 3 * 32 + 1, "2100 has no Feb 29");
+    return 0;
+}
+
+fn test_cron_eval_no_alloc() {
+    test_group("cron_eval_no_alloc");
+    # epoch_to_date allocates 48 bytes with no free, and it was on the hit path
+    # until 1.4.1: one stale `* * * * *` entry cost 4.8 MB. A check runs this for
+    # every entry, so the ceiling is exactly nothing.
     var _em_t, _em_v = cron_expr_parse(str_from("0 0 1 1 *"));
     var em = result_unwrap(_em_t, _em_v);
+    var _ev_t, _ev_v = cron_expr_parse(str_from("* * * * *"));
+    var ev = result_unwrap(_ev_t, _ev_v);
     var t0 = _chrono_ymd_to_epoch_secs(2026, 7, 18, 3, 15, 0);
     var before = alloc_used();
     var k = 0;
-    while (k < 20000) { cron_expr_matches(em, t0 + k * 60); k = k + 1; }
-    assert_eq((alloc_used() - before) < 40000, 1, "miss path stays off epoch_to_date");
+    var hits = 0;
+    while (k < 20000) {
+        cron_expr_matches(em, t0 + k * 60);
+        hits = hits + cron_expr_matches(ev, t0 + k * 60);
+        k = k + 1;
+    }
+    assert_eq(alloc_used() - before, 0, "neither a hit nor a miss allocates");
+    assert_eq(hits, 20000, "the hit path really ran");
+    var clamped = 0;
+    before = alloc_used();
+    var n = _cron_count_due(ev, 1, t0, &clamped);
+    assert_eq(alloc_used() - before, 0, "a full-window count allocates nothing");
+    assert_eq(n, CRON_SCAN_WINDOW_SECS / 60 + 1, "and it was a full window");
+    return 0;
+}
+
+# The slow, obvious count: every minute of the range _cron_count_due covers.
+fn _ref_count_due(expr, lf_secs, now_secs) {
+    var t = (lf_secs / 60) * 60 + 60;
+    var end = (now_secs / 60) * 60;
+    if (t < end - CRON_SCAN_WINDOW_SECS) { t = end - CRON_SCAN_WINDOW_SECS; }
+    var n = 0;
+    while (t <= end) {
+        n = n + cron_expr_matches(expr, t);
+        t = t + 60;
+    }
+    return n;
+}
+
+# Sometimes an instant on the far side of the day-stepped path's boundaries.
+fn _day_edge(t) {
+    var r = _sort_rand(5);
+    if (r == 0) { return t - t % 86400 - 60; }
+    if (r == 1) { return t - t % 86400; }
+    if (r == 2) { return t - t % 86400 + 86340; }
+    if (r == 3) { return t - t % 86400 + 86399; }
+    return t;
+}
+
+fn test_cron_count_differential() {
+    test_group("cron_count_differential");
+    var v = _diff_exprs();
+    var base = _chrono_ymd_to_epoch_secs(2023, 11, 1, 0, 0, 0);
+    var spans = vec_new();
+    vec_push(spans, 5400);          # within a day or across one boundary
+    vec_push(spans, 86400 * 3);     # two partial days and maybe a whole one
+    vec_push(spans, 86400 * 40);    # across month ends
+    var bad = 0;
+    var hits = 0;
+    var i = 0;
+    while (i < 3000) {
+        var e = vec_get(v, _sort_rand(vec_len(v)));
+        var lf = _day_edge(base + _sort_rand(86400 * 900));
+        var span = vec_get(spans, i % 3);
+        # A few run past the window, which spans a leap day from 2023.
+        if (i % 100 == 0) { span = 86400 * 500; }
+        var now = _day_edge(lf + _sort_rand(span));
+        if (now < lf) { now = lf; }
+        var clamped = 0;
+        var n = _cron_count_due(e, lf, now, &clamped);
+        if (n != _ref_count_due(e, lf, now)) { bad = bad + 1; }
+        hits = hits + n;
+        i = i + 1;
+    }
+    assert_eq(bad, 0, "day-stepped count matches a minute-by-minute walk");
+    assert_eq(hits > 100000, 1, "the differential saw real matches");
+
+    # Masks are not range-checked on restore. cron_expr_matches can never test
+    # minute 60 or hour 24, so a whole day must not count them either.
+    var _x_t, _x_v = cron_expr_parse(str_from("0 3 * * *"));
+    var x = result_unwrap(_x_t, _x_v);
+    CronExpr_set_minute_mask(x, CronExpr_minute_mask(x) | (1 << 60) | (1 << 63));
+    CronExpr_set_hour_mask(x, CronExpr_hour_mask(x) | (1 << 24) | (1 << 40));
+    var c2 = 0;
+    var from = _chrono_ymd_to_epoch_secs(2026, 1, 1, 0, 0, 0);
+    assert_eq(_cron_count_due(x, from, from + 86400 * 10, &c2), _ref_count_due(x, from, from + 86400 * 10), "stray mask bits count for nothing");
     return 0;
 }
 
@@ -3074,6 +3173,346 @@ fn test_ownership_retained_strs() {
     return 0;
 }
 
+# --- v1.4.1: the burst budget holds entries, and never drops them ---
+
+# n entries at watermark lf, each with its own template so a task names its entry.
+fn _fleet_add(c, n, prefix, expr_str, policy, lf) {
+    var i = 0;
+    while (i < n) {
+        var name = _numbered(prefix, i);
+        var tmpl = cron_task_template_new(name, str_from("d"), str_from("a"), 3, make_req(f64_from(1), 128));
+        var e_t, e_v = cron_expr_parse(str_from(expr_str));
+        var e = cron_entry_new(name, result_unwrap(e_t, e_v), tmpl, 1, policy);
+        CronEntry_set_last_fired(e, lf);
+        cron_scheduler_add_entry(c, e);
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn _at_watermark(c, lf) {
+    var v = cron_scheduler_list_entries(c);
+    var n = 0;
+    var i = 0;
+    while (i < vec_len(v)) {
+        if (CronEntry_last_fired(vec_get(v, i)) == lf) { n = n + 1; }
+        i = i + 1;
+    }
+    return n;
+}
+
+# Tasks in `fired` that came from the entry called `name`.
+fn _fired_by(fired, name) {
+    var want = _cron_task_name(name);
+    var n = 0;
+    var i = 0;
+    while (i < vec_len(fired)) {
+        if (str_eq(ScheduledTask_name(vec_get(fired, i)), want) == 1) { n = n + 1; }
+        i = i + 1;
+    }
+    return n;
+}
+
+# Tasks fired by checking at `now` until a check returns nothing.
+fn _drain(c, now) {
+    var total = 0;
+    var got = vec_len(cron_scheduler_check_due_at(c, now));
+    while (got > 0) {
+        total = total + got;
+        got = vec_len(cron_scheduler_check_due_at(c, now));
+    }
+    return total;
+}
+
+fn test_cron_budget_holds_then_drains() {
+    test_group("cron_budget_drains");
+    var now = at_ns(2026, 7, 18, 12, 0);
+    var lf = now - 1000 * 60000000000;
+    var c = cron_scheduler_new();
+    _fleet_add(c, 12, "e-", "* * * * *", CRON_CATCHUP, lf);
+    var one = cron_scheduler_check_due_at(c, now);
+    assert_eq(vec_len(one), CRON_BURST_BUDGET, "a check stops at the budget");
+    assert_eq(_at_watermark(c, lf), 2, "two entries held, watermark untouched");
+    assert_eq(_at_watermark(c, now), 10, "the rest advanced");
+    var two = cron_scheduler_check_due_at(c, now);
+    assert_eq(vec_len(two), 2000, "the same instant again fires what was held");
+    assert_eq(_at_watermark(c, now), 12, "every entry has now advanced");
+    assert_eq(vec_len(cron_scheduler_check_due_at(c, now)), 0, "and nothing is left, so a drain loop ends");
+
+    # What the budget changes is when, not how many.
+    var saved = CRON_BURST_BUDGET;
+    CRON_BURST_BUDGET = 1000000000;
+    var whole = cron_scheduler_new();
+    _fleet_add(whole, 12, "e-", "* * * * *", CRON_CATCHUP, lf);
+    var all = vec_len(cron_scheduler_check_due_at(whole, now));
+    CRON_BURST_BUDGET = saved;
+    var d = cron_scheduler_new();
+    _fleet_add(d, 12, "e-", "* * * * *", CRON_CATCHUP, lf);
+    assert_eq(_drain(d, now), all, "a budgeted drain fires what one unbudgeted check would");
+    return 0;
+}
+
+fn test_cron_budget_boundary() {
+    test_group("cron_budget_boundary");
+    var now = at_ns(2026, 7, 18, 12, 0);
+    var lf = now - 1000 * 60000000000;
+    var fits = cron_scheduler_new();
+    _fleet_add(fits, 10, "e-", "* * * * *", CRON_CATCHUP, lf);
+    assert_eq(vec_len(cron_scheduler_check_due_at(fits, now)), CRON_BURST_BUDGET, "landing exactly on the budget fits");
+    assert_eq(_at_watermark(fits, now), 10, "so nothing is held");
+    var over = cron_scheduler_new();
+    _fleet_add(over, 11, "e-", "* * * * *", CRON_CATCHUP, lf);
+    assert_eq(vec_len(cron_scheduler_check_due_at(over, now)), CRON_BURST_BUDGET, "one burst past it stays out");
+    assert_eq(_at_watermark(over, lf), 1, "and is held");
+    return 0;
+}
+
+fn test_cron_budget_single_fires_exempt() {
+    test_group("cron_budget_exempt");
+    # A single fire is what an entry does on an ordinary minute, so no schedule
+    # on time can be delayed, however large it is.
+    var saved = CRON_BURST_BUDGET;
+    CRON_BURST_BUDGET = 10;
+    var now = at_ns(2026, 7, 18, 12, 0);
+    var c = cron_scheduler_new();
+    _fleet_add(c, 3, "burst-", "* * * * *", CRON_CATCHUP, now - 10 * 60000000000);
+    _fleet_add(c, 3, "skip-", "* * * * *", CRON_SKIP, now - 5 * 60000000000);
+    _fleet_add(c, 2, "ontime-", "* * * * *", CRON_CATCHUP, now - 60000000000);
+    _fleet_add(c, 1, "first-", "* * * * *", CRON_CATCHUP, 0);
+    _fleet_add(c, 1, "off-", "* * * * *", CRON_CATCHUP, now - 5 * 60000000000);
+    CronEntry_set_enabled(map_get(CronScheduler_entries(c), str_from("off-0")), 0);
+    var fired = cron_scheduler_check_due_at(c, now);
+    assert_eq(vec_len(fired), 10 + 3 + 2 + 1, "one burst and every single fire");
+    assert_eq(_at_watermark(c, now - 10 * 60000000000), 2, "the other two bursts are held");
+    assert_eq(_at_watermark(c, now), 8, "everything else advanced, the disabled entry too");
+
+    # Nor do single fires spend the budget: older ones run first here, and two
+    # bursts of 5 still fit in 10.
+    var d = cron_scheduler_new();
+    _fleet_add(d, 8, "skip-", "* * * * *", CRON_SKIP, now - 60 * 60000000000);
+    _fleet_add(d, 2, "burst-", "* * * * *", CRON_CATCHUP, now - 5 * 60000000000);
+    assert_eq(vec_len(cron_scheduler_check_due_at(d, now)), 8 + 5 + 5, "single fires leave the budget untouched");
+    assert_eq(_at_watermark(d, now), 10, "so nothing is held");
+    CRON_BURST_BUDGET = saved;
+    return 0;
+}
+
+fn test_cron_budget_writeback_consumer() {
+    test_group("cron_budget_writeback");
+    # stiva rebuilds its scheduler on every `check`, runs CRON_SKIP only, and
+    # stores now as every job's watermark whatever happened. That is safe only
+    # because a SKIP entry is never held: a held one would lose its debt there.
+    var saved = CRON_BURST_BUDGET;
+    CRON_BURST_BUDGET = 2;
+    var now = at_ns(2026, 7, 18, 12, 0);
+    var c = cron_scheduler_new();
+    _fleet_add(c, 50, "job-", "* * * * *", CRON_SKIP, now - 86400 * 1000000000);
+    assert_eq(vec_len(cron_scheduler_check_due_at(c, now)), 50, "every overdue SKIP job fires, past any budget");
+    assert_eq(_at_watermark(c, now), 50, "and none was held");
+    CRON_BURST_BUDGET = saved;
+    return 0;
+}
+
+fn test_cron_budget_first_burst_runs() {
+    test_group("cron_budget_progress");
+    # A budget below one burst must not freeze the entry forever.
+    var saved = CRON_BURST_BUDGET;
+    CRON_BURST_BUDGET = 5;
+    var now = at_ns(2026, 7, 18, 12, 0);
+    var c = cron_scheduler_new();
+    _fleet_add(c, 3, "e-", "* * * * *", CRON_CATCHUP, now - 20 * 60000000000);
+    assert_eq(vec_len(cron_scheduler_check_due_at(c, now)), 20, "one burst runs although it is past the budget");
+    assert_eq(_drain(c, now), 40, "so every check moves the backlog on");
+    CRON_BURST_BUDGET = saved;
+    return 0;
+}
+
+fn test_cron_budget_no_starvation() {
+    test_group("cron_budget_no_starvation");
+    # Six entries, each owing a burst on every check, and room for two bursts.
+    # In name order the first two would run on every check and the last four
+    # never. Oldest first takes turns, and nothing owed is lost.
+    var saved = CRON_BURST_BUDGET;
+    CRON_BURST_BUDGET = 10;
+    var base = at_ns(2026, 7, 18, 12, 0);
+    var c = cron_scheduler_new();
+    _fleet_add(c, 6, "e-", "* * * * *", CRON_CATCHUP, base);
+    var counts = vec_new();
+    var i = 0;
+    while (i < 6) { vec_push(counts, 0); i = i + 1; }
+    var pass = 1;
+    while (pass <= 5) {
+        var fired = cron_scheduler_check_due_at(c, base + pass * 5 * 60000000000);
+        i = 0;
+        while (i < 6) {
+            vec_set(counts, i, vec_get(counts, i) + _fired_by(fired, _numbered("e-", i)));
+            i = i + 1;
+        }
+        pass = pass + 1;
+    }
+    var silent = 0;
+    var owed = 0;
+    i = 0;
+    while (i < 6) {
+        if (vec_get(counts, i) == 0) { silent = silent + 1; }
+        i = i + 1;
+    }
+    assert_eq(silent, 0, "every entry fired within five checks");
+    # An entry's fires so far plus what it still owes is the whole time elapsed.
+    var entries = cron_scheduler_list_entries(c);
+    var end = base + 25 * 60000000000;
+    i = 0;
+    while (i < 6) {
+        var lf = CronEntry_last_fired(vec_get(entries, i));
+        owed = owed + vec_get(counts, i) + (end - lf) / 60000000000;
+        i = i + 1;
+    }
+    assert_eq(owed, 6 * 25, "every minute is fired or still owed, none lost");
+    CRON_BURST_BUDGET = saved;
+    return 0;
+}
+
+fn test_cron_check_order() {
+    test_group("cron_check_order");
+    # Oldest watermark first; a tie falls back to the name.
+    var now = at_ns(2026, 7, 18, 12, 0);
+    var c = cron_scheduler_new();
+    _fleet_add(c, 1, "z-old-", "* * * * *", CRON_SKIP, now - 600 * 60000000000);
+    _fleet_add(c, 1, "m-new-", "* * * * *", CRON_SKIP, now - 60 * 60000000000);
+    _fleet_add(c, 1, "a-new-", "* * * * *", CRON_SKIP, now - 60 * 60000000000);
+    var f = cron_scheduler_check_due_at(c, now);
+    assert_eq(vec_len(f), 3, "all three fire");
+    assert_eq(str_starts_with(ScheduledTask_name(vec_get(f, 0)), str_from("z-old")), 1, "the oldest debt goes first, whatever its name");
+    assert_eq(str_starts_with(ScheduledTask_name(vec_get(f, 1)), str_from("a-new")), 1, "then the tie, by name");
+    assert_eq(str_starts_with(ScheduledTask_name(vec_get(f, 2)), str_from("m-new")), 1, "and the rest of the tie");
+    return 0;
+}
+
+fn test_cron_budget_deterministic() {
+    test_group("cron_budget_deterministic");
+    # The same schedule at the same time holds the same entries, whatever order
+    # it was built in, on the wire or not.
+    var saved = CRON_BURST_BUDGET;
+    CRON_BURST_BUDGET = 40;
+    var now = at_ns(2026, 7, 18, 12, 0);
+    var lf = now - 30 * 60000000000;
+    var a = cron_scheduler_new();
+    _fleet_add(a, 8, "e-", "* * * * *", CRON_CATCHUP, lf);
+    var b = cron_scheduler_new();
+    var i = 7;
+    while (i >= 0) {
+        var name = _numbered("e-", i);
+        var tmpl = cron_task_template_new(name, str_from("d"), str_from("a"), 3, make_req(f64_from(1), 128));
+        var e_t, e_v = cron_expr_parse(str_from("* * * * *"));
+        var e = cron_entry_new(name, result_unwrap(e_t, e_v), tmpl, 1, CRON_CATCHUP);
+        CronEntry_set_last_fired(e, lf);
+        cron_scheduler_add_entry(b, e);
+        i = i - 1;
+    }
+    var fa = cron_scheduler_check_due_at(a, now);
+    var fb = cron_scheduler_check_due_at(b, now);
+    assert_eq(vec_len(fa), 30, "one burst fits with the 40-task budget, and the next too small to join it");
+    assert_eq(vec_len(fb), vec_len(fa), "same count");
+    var bad = 0;
+    i = 0;
+    while (i < vec_len(fa)) {
+        if (str_eq(ScheduledTask_name(vec_get(fa, i)), ScheduledTask_name(vec_get(fb, i))) != 1) { bad = bad + 1; }
+        i = i + 1;
+    }
+    assert_eq(bad, 0, "same tasks in the same order");
+
+    # A snapshot taken mid-drain carries the held work: it is only the watermarks.
+    var snap = cron_scheduler_to_json_str(a);
+    var back = cron_scheduler_from_json_str(snap);
+    var total = vec_len(fa) + _drain(back, now);
+    assert_eq(total, 8 * 30, "a restored scheduler finishes the drain, nothing lost or doubled");
+    CRON_BURST_BUDGET = saved;
+    return 0;
+}
+
+var _log_lines = 0;
+
+fn _log_capture(ts, level, category, msg, msg_len, fields) {
+    vec_push(_log_lines, str_new(msg, msg_len));
+    return 0;
+}
+
+fn _logs_start() {
+    _log_lines = vec_new();
+    sakshi_set_emit_hook(&_log_capture);
+    return 0;
+}
+
+fn _logs_stop() {
+    sakshi_clear_emit_hook();
+    return 0;
+}
+
+# Captured lines holding `text`.
+fn _logged(text) {
+    var want = str_from(text);
+    var n = 0;
+    var i = 0;
+    while (i < vec_len(_log_lines)) {
+        if (str_contains(vec_get(_log_lines, i), want) == 1) { n = n + 1; }
+        i = i + 1;
+    }
+    return n;
+}
+
+fn test_cron_budget_logs() {
+    test_group("cron_budget_logs");
+    # Held is not dropped, but it must not be quiet either. And a held entry says
+    # nothing of its own until it runs, so a long hold cannot repeat itself.
+    var saved = CRON_BURST_BUDGET;
+    CRON_BURST_BUDGET = 10;
+    var now = at_ns(2026, 7, 18, 12, 0);
+    var stale = now - CRON_SCAN_WINDOW_SECS * 2000000000;
+    var c = cron_scheduler_new();
+    _fleet_add(c, 3, "e-", "0 * * * *", CRON_CATCHUP, stale);
+    _logs_start();
+    var one = cron_scheduler_check_due_at(c, now);
+    assert_eq(vec_len(one), CRON_CATCHUP_CAP, "the first burst ran");
+    assert_eq(_logged("burst budget reached at 1000 task(s); 2 entry(ies) held"), 1, "the check says what it held");
+    assert_eq(_logged("catch-up window"), 1, "only the entry that ran reports its clamp");
+    assert_eq(_logged("catch-up capped"), 1, "and only that entry reports its cap");
+    cron_scheduler_check_due_at(c, now);
+    assert_eq(_logged("burst budget reached at 1000 task(s); 1 entry(ies) held"), 1, "a later check reports what is still held");
+    cron_scheduler_check_due_at(c, now);
+    assert_eq(_logged("burst budget reached"), 2, "and a check that held nothing says nothing");
+    assert_eq(_logged("catch-up window"), 3, "each clamp is reported once, not once per check");
+    _logs_stop();
+    CRON_BURST_BUDGET = saved;
+    return 0;
+}
+
+fn test_cron_logs_exact() {
+    test_group("cron_logs_exact");
+    # 1.1.0 made these say ">=" because the count stopped at 100,000. It no
+    # longer stops, so an operator now reads the real figure.
+    var now = at_ns(2026, 7, 18, 12, 0);
+    var stale = now - CRON_SCAN_WINDOW_SECS * 2000000000;
+    var full = CRON_SCAN_WINDOW_SECS / 60 + 1;
+    var s = cron_scheduler_new();
+    _fleet_add(s, 1, "s-", "* * * * *", CRON_SKIP, stale);
+    var c = cron_scheduler_new();
+    _fleet_add(c, 1, "c-", "* * * * *", CRON_CATCHUP, stale);
+    _logs_start();
+    cron_scheduler_check_due_at(s, now);
+    cron_scheduler_check_due_at(c, now);
+    _logs_stop();
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "skip policy dropped ");
+    str_builder_add_int(sb, full - 1);
+    assert_eq(_logged(str_cstr(str_builder_build(sb))), 1, "skip reports the exact drop");
+    var sb2 = str_builder_new();
+    str_builder_add_cstr(sb2, "fired 1000 of ");
+    str_builder_add_int(sb2, full);
+    assert_eq(_logged(str_cstr(str_builder_build(sb2))), 1, "the cap reports the exact total");
+    assert_eq(_logged(">="), 0, "and neither hedges");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_uuid_format();
@@ -3143,7 +3582,7 @@ fn main() {
     test_cron_first_eval_match();
     test_cron_first_eval_nomatch();
     test_cron_next_after();
-    test_cron_count_capped_flag();
+    test_cron_count_exact();
     test_task_status_name();
     test_cron_clock_regression();
     test_cron_disabled_no_debt();
@@ -3153,6 +3592,9 @@ fn main() {
     test_cron_star_list();
     test_cron_step_star_dom();
     test_cron_matcher_differential();
+    test_cron_month_day_calendar();
+    test_cron_eval_no_alloc();
+    test_cron_count_differential();
     test_cron_shortcut_semantics();
     test_cron_name_parsing();
     test_training_deadline_clamp();
@@ -3223,6 +3665,16 @@ fn main() {
     test_prune_terminal();
     test_prune_churn();
     test_snapshot_write_cap();
+    test_cron_budget_holds_then_drains();
+    test_cron_budget_boundary();
+    test_cron_budget_single_fires_exempt();
+    test_cron_budget_writeback_consumer();
+    test_cron_budget_first_burst_runs();
+    test_cron_budget_no_starvation();
+    test_cron_check_order();
+    test_cron_budget_deterministic();
+    test_cron_budget_logs();
+    test_cron_logs_exact();
     return assert_summary();
 }
 

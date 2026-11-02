@@ -74,6 +74,18 @@ fn main(): i64 {
     bench_batch_stop(b6, 100);
     bench_report(b6);
 
+    # _cron_count_due over the whole catch-up window: what one stale entry adds
+    # to a check. Last, for the same reason.
+    var _every_t, _every_v = cron_expr_parse(str_from("* * * * *"));
+    var every = result_unwrap(_every_t, _every_v);
+    var clamped = 0;
+    var b7 = bench_new("cron_count_window");
+    bench_batch_start(b7);
+    i = 0;
+    while (i < 1000) { _cron_count_due(every, 1, ct, &clamped); i = i + 1; }
+    bench_batch_stop(b7, 1000);
+    bench_report(b7);
+
     return 0;
 }
 

@@ -4,11 +4,11 @@ Task scheduler for AGNOS — real cron scheduling with **resource-aware,
 accelerator-conscious** task placement. Cyrius port of the original Rust library.
 
 - **Language**: Cyrius (toolchain 6.7.18) · **License**: GPL-3.0-only
-- **Consumers**: daimon (task scheduling), kavach (sandboxed execution)
-- **Status**: **v1.4.0** — port complete, P-1 and concurrency audited. Real cron
+- **Consumers**: daimon (task scheduling), kavach (sandboxed execution), stiva (scheduled containers)
+- **Status**: **v1.4.1** — port complete, P-1 and concurrency audited. Real cron
   (Vixie DOM/DOW), ai-hwaccel placement, JSON snapshot/restore, deterministic
-  scheduling, fail-closed restore, conserved node capacity. Both downstream
-  consumers (kavach 3.8.0, daimon 2.0.0) integrated.
+  scheduling, fail-closed restore, conserved node capacity. Downstream consumers
+  kavach, daimon and stiva are integrated.
 
 ## What it does
 
@@ -22,7 +22,9 @@ accelerator-conscious** task placement. Cyrius port of the original Rust library
 - **Real cron expressions** — standard 5-field (`min hour dom month dow`) with
   `*`, ranges, lists, `*/step`, month/day names, and `@hourly`…`@yearly`
   shortcuts, **validated at parse time**. Missed schedules follow an explicit
-  catch-up / skip policy — always logged, never silently dropped.
+  catch-up / skip policy — always logged, never silently dropped. A large catch-up
+  burst waits for a later check instead of landing all at once
+  ([ADR-0012](docs/adr/0012-cron-burst-budget.md)).
 - **Training-job templates** (LoRA / QLoRA / … → High-priority accelerator tasks).
 
 ## Build / test / bench
@@ -31,7 +33,7 @@ accelerator-conscious** task placement. Cyrius port of the original Rust library
 cyrius deps                          # resolve stdlib + ai-hwaccel into lib/
 cyrius build src/main.cyr build/samay
 ./build/samay                        # runnable demo
-cyrius test  tests/samay.tcyr        # 804/804 assertions
+cyrius test  tests/samay.tcyr        # 852/852 assertions
 cyrius bench tests/samay.bcyr
 ```
 
@@ -42,7 +44,7 @@ Consumers declare the dep and include the committed bundle:
 ```toml
 [deps.samay]
 git = "https://github.com/MacCracken/samay.git"
-tag = "1.4.0"
+tag = "1.4.1"
 modules = ["dist/samay.cyr"]
 ```
 
@@ -64,9 +66,10 @@ task_scheduler_register_node(s,
 # 4 TPU chips: this places on tpu-1. Ask for REQ_GPU instead and it is
 # deliberately NOT placed -- an accelerator task never lands on a node with no
 # matching device (ADR-0002), and the attempt is logged.
-var task_id = result_unwrap(task_scheduler_submit_task(s,
+var id_t, id_v = task_scheduler_submit_task(s,
   scheduled_task_new(str_from("job"), str_from("desc"), str_from("agent"), 7,
-    resource_req_new(f64_from(2), 4096, REQ_TPU, 4, 0, 1024))));
+    resource_req_new(f64_from(2), 4096, REQ_TPU, 4, 0, 1024)));
+var task_id = result_unwrap(id_t, id_v);
 var decisions = task_scheduler_schedule_pending(s);
 
 # Finish a task and hand its capacity back to the node. Driving a task terminal
@@ -86,6 +89,9 @@ var due = cron_scheduler_check_due(cron);
 The snippet above is compiled and run as written before each release — it
 yields `decisions=1`.
 
+If you store `last_fired` yourself, read it back from the entries after a check. A burst past
+the budget is held with its old watermark, and writing `now` over that deletes what it owed.
+
 See `src/main.cyr` for a worked demo and `tests/samay.tcyr` for the full API in use.
 
 ## Thread safety
@@ -96,20 +102,11 @@ deliberate contract, not an oversight — the query functions return raw pointer
 scheduler-owned structs, so an internal lock could not make sharing safe. See
 [ADR-0008](docs/adr/0008-threading-contract.md) for the measurements and the reasoning.
 
-If your process has more than one thread — even with a *separate* scheduler per thread —
-call `samay_init()` once before spawning them:
-
-```
-samay_init();            # then spawn
-```
-
-`task_scheduler_new()` and `cron_scheduler_new()` already do this, so the ordinary shape
-(build the scheduler, then spawn workers) needs nothing extra. The explicit call matters
-only if you use the free functions (`cron_expr_parse`, `cron_expr_matches`,
-`training_job_to_scheduled_task`) with no scheduler. It forces a process-global lazy
-initialiser in the vendored `chrono` module to run while you are still single-threaded;
-without it, racing threads can read a half-published month table and evaluate a cron
-expression against the wrong date.
+Separate schedulers on separate threads need nothing extra. Through 1.4.0 they needed
+`samay_init()` before spawning, because cron evaluation read a lazily built month table in
+the vendored `chrono` module. Since 1.4.1 it does not
+([ADR-0012](docs/adr/0012-cron-burst-budget.md)). `samay_init()` remains, and is worth
+calling once before spawning only if your own threads use `chrono` directly.
 
 ## Layout
 

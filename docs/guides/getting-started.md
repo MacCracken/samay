@@ -62,7 +62,4 @@ suite from v0.5.0 to v1.0.1 and the README's own example until v1.0.4. See
 
 **samay is single-threaded by contract.** One `TaskScheduler` / `CronScheduler`
 per thread; serialise externally if you need to share one. There is deliberately
-no internal lock — see [ADR-0008](../adr/0008-threading-contract.md). If your
-process has more than one thread at all, call `samay_init()` once before spawning
-(the constructors already do, so this only matters if you use the free cron
-functions with no scheduler).
+no internal lock — see [ADR-0008](../adr/0008-threading-contract.md).

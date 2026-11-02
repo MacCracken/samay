@@ -49,8 +49,10 @@ fn _samay_own(s, who): i64 {
 # calls epoch_to_date inside that window sees the non-zero pointer, skips the
 # init, and reads an all-zero table — epoch_to_date's month loop then never
 # breaks, falls out with m == 12, and reports month 13 with a day-of-year for
-# a day. samay reaches this from cron_expr_matches, so the observable damage
-# is a cron entry evaluated against the WRONG DATE.
+# a day. Through 1.4.0 samay reached this from cron_expr_matches, so the
+# observable damage was a cron entry evaluated against the WRONG DATE. Since
+# 1.4.1 no samay code reads that table (ADR-0012), so this now protects only a
+# consumer whose own threads call chrono.
 #
 # Measured on x86_64: 4 threads each racing their first epoch_to_date produced
 # a wrong date in 14 of 200 process runs; with this pre-warm, 0 of 200.
@@ -60,11 +62,8 @@ fn _samay_own(s, who): i64 {
 # filled, the race cannot recur for the life of the process. It is idempotent
 # and costs one epoch_to_date call.
 #
-# Called automatically by task_scheduler_new() and cron_scheduler_new(), which
-# covers every normal entry into the library. Call it explicitly before
-# spawning threads if you use the free functions (cron_expr_parse /
-# cron_expr_matches / training_job_to_scheduled_task) without a scheduler.
-# See ADR-0008 for the threading contract this is part of.
+# Called automatically by task_scheduler_new() and cron_scheduler_new(). See
+# ADR-0008 for the threading contract this is part of.
 fn samay_init(): i64 {
     epoch_to_date(0);
     return 0;

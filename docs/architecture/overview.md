@@ -65,16 +65,21 @@ per thread, serialised externally if shared. Deliberately no internal lock: the
 query functions hand out raw pointers into scheduler-owned structs, so a mutex
 would protect the lookup and release before the caller touches what it was
 given. Measured, audited, and reasoned through in
-[ADR-0008](../adr/0008-threading-contract.md). `samay_init()` closes the one
-process-global hazard that bites even callers who honour the contract.
+[ADR-0008](../adr/0008-threading-contract.md). The one process-global hazard that
+bit even callers who honoured the contract was chrono's month table, and since
+1.4.1 samay no longer reads it ([ADR-0012](../adr/0012-cron-burst-budget.md)).
 
 ## Consumers
 
-Both integrated, both green against `dist/samay.cyr`:
+All integrated against `dist/samay.cyr`:
 
 - **kavach 3.8.0** — sizes sandboxes from a samay `ResourceReq`
   (`kavach/src/samay_bridge.cyr`). samay decides placement; kavach executes.
 - **daimon 2.0.0** — deleted its own duplicated scheduler and consumes samay as
   the single source of truth.
+- **stiva** — `stiva cron` runs on samay's `cron_expr_parse` and
+  `cron_scheduler_check_due_at`. It runs CRON_SKIP only and stores each job's
+  `last_fired` itself, which is why a single fire is never held
+  ([ADR-0012](../adr/0012-cron-burst-budget.md)).
 
 Neither calls samay's cron or JSON API today, and neither is multi-threaded.

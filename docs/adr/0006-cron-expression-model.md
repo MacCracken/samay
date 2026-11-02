@@ -123,6 +123,6 @@ All three outcomes — skip, catch-up, and capped catch-up — now emit a `saksh
 - Everything here is UTC. There is no DST or timezone handling, so "02:30 nightly" is
   wrong by an hour twice a year in a zone that observes DST. Timezone support would
   change the on-the-wire format and is deferred.
-- The cross-entry aggregate work budget (audit F8/F9) is still open and is tracked in
-  [`docs/development/roadmap.md`](../development/roadmap.md); it lands in
-  `_cron_check_entry`.
+- The cross-entry aggregate work budget (audit F8/F9) closed in v1.4.1
+  ([ADR-0012](0012-cron-burst-budget.md)). That also corrected this ADR's prefilter note: it
+  kept `epoch_to_date` off the miss path only, and a match still allocated until then.

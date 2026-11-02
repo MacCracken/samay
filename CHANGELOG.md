@@ -4,6 +4,144 @@ All notable changes to Samay are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.1] — 2026-11-01
+
+**A check after a long outage takes microseconds per entry, its counts are exact, and a catch-up
+burst can no longer land all at once** ([ADR-0012](docs/adr/0012-cron-burst-budget.md)). This closes
+audit findings F8 and F9. **852 tests**, up 48. The toolchain, deps and wire format are unchanged.
+
+### Fixed — a stale cron entry cost up to 26 ms and 4.8 MB
+
+The roadmap said v1.0.3 removed the heap growth here. It removed it on a miss only: a matching minute
+still reached `epoch_to_date`, which allocates 48 bytes that are never freed. So 100 stale `* * * * *`
+entries burned 480 MB in one check.
+
+`cron_expr_matches` now allocates nothing, on a hit or a miss, and `_cron_count_due` steps by UTC day
+instead of by minute.
+
+| one check | 1.4.0 | 1.4.1 |
+|---|---:|---:|
+| one `0 0 1 1 *` entry, a full window behind | 3.1 ms, 18.5 KB | 29 µs, 960 B |
+| one `* * * * *` entry, a full window behind | 26 ms, 4.8 MB | 30 µs, 970 B |
+| 100,000 stale SKIP entries | about 43 min, 480 GB (extrapolated) | 3.1 s, 93 MB |
+
+Each figure includes firing the entry's task and writing its log lines. All were measured at 12:34,
+because midnight has no partial days and flatters the count: about 19 µs per entry there.
+
+### Changed — the due count is exact
+
+Through 1.4.0 the count stopped at 100,000, so the logs said `>=`. It no longer stops: `fired 1000 of
+527041` replaces `fired 1000 of >= 100000`. `CRON_MAX_COUNT` is removed, and no consumer read it.
+
+### Added — `CRON_BURST_BUDGET`
+
+A CRON_CATCHUP entry can fire 1,000 tasks, so 100 stale entries still created 100,000 tasks in one
+check. A check now limits bursts to `CRON_BURST_BUDGET` (10,000) tasks.
+
+- **A held entry loses nothing.** It fires no task and keeps its watermark, so its whole debt stays
+  due. The check logs one line saying how many it held.
+- **A single fire is never held and never spends the budget.** SKIP entries, on-time entries and
+  first evaluations are all exempt, so no schedule that is on time can be delayed, however large.
+- **Oldest watermark goes first, then name**, so held entries run next and none can starve. The
+  watermarks are the queue, so there is nothing new on the wire and a snapshot carries the backlog.
+- **To clear a backlog sooner, call again at the same `now_ns`** until a check returns nothing.
+- **⚠ If you store `last_fired` yourself, read it back from the entries.** Writing `now` over a held
+  entry deletes what it owed.
+
+100 hourly entries after a 30-day outage owe 72,000 tasks. 1.4.0 fired them in one 223 ms, 37 MB
+check. 1.4.1 fires the same 72,000 over 8 checks of 24 ms and 4 MB.
+
+The audit's scan budget and SKIP early exit are not built: with the scan gone, they would limit
+nothing.
+
+### Changed — `samay_init()` is no longer needed by samay
+
+Cron evaluation was the only way samay reached the race in chrono's month table
+([ADR-0008](docs/adr/0008-threading-contract.md)). `samay_init()` stays, and now matters only if your
+own threads call chrono.
+
+### Costs
+
+- **A check that fires nothing costs 70 ns more per entry**, 387 ns to 458 ns, or +18%. That is
+  0.07 ms per check at 1,000 entries.
+- **`cron_expr_matches` costs 4.6 ns more on a day-of-week miss**, 13.9 ns to 18.5 ns. The suite's row
+  measures that path, so it reads +33%. A real match went from 271 ns to 44 ns.
+- **While watermarks differ, tasks come back oldest debt first, not by name.**
+- **A held CATCHUP entry can pass `CRON_CATCHUP_CAP` while it waits**, so some occurrences are capped
+  that would have fitted. The cap's log line reports it.
+- **Each held entry is recounted per check**, about 25 µs: 2.6 s per check if 100,000 are held at
+  once.
+
+### Consumers
+
+- **No source change is needed.** `dist/samay.deps` is unchanged.
+- **stiva is the one real caller of this code**, which the docs had missed. It runs CRON_SKIP only and
+  stores `now` as every job's watermark, so a hold would lose a job silently. That is why a single
+  fire is exempt. stiva's real `cron_due_at`, copied unchanged onto this tree, passes its own
+  assertions, and a fleet of 20,000 overdue jobs fires in full on two checks running. samay's own
+  dependencies no longer load on stiva's 6.6.10 pin, so its full suite was not run against this
+  release.
+- **daimon's 56 scheduler tests and 40 main tests pass against 1.4.1**, in a scratch copy on its own
+  6.6.6 pin.
+
+### Tests
+
+- **Thirteen new tests, 48 assertions net.** `test_cron_count_exact` replaces
+  `test_cron_count_capped_flag`, which pinned the floor this release removes.
+- **Every day for 438 years** against `epoch_to_date`, which covers each leap rule.
+- **3,000 random windows** against a minute-by-minute walk, biased to day boundaries.
+- **The first tests of samay's log lines**, through a sakshi emit hook: what a check holds, the exact
+  counts, and that a held entry repeats nothing.
+- **All 37 mutations of this work are caught.** The first run missed one, single fires spending the
+  budget, because the exemption test ran bursts first. It now covers both orders.
+- **`tests/samay.bcyr` gains `cron_count_window`.**
+
+### Performance
+
+1.4.0 against 1.4.1, both on cyrius 6.7.18, interleaved, shuffled and pinned to one CPU. The suite
+rows ran 60 rounds, the scratch rows 30. The four rows this release does not touch stayed within
+0.2%. Medians:
+
+| row | 1.4.0 | 1.4.1 | Δ | p |
+|---|---:|---:|---:|---:|
+| `node_can_fit` | 12.44 ns | 12.46 ns | +0.2% | 0.06 |
+| `priority_from_numeric` | 4.30 ns | 4.30 ns | 0.0% | 0.95 |
+| `samay_uuid_v4` | 660.0 ns | 660.5 ns | +0.1% | 0.12 |
+| `scheduled_task_new` | 2.32 µs | 2.32 µs | +0.1% | 0.18 |
+| `cron_expr_matches` | 13.94 ns | 18.50 ns | **+32.8%** | <0.01 |
+| `pending_tasks_2000` | 371.1 µs | 378.6 µs | +2.0% | <0.01 |
+| `cron_count_window` | 27.1 ms | 24.4 µs | **−99.9%** | <0.01 |
+| a real match, `* * * * *` (scratch) | 270.5 ns | 43.8 ns | **−83.8%** | <0.01 |
+| a check that fires nothing, per entry (scratch) | 387.0 ns | 457.5 ns | **+18.2%** | <0.01 |
+| a check where all fire, per entry (scratch) | 3.21 µs | 3.08 µs | −4.1% | <0.01 |
+
+`pending_tasks_2000` runs no code this release changed, so its 2% is probably code layout. That was
+not proven. The 1.4.0 arm ran `cron_count_window` 20 times, not 1,000, because that many full scans
+would have taken 27 s and 4.8 GB each round.
+
+### Verified
+
+- **Real binaries.** 3,000 random schedules against 1.4.0, 5.45M fires, with clock steps backward and
+  gaps past the window. All fire the same tasks, and every log line matches apart from counts past
+  the old 100,000 stop. Where watermarks tie, the output is byte-identical.
+- **The roadmap's entry gate**: [ADR-0012](docs/adr/0012-cron-burst-budget.md) settles the exhaustion
+  rule.
+- **The README's example now compiles.** It claims to be compiled and run before each release, but it
+  called `result_unwrap` with one argument, which stopped working when the stdlib's `result_unwrap`
+  began taking both halves. It now gives `decisions=1`, as stated.
+- CI's steps, run locally on 6.7.18: build, 852/852 tests, fmt and lint over `src/` and `tests/`,
+  every public function called by a test, every allocation guarded (ADR-0009), `dist/` in sync
+  (2,669 lines), and the benchmarks. `cyrius coverage --min 100` passes, 82/82.
+- No symbol collisions: none of samay's 151 functions or 7 variables is defined in the vendored `lib/`.
+- A consumer that includes only `bayan-json`, `ai-hwaccel` and `dist/samay.cyr` still compiles and
+  runs. `src/json.cyr` is untouched, so the wire format cannot have changed.
+
+### Docs
+
+- **The roadmap's account of F8/F9 was wrong**, as described above, and "neither consumer calls the
+  cron API" no longer held. Both are corrected, and stiva is in the consumer lists.
+- **The roadmap now has one pinned item left**, the write-side JSON codec at 1.4.2.
+
 ## [1.4.0] — 2026-11-01
 
 **A scheduling pass at 100,000 tasks takes 58 ms, not 58 seconds; finished tasks can be removed; and

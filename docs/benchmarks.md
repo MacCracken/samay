@@ -14,6 +14,48 @@ pre-warm off every hot path, and re-measured within noise of the table below
 | `samay_uuid_v4`         | 606 ns   | 613 ns   | getrandom(2) syscall-bound         |
 | `scheduled_task_new`    | 2.07 µs  | 2.06 µs  | alloc + uuid + `dt_now`            |
 
+## v1.4.1 — the due count, and a check after an outage
+
+**One check.** 1.4.0 against 1.4.1, both on cyrius 6.7.18, a scratch harness on one CPU at 12:34.
+Midnight has no partial days and flatters the count, at about 19 µs per entry. The 100,000-entry
+figure for 1.4.0 is extrapolated from 100 entries, because no real host would finish it. Each figure
+includes firing the entry's task and writing its log lines.
+
+| One check                                     | 1.4.0            | 1.4.1          |
+|-----------------------------------------------|------------------|----------------|
+| one `0 0 1 1 *` entry, a full window behind   | 3.1 ms, 18.5 KB  | 29 µs, 960 B   |
+| one `* * * * *` entry, a full window behind   | 26 ms, 4.8 MB    | 30 µs, 970 B   |
+| 100,000 stale SKIP entries                    | ~43 min, ~480 GB | 3.1 s, 93 MB   |
+| 100 hourly CATCHUP entries, 30 days behind    | 223 ms, 37 MB    | 24 ms, 4 MB    |
+
+The last row fires 72,000 tasks at once on 1.4.0, and over 8 checks on 1.4.1. If 100,000 entries
+are all held, each check takes 2.6 s to recount them.
+
+**The suite.** 60 rounds interleaved, shuffled and pinned to one CPU, with the scratch rows at 30
+(2026-11-01). The rows this release does not touch stayed within 0.2%. Medians:
+
+| Op                                  | 1.4.0    | 1.4.1    | Δ       |
+|-------------------------------------|----------|----------|---------|
+| `priority_from_numeric`             | 4.30 ns  | 4.30 ns  | 0.0%    |
+| `node_can_fit`                      | 12.44 ns | 12.46 ns | +0.2%   |
+| `cron_expr_matches`                 | 13.94 ns | 18.50 ns | **+32.8%** |
+| `samay_uuid_v4`                     | 660.0 ns | 660.5 ns | +0.1%   |
+| `scheduled_task_new`                | 2.32 µs  | 2.32 µs  | +0.1%   |
+| `pending_tasks_2000`                | 371.1 µs | 378.6 µs | +2.0%   |
+| `cron_count_window`                 | 27.1 ms  | 24.4 µs  | **−99.9%** |
+| a real match (scratch)              | 270.5 ns | 43.8 ns  | **−83.8%** |
+| check, nothing fires, per entry (scratch) | 387.0 ns | 457.5 ns | **+18.2%** |
+| check, all fire, per entry (scratch) | 3.21 µs | 3.08 µs  | −4.1%   |
+
+- **Two rows got slower, on purpose.** `cron_expr_matches` lands on a day-of-week miss, so it pays for
+  the matcher being two calls and gains nothing from the change to the match path. A check that fires
+  nothing pays 70 ns per entry, and evaluation order is the likely cause, though the split was not
+  measured.
+- `pending_tasks_2000` runs no code this release changed, so its 2% is probably code layout. That was
+  not proven.
+- The 1.4.0 arm ran `cron_count_window` 20 times, not 1,000, because that many full scans would have
+  taken 27 s and 4.8 GB each round.
+
 ## v1.4.0 — one sort, and task removal
 
 **Sorting.** 1.3.0 against 1.4.0, both on cyrius 6.7.18, 60 rounds interleaved, shuffled and pinned

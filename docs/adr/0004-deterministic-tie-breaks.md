@@ -42,6 +42,9 @@ A single shared comparator `samay_str_lt` (lexicographic, unsigned byte-wise, in
 | `cron_scheduler_list_entries` | — | entry `name` asc |
 | `cron_scheduler_check_due_at` | — | entry `name` asc (before firing/logging) |
 
+Since v1.4.1 `cron_scheduler_check_due_at` orders by `last_fired` first, and `name` is its
+tie-break ([ADR-0012](0012-cron-burst-budget.md)). It is still a total order.
+
 `task_id` (a v4 UUID), `node_id`, and cron entry `name` are unique map keys, so each
 tie-break is total. JSON serialization was already made deterministic in M4 (maps emit as
 key-sorted arrays); it now shares the same `samay_str_lt` comparator.

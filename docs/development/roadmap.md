@@ -1,6 +1,6 @@
 # samay — Roadmap
 
-> **Last refreshed**: 2026-11-01 (v1.4.0)
+> **Last refreshed**: 2026-11-01 (v1.4.1)
 >
 > **Forward-looking only.** Nothing shipped belongs here — per-release detail
 > lives in [`../../CHANGELOG.md`](../../CHANGELOG.md) (complete from 0.1.0), the
@@ -10,10 +10,10 @@
 > An item moves when its dependencies are met; a trigger-gated item has no pin at
 > all, deliberately — see [Trigger-gated](#trigger-gated--no-pin-by-design).
 
-> **Current**: **v1.4.0**, cyrius pin **6.7.18**, deps ai-hwaccel **2.5.6** +
-> bayan-json **1.11.1**. Gates green: **804 assertions**, **6/6 benchmarks**,
+> **Current**: **v1.4.1**, cyrius pin **6.7.18**, deps ai-hwaccel **2.5.6** +
+> bayan-json **1.11.1**. Gates green: **852 assertions**, **7/7 benchmarks**,
 > coverage **82/82** public functions (each called by a test; 6.6.14 stopped counting `main`), lint 0-warn / 0
-> untracked deferrals, fmt clean, `dist/` in sync (2,566 lines), 0 symbol collisions
+> untracked deferrals, fmt clean, `dist/` in sync (2,669 lines), 0 symbol collisions
 > against the vendored deps. `src/` is 9 modules. The 1,479-line Rust oracle was
 > retired after 1.1.5 ([`rust-old-removal.md`](rust-old-removal.md)).
 
@@ -26,7 +26,7 @@
 | ~~1.2.0~~ | ~~cyrius 6.7.9, bayan 1.5.13, `math` dropped~~ | — | **shipped 2026-11-01** |
 | ~~1.3.0~~ | ~~Split `node_preference` ([ADR-0010](../adr/0010-request-and-assignment.md))~~ | — | **shipped 2026-11-01** |
 | ~~1.4.0~~ | ~~F5 — one sort, task removal, refused oversized snapshots ([ADR-0011](../adr/0011-bounded-task-history.md))~~ | — | **shipped 2026-11-01** |
-| **1.4.1** | F8/F9 — cron aggregate work budget | medium | an ADR on the exhaustion rule |
+| ~~1.4.1~~ | ~~F8/F9 — exact due count, burst budget ([ADR-0012](../adr/0012-cron-burst-budget.md))~~ | — | **shipped 2026-11-01** |
 | **1.4.2** | Write-side JSON codec | medium | byte-equality corpus |
 | *(none)* | Trigger-gated items | — | a consumer event |
 
@@ -64,19 +64,8 @@ allocation. See the CHANGELOG.
 
 ## 1.4.x — remaining repairs
 
-Ordering is by dependency and blast radius, not by appetite. These two were 1.5.0
-and 1.6.0 until 2026-11-01, when the remaining repairs moved into the 1.4.x line.
-
-### 1.4.1 — F8/F9: cron aggregate work budget
-
-- [ ] Per-entry catch-up is bounded (`CRON_SCAN_WINDOW_SECS`, `CRON_MAX_COUNT`,
-  `CRON_CATCHUP_CAP`); the aggregate across many entries in one `check_due_at` is
-  not. v1.0.3's alloc-free prefilter cut the cost ~12× and removed the heap growth
-  entirely, so this is now a **policy** question rather than an availability one.
-  Lands in `_cron_check_entry`, which v1.0.3 extracted for exactly this.
-  *Entry gate*: an ADR settling the exhaustion rule — every candidate (stop early,
-  skip remaining entries, degrade to SKIP) collides with "missed schedules are
-  never silently skipped", and that conflict is the actual work.
+The last repair was 1.6.0 until 2026-11-01, when the remaining repairs moved into
+the 1.4.x line. F8/F9 shipped as 1.4.1.
 
 ### 1.4.2 — write-side JSON codec
 
@@ -119,9 +108,12 @@ and a version number would just rot. Each names the event.
   why samay is unaffected by the seeding change). v1.0.3 already removed the one
   path by which bucket order reached a documented-deterministic decision.
   *Trigger*: an upstream release.
-- [ ] **Drop `samay_init`'s chrono pre-warm.** Only once
-  `cyrius/docs/development/proposals/2026-08-30-lazy-init-publish-before-fill.md`
-  ships **and** the pin moves past it. *Trigger*: an upstream release.
+- [ ] **Drop `samay_init`'s chrono pre-warm.** samay stopped reading chrono's month
+  table in 1.4.1, so the pre-warm protects only a consumer's own chrono calls.
+  `samay_init` itself stays, because removing a public function is a major-version
+  change. *Trigger*: an upstream fix to
+  `cyrius/docs/development/proposals/2026-08-30-lazy-init-publish-before-fill.md`, or
+  the next major version.
 
 ---
 
@@ -136,14 +128,15 @@ Recorded so they are not re-proposed. Each was measured, not argued.
   indistinguishable across three runs with warm-up controlled. The only
   behavioural change would be suppressing `_cron_log_clamp`, a **true** warning
   that pre-window occurrences were dropped. Nothing gained, information lost.
-  *The real cost here is the full-window scan itself (~3.9 ms per stale entry),
-  and the fix for that is the aggregate budget at 1.4.1, not a restore clamp.*
+  *The real cost here was the full-window scan itself, and 1.4.1 removed it by
+  counting per day, which makes a restore clamp pointless a second time.*
 - **Raise `CRON_MAX_COUNT` to the window size** (planned for 1.1.0). **Not free,
   as had been claimed.** A matching minute costs ~40× a missing one — it passes
   the v1.0.3 prefilter and reaches `epoch_to_date` — so `* * * * *` over a full
   window is **28.9 ms** capped at 100,000 against **~153 ms** uncapped. 5× more
   work to make a log line exact. v1.1.0 shipped the free half instead: the count
-  now carries a floor flag and the logs say `>=` (v1.1.0).
+  carried a floor flag and the logs said `>=`. *1.4.1 made this moot by counting per
+  day: the count is exact and cheaper than the cap was, so the cap is gone.*
 - **Saturating subtraction in the stats averages** (audit Rec 6, planned for
   1.1.1). **Already shipped** — the guards have been in `task_scheduler_stats`
   since `e3861d2 "rust port parity"`, the original port. Rec 6 was filed as "no
@@ -154,8 +147,13 @@ Recorded so they are not re-proposed. Each was measured, not argued.
   — but that branch logs `due - 1`, the **exact** number of dropped occurrences.
   An early exit turns that number into a fabrication, and "missed schedules are
   never silently skipped" is not satisfied by reporting a wrong count instead of
-  none. 1.1.0 makes the count *more* accurate for the same reason. Revisit only
-  with a bounded form that reports "≥ N" honestly.
+  none. 1.1.0 makes the count *more* accurate for the same reason. *Not needed
+  since 1.4.1: the exact count takes microseconds, so there is nothing to exit from.*
+- **A budget on minutes scanned** (audit F8, 1.4.1). It rations a cost that can be
+  removed. At 30 ms per check it clears about 10 stale entries, a week of checks for
+  100,000 of them. Day-stepping took one stale entry from 26 ms to 30 µs instead, and
+  the budget that shipped limits bursts, the one amplification left
+  ([ADR-0012](../adr/0012-cron-burst-budget.md)).
 
 ## Out of scope
 
