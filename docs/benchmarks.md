@@ -14,6 +14,33 @@ pre-warm off every hot path, and re-measured within noise of the table below
 | `samay_uuid_v4`         | 606 ns   | 613 ns   | getrandom(2) syscall-bound         |
 | `scheduled_task_new`    | 2.07 µs  | 2.06 µs  | alloc + uuid + `dt_now`            |
 
+## v1.4.2 — nested leaves built directly
+
+1.4.1 against 1.4.2, both on cyrius 6.7.18, interleaved, shuffled and pinned to one CPU, with the
+suite rows at 60 rounds and the snapshot rows at 30 (2026-11-01). The rows this release does not touch
+stayed within 1.3%. Medians:
+
+| Op                              | 1.4.1    | 1.4.2    | Δ       |
+|---------------------------------|----------|----------|---------|
+| `priority_from_numeric`         | 4.50 ns  | 4.51 ns  | +0.1%   |
+| `node_can_fit`                  | 12.58 ns | 12.58 ns | 0.0%    |
+| `cron_expr_matches`             | 18.53 ns | 18.54 ns | 0.0%    |
+| `samay_uuid_v4`                 | 663.5 ns | 655.0 ns | −1.3%   |
+| `scheduled_task_new`            | 2.30 µs  | 2.30 µs  | +0.3%   |
+| `cron_count_window`             | 24.12 µs | 24.12 µs | 0.0%    |
+| `pending_tasks_2000`            | 366.9 µs | 369.5 µs | +0.7%   |
+| `scheduled_task_to_jsonv`       | 6.39 µs  | 2.48 µs  | **−61.2%** |
+| `cron_entry_to_jsonv`           | 10.64 µs | 2.58 µs  | **−75.8%** |
+| snapshot, 200 tasks and 8 nodes (scratch) | 4.32 ms | 3.43 ms | **−20.8%** |
+| snapshot, 200 cron entries (scratch) | 4.85 ms | 3.12 ms | **−35.7%** |
+
+- **A whole snapshot gains much less than one document.** Most of a write goes on
+  `bayan_json_v_build` emitting text, which did not change.
+- Heap per document also fell: `scheduled_task_to_jsonv` 2,320 B to 1,872 B, and
+  `cron_entry_to_jsonv` 2,904 B to 1,976 B.
+- The roadmap's 3.14 µs for the bridge was measured on 6.5.36. On bayan 1.11.1 it took 5.1 µs per
+  requirement.
+
 ## v1.4.1 — the due count, and a check after an outage
 
 **One check.** 1.4.0 against 1.4.1, both on cyrius 6.7.18, a scratch harness on one CPU at 12:34.

@@ -86,6 +86,23 @@ fn main(): i64 {
     bench_batch_stop(b7, 1000);
     bench_report(b7);
 
+    # The two documents that carry a nested leaf. Last, for the same reason.
+    var task = scheduled_task_new(t_name, t_desc, t_agent, 5, req);
+    var b8 = bench_new("scheduled_task_to_jsonv");
+    bench_batch_start(b8);
+    i = 0;
+    while (i < 20000) { scheduled_task_to_jsonv(task); i = i + 1; }
+    bench_batch_stop(b8, 20000);
+    bench_report(b8);
+
+    var entry = cron_entry_new(t_name, expr, cron_task_template_new(t_name, t_desc, t_agent, 5, req), 1, CRON_SKIP);
+    var b9 = bench_new("cron_entry_to_jsonv");
+    bench_batch_start(b9);
+    i = 0;
+    while (i < 20000) { cron_entry_to_jsonv(entry); i = i + 1; }
+    bench_batch_stop(b9, 20000);
+    bench_report(b9);
+
     return 0;
 }
 

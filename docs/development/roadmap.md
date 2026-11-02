@@ -1,6 +1,6 @@
 # samay — Roadmap
 
-> **Last refreshed**: 2026-11-01 (v1.4.1)
+> **Last refreshed**: 2026-11-01 (v1.4.2)
 >
 > **Forward-looking only.** Nothing shipped belongs here — per-release detail
 > lives in [`../../CHANGELOG.md`](../../CHANGELOG.md) (complete from 0.1.0), the
@@ -10,10 +10,10 @@
 > An item moves when its dependencies are met; a trigger-gated item has no pin at
 > all, deliberately — see [Trigger-gated](#trigger-gated--no-pin-by-design).
 
-> **Current**: **v1.4.1**, cyrius pin **6.7.18**, deps ai-hwaccel **2.5.6** +
-> bayan-json **1.11.1**. Gates green: **852 assertions**, **7/7 benchmarks**,
+> **Current**: **v1.4.2**, cyrius pin **6.7.18**, deps ai-hwaccel **2.5.6** +
+> bayan-json **1.11.1**. Gates green: **864 assertions**, **9/9 benchmarks**,
 > coverage **82/82** public functions (each called by a test; 6.6.14 stopped counting `main`), lint 0-warn / 0
-> untracked deferrals, fmt clean, `dist/` in sync (2,669 lines), 0 symbol collisions
+> untracked deferrals, fmt clean, `dist/` in sync (2,691 lines), 0 symbol collisions
 > against the vendored deps. `src/` is 9 modules. The 1,479-line Rust oracle was
 > retired after 1.1.5 ([`rust-old-removal.md`](rust-old-removal.md)).
 
@@ -27,7 +27,7 @@
 | ~~1.3.0~~ | ~~Split `node_preference` ([ADR-0010](../adr/0010-request-and-assignment.md))~~ | — | **shipped 2026-11-01** |
 | ~~1.4.0~~ | ~~F5 — one sort, task removal, refused oversized snapshots ([ADR-0011](../adr/0011-bounded-task-history.md))~~ | — | **shipped 2026-11-01** |
 | ~~1.4.1~~ | ~~F8/F9 — exact due count, burst budget ([ADR-0012](../adr/0012-cron-burst-budget.md))~~ | — | **shipped 2026-11-01** |
-| **1.4.2** | Write-side JSON codec | medium | byte-equality corpus |
+| ~~1.4.2~~ | ~~Write-side JSON codec, bytes unchanged~~ | — | **shipped 2026-11-01** |
 | *(none)* | Trigger-gated items | — | a consumer event |
 
 ---
@@ -62,20 +62,9 @@ allocation. See the CHANGELOG.
   `map_values` order differ between runs, which is a benefit (it surfaces latent
   order dependencies) but needs a migration window.
 
-## 1.4.x — remaining repairs
+## Pinned work
 
-The last repair was 1.6.0 until 2026-11-01, when the remaining repairs moved into
-the 1.4.x line. F8/F9 shipped as 1.4.1.
-
-### 1.4.2 — write-side JSON codec
-
-- [ ] `_rr_node` / `_ce_node` still serialize-then-reparse through the `#derive`
-  codec — measured 3.14 µs → 695 ns for a direct builder, ~68% of
-  `scheduled_task_to_jsonv`. The read side moved to hand-written codecs in 1.0.3;
-  the write side was held back so that release's emitted bytes were provably
-  unchanged. *Entry gate*: a byte-equality corpus over ≥500 `ResourceReq` values
-  including `1/3`, `0.1`, `7/9` — this is the one change that can silently alter
-  the wire, so it ships alone or not at all.
+None. 1.4.2 shipped the last pinned repair, so everything left below waits on an event.
 
 ---
 

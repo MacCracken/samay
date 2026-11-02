@@ -5,6 +5,12 @@
 
 ## Version
 
+**1.4.2** — the write-side JSON codec. `_rr_node` and `_ce_node` build their tree directly instead of
+printing with the derive and parsing it back, so a whole snapshot writes 21 to 36% faster. Every byte
+is unchanged, proven against real 1.4.1 binaries and held by a permanent corpus in the suite. The
+derive stays, so there are two writers of each shape, and the corpus fails if they drift. 864
+assertions.
+
 **1.4.1** — closes audit F8 and F9 ([ADR-0012](../adr/0012-cron-burst-budget.md)). Cron evaluation
 no longer allocates, and the due count steps by day, so one stale entry costs about 30 µs on any
 expression, down from up to 26 ms and 4.8 MB, and the count is exact. A check limits bursts to
@@ -70,7 +76,7 @@ sweep).
 
 - `src/{uuid,types,scheduler,cronexpr,cron,training,json}.cyr` + `src/lib.cyr`
   aggregation header + `src/main.cyr` demo. The seven `[lib].modules` bundle to
-  2,669 lines in `dist/samay.cyr` (as `cyrius distlib` reports it); `json.cyr` is the largest module.
+  2,691 lines in `dist/samay.cyr` (as `cyrius distlib` reports it); `json.cyr` is the largest module.
 - **Strings are `Str` (ptr+len), not cstr** since **v0.5.0**
   ([ADR-0003](../adr/0003-str-string-representation.md)) — required because
   `#derive(Serialize)` core dumps on a cstr in a `Str`-typed field. Passing a
@@ -84,7 +90,7 @@ sweep).
 
 ## Tests
 
-- `tests/samay.tcyr` — **852/852 assertions passing** (`cyrius test`), up from 296 in
+- `tests/samay.tcyr` — **864/864 assertions passing** (`cyrius test`), up from 296 in
   v1.0.2. Includes the v1.0.3 additions: the capacity-conservation invariant (the
   assertion whose absence let ADR-0007's defect ship), a cron differential guard pinning
   the optimised matcher to an in-test reference implementation, back-compat snapshot
@@ -110,14 +116,16 @@ sweep).
   pruning and write-cap tests. All 34 mutations of that work are caught. v1.4.1 adds the calendar
   gate (every day for 438 years against `epoch_to_date`), the due count against a minute-by-minute
   walk, no-allocation checks, the budget's rules, and the first tests that read samay's log lines,
-  through a sakshi emit hook. All 37 mutations of that work are caught.
-- `tests/samay.bcyr` — 7 benchmarks, all green (see `docs/benchmarks.md`). Was dead
+  through a sakshi emit hook. All 37 mutations of that work are caught. v1.4.2 adds the wire corpus:
+  over 4,000 `ResourceReq` and `CronExpr` values must match the derive byte for byte, which is the
+  only thing keeping the two writers of those shapes together. All 23 mutations are caught.
+- `tests/samay.bcyr` — 9 benchmarks, all green (see `docs/benchmarks.md`). Was dead
   (SIGSEGV) from v0.5.0 to v1.0.1: the `Str` migration left it passing bare cstring
   literals into `Str`-taking APIs. Now run by CI so it cannot rot silently again.
 - Gates: `cyrius fmt <file> --check` clean, `cyrius lint <file>` 0 warnings and 0
   untracked deferrals, `cyrius distlib --check` in sync. **All four now run in CI** —
   note `fmt`/`lint` take a file argument, so a bare `cyrius fmt --check` gates nothing.
-- Coverage (v1.4.1): `cyrius coverage --min 100`, **82/82** (cyrius 6.6.14's tool no longer
+- Coverage (v1.4.2): `cyrius coverage --min 100`, **82/82** (cyrius 6.6.14's tool no longer
   counts `src/main.cyr`'s `main`; 1.1.5 read 79/79 on 6.6.6), plus a strict CI check
   that every public function in `[lib].modules` is *called* by a test. The strict
   check exists because the tool counts a name that appears anywhere in the tests,
@@ -176,8 +184,8 @@ deferral of three that survived verification (capped counts report as floors);
 **1.1.1** is checked `alloc()`; **1.2.0** took the cyrius 6.7 bump; **1.3.0**
 split `node_preference`; **1.4.0** closed F5 (the stdlib sort, task removal and
 refused oversized snapshots); **1.4.1** closed F8/F9 (the exact due count and the
-burst budget); **1.4.2** is the write-side JSON codec. Everything else is
-trigger-gated and deliberately unpinned.
+burst budget); **1.4.2** shipped the write-side JSON codec. Nothing is version-pinned
+now: everything left is trigger-gated, deliberately.
 
 **Concurrency — audited in v1.0.4, see [ADR-0008](../adr/0008-threading-contract.md).**
 Retired as an unknown; now a stated contract with measured backing. Open items from it:

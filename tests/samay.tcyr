@@ -3513,6 +3513,220 @@ fn test_cron_logs_exact() {
     return 0;
 }
 
+# --- v1.4.2: the write-side codec, and the corpus that proves the wire unchanged ---
+
+# 64 random bits. _sort_rand gives 63 at most, so two are stitched together.
+fn _wire_bits() {
+    return (_sort_rand(1 << 32) << 32) ^ _sort_rand(1 << 32);
+}
+
+# The values most likely to print differently: fractions with no short decimal,
+# both zeros, the ends of the f64 range, and everything non-finite.
+fn _wire_floats() {
+    var v = vec_new();
+    vec_push(v, f64_div(f64_from(1), f64_from(3)));
+    vec_push(v, f64_div(f64_from(1), f64_from(10)));
+    vec_push(v, f64_div(f64_from(7), f64_from(9)));
+    vec_push(v, f64_div(f64_from(2), f64_from(3)));
+    vec_push(v, f64_from(0));
+    vec_push(v, f64_from(1));
+    vec_push(v, f64_from(5));
+    vec_push(v, f64_from(1024));
+    vec_push(v, 0x8000000000000000);        # -0.0
+    vec_push(v, 0x7FF8000000000000);        # NaN
+    vec_push(v, 0xFFF8000000000001);        # another NaN
+    vec_push(v, 0x7FF0000000000000);        # +Inf
+    vec_push(v, 0xFFF0000000000000);        # -Inf
+    vec_push(v, 1);                         # smallest denormal
+    vec_push(v, 0x000FFFFFFFFFFFFF);        # largest denormal
+    vec_push(v, 0x0010000000000000);        # smallest normal
+    vec_push(v, 0x7FEFFFFFFFFFFFFF);        # largest finite
+    vec_push(v, 0x43C0000000000000);        # 2^61, past the 1e18 _f64_is_finite gate
+    vec_push(v, 0x444B1AE4D6E2EF50);        # 1e21, where the printer goes to an exponent
+    vec_push(v, 0x4480F0CF064DD592);        # 1e22
+    vec_push(v, 0x3E7AD7F29ABCAF48);        # 1e-7
+    vec_push(v, 0x3F1A36E2EB1C432D);        # 1e-4
+    return v;
+}
+
+fn _wire_ints() {
+    var v = vec_new();
+    vec_push(v, 0);
+    vec_push(v, 1);
+    vec_push(v, 0 - 1);
+    vec_push(v, 4096);
+    vec_push(v, 1152921504606846975);       # 2^60 - 1, a full minute mask
+    vec_push(v, 16777215);                  # 2^24 - 1, a full hour mask
+    vec_push(v, 9223372036854775807);       # i64 max
+    vec_push(v, 0 - 9223372036854775807);
+    vec_push(v, 0 - 9223372036854775807 - 1);   # i64 min
+    return v;
+}
+
+fn _pick(v) {
+    return vec_get(v, _sort_rand(vec_len(v)));
+}
+
+# A float for the corpus: a listed value, a random bit pattern, or a realistic
+# fraction of a CPU.
+fn _wire_float(listed) {
+    var r = _sort_rand(3);
+    if (r == 0) { return _pick(listed); }
+    if (r == 1) { return _wire_bits(); }
+    return f64_div(f64_from(1 + _sort_rand(1000)), f64_from(1 + _sort_rand(1000)));
+}
+
+fn _wire_int(listed) {
+    var r = _sort_rand(3);
+    if (r == 0) { return _pick(listed); }
+    if (r == 1) { return _wire_bits(); }
+    return _sort_rand(1000000);
+}
+
+fn _wire_req(floats, ints) {
+    return resource_req_new(_wire_float(floats), _wire_int(ints), _wire_int(ints),
+      _wire_int(ints), _wire_int(ints), _wire_int(ints));
+}
+
+fn _wire_expr(ints) {
+    var p = alloc(56);
+    CronExpr_set_minute_mask(p, _wire_int(ints));
+    CronExpr_set_hour_mask(p, _wire_int(ints));
+    CronExpr_set_dom_mask(p, _wire_int(ints));
+    CronExpr_set_month_mask(p, _wire_int(ints));
+    CronExpr_set_dow_mask(p, _wire_int(ints));
+    CronExpr_set_dom_star(p, _wire_int(ints));
+    CronExpr_set_dow_star(p, _wire_int(ints));
+    return p;
+}
+
+# The bridge the write side used through 1.4.1, kept here as the reference:
+# derive to text, parse the text, build the tree.
+fn _bridge_bytes(text) {
+    var v = _parse(text);
+    if (v == 0) { return 0; }
+    return bayan_json_v_build(v);
+}
+
+fn _req_derive_text(r) {
+    var sb = str_builder_new();
+    ResourceReq_to_json(r, sb);
+    return str_builder_build(sb);
+}
+
+fn _expr_derive_text(e) {
+    var sb = str_builder_new();
+    CronExpr_to_json(e, sb);
+    return str_builder_build(sb);
+}
+
+fn test_wire_corpus_resource_req() {
+    test_group("wire_corpus_resource_req");
+    # The entry gate for 1.4.2, and it stays. The derive is public and stays too,
+    # so samay has two writers of this shape. A field added to the struct reaches
+    # the derive by itself and must reach _rr_node by hand; this is what notices.
+    var floats = _wire_floats();
+    var ints = _wire_ints();
+    var bad_derive = 0;
+    var bad_bridge = 0;
+    var i = 0;
+    # Every listed float once, so none is left to chance.
+    while (i < vec_len(floats)) {
+        var f = vec_get(floats, i);
+        var r0 = resource_req_new(f, 4096, 1, 2, 1, 1024);
+        var got0 = bayan_json_v_build(_rr_node(r0));
+        var text0 = _req_derive_text(r0);
+        if (str_eq(got0, text0) != 1) { bad_derive = bad_derive + 1; }
+        if (str_eq(got0, _bridge_bytes(text0)) != 1) { bad_bridge = bad_bridge + 1; }
+        i = i + 1;
+    }
+    i = 0;
+    while (i < 2000) {
+        var r = _wire_req(floats, ints);
+        var got = bayan_json_v_build(_rr_node(r));
+        var text = _req_derive_text(r);
+        if (str_eq(got, text) != 1) { bad_derive = bad_derive + 1; }
+        if (str_eq(got, _bridge_bytes(text)) != 1) { bad_bridge = bad_bridge + 1; }
+        i = i + 1;
+    }
+    assert_eq(bad_derive, 0, "same bytes as the derive, on 2,022 requirements");
+    assert_eq(bad_bridge, 0, "same bytes as the old bridge");
+    return 0;
+}
+
+fn test_wire_corpus_cron_expr() {
+    test_group("wire_corpus_cron_expr");
+    var ints = _wire_ints();
+    var bad_derive = 0;
+    var bad_bridge = 0;
+    var i = 0;
+    while (i < 2000) {
+        var e = _wire_expr(ints);
+        var got = bayan_json_v_build(_ce_node(e));
+        var text = _expr_derive_text(e);
+        if (str_eq(got, text) != 1) { bad_derive = bad_derive + 1; }
+        if (str_eq(got, _bridge_bytes(text)) != 1) { bad_bridge = bad_bridge + 1; }
+        i = i + 1;
+    }
+    # Real expressions as well: the shapes a schedule actually holds.
+    var v = _diff_exprs();
+    i = 0;
+    while (i < vec_len(v)) {
+        var e2 = vec_get(v, i);
+        var got2 = bayan_json_v_build(_ce_node(e2));
+        var text2 = _expr_derive_text(e2);
+        if (str_eq(got2, text2) != 1) { bad_derive = bad_derive + 1; }
+        if (str_eq(got2, _bridge_bytes(text2)) != 1) { bad_bridge = bad_bridge + 1; }
+        i = i + 1;
+    }
+    assert_eq(bad_derive, 0, "same bytes as the derive, on every expression");
+    assert_eq(bad_bridge, 0, "same bytes as the old bridge");
+    return 0;
+}
+
+fn test_wire_tree_types() {
+    test_group("wire_tree_types");
+    # *_to_jsonv hands out the tree itself, so its node types are surface too. A
+    # finite float must stay a float and an integer an integer.
+    var r = resource_req_new(f64_from(5), 4096, 1, 2, 1, 1024);
+    var v = _rr_node(r);
+    assert_eq(bayan_json_v_is_float(bayan_json_v_obj_get_by_cstr(v, "cpu_cores")), 1, "cpu_cores is a float");
+    assert_eq(bayan_json_v_is_int(bayan_json_v_obj_get_by_cstr(v, "memory_mb")), 1, "memory_mb is an int");
+    assert_eq(bayan_json_v_is_int(bayan_json_v_obj_get_by_cstr(v, "network")), 1, "network is an int");
+    var _e_t, _e_v = cron_expr_parse(str_from("0 3 * * *"));
+    var ev = _ce_node(result_unwrap(_e_t, _e_v));
+    assert_eq(bayan_json_v_is_int(bayan_json_v_obj_get_by_cstr(ev, "minute_mask")), 1, "masks are ints");
+    assert_eq(bayan_json_v_is_int(bayan_json_v_obj_get_by_cstr(ev, "dow_star")), 1, "flags are ints");
+
+    # A non-finite requirement is the one case the node type differs: the bridge
+    # parsed `null`, this holds the float. Read back, both give 0 cores.
+    var nan = resource_req_new(0x7FF8000000000000, 1, 0, 0, 0, 0);
+    var o = bayan_json_v_obj_new();
+    bayan_json_v_obj_set(o, str_from("req"), _rr_node(nan));
+    var back = _rr_from(o, "req");
+    assert_eq(f64_eq(ResourceReq_cpu_cores(back), f64_from(0)), 1, "a non-finite value still reads back as 0");
+    return 0;
+}
+
+fn test_wire_nested_bytes() {
+    test_group("wire_nested_bytes");
+    # The two leaves embedded in the documents that actually reach disk. A fixed
+    # document, so a change anywhere in the nesting shows as a byte change.
+    var req = resource_req_new(f64_div(f64_from(1), f64_from(3)), 4096, REQ_GPU, 2, 1, 10240);
+    var tmpl = cron_task_template_new(str_from("t"), str_from("d"), str_from("a"), 5, req);
+    var _e_t, _e_v = cron_expr_parse(str_from("30 3 * * 1-5"));
+    var e = cron_entry_new(str_from("n"), result_unwrap(_e_t, _e_v), tmpl, 1, CRON_SKIP);
+    var want = str_builder_new();
+    str_builder_add_cstr(want, "{\"name\":\"n\",\"expr\":");
+    str_builder_add(want, _expr_derive_text(CronEntry_expr(e)));
+    str_builder_add_cstr(want, ",\"task_template\":{\"name\":\"t\",\"description\":\"d\",\"agent_id\":\"a\",\"priority\":5,\"resource_requirements\":");
+    str_builder_add(want, _req_derive_text(req));
+    str_builder_add_cstr(want, "},\"enabled\":1,\"last_fired\":0,\"missed_policy\":1}");
+    assert_eq(str_eq(cron_entry_to_json_str(e), str_builder_build(want)), 1, "cron entry bytes, nesting included");
+    assert_eq(str_contains(cron_entry_to_json_str(e), str_from("\"cpu_cores\":0.3333333333333333,")), 1, "1/3 keeps every digit");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_uuid_format();
@@ -3675,6 +3889,10 @@ fn main() {
     test_cron_budget_deterministic();
     test_cron_budget_logs();
     test_cron_logs_exact();
+    test_wire_corpus_resource_req();
+    test_wire_corpus_cron_expr();
+    test_wire_tree_types();
+    test_wire_nested_bytes();
     return assert_summary();
 }
 

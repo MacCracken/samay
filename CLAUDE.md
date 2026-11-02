@@ -76,7 +76,7 @@ for f in src/*.cyr tests/*.tcyr tests/*.bcyr; do cyrius fmt "$f" --check; done
 for f in src/*.cyr; do cyrius lint "$f"; done   # 0 warnings AND 0 untracked deferrals
 cyrius test                                     # all pass
 cyrius coverage --min 100                       # every public fn named in tests/*.tcyr
-cyrius bench tests/samay.bcyr                   # 7/7 report
+cyrius bench tests/samay.bcyr                   # 9/9 report
 cyrius distlib                                  # regenerate dist/samay.cyr
 cyrius distlib --check                          # exits 1 if the bundle is stale
 ```

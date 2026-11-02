@@ -4,6 +4,95 @@ All notable changes to Samay are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.2] — 2026-11-01
+
+**Writing a snapshot is 21 to 36% faster, and not one byte of it changed.** This is the last pinned
+repair on the roadmap. **864 tests**, up 12. The toolchain, deps and wire format are unchanged.
+
+### Changed — nested leaves are built directly
+
+Through 1.4.1, `_rr_node` and `_ce_node` printed a `ResourceReq` or `CronExpr` with its `#derive` codec
+and parsed the text straight back into a tree. They now build the tree field by field, as the read
+side has done since 1.0.3.
+
+| write | 1.4.1 | 1.4.2 | Δ |
+|---|---:|---:|---:|
+| snapshot of 200 tasks and 8 nodes | 4.32 ms | 3.43 ms | **−20.8%** |
+| snapshot of 200 cron entries | 4.85 ms | 3.12 ms | **−35.7%** |
+| one `scheduled_task_to_jsonv` | 6.39 µs, 2,320 B | 2.48 µs, 1,872 B | −61.2% |
+| one `cron_entry_to_jsonv` | 10.64 µs, 2,904 B | 2.58 µs, 1,976 B | −75.8% |
+
+- **The snapshot rows are the ones a caller feels.** Most of a write goes on `bayan_json_v_build`
+  emitting text, which this release does not touch. A node's accelerator profiles still go through
+  ai-hwaccel's codec and a parse, because that codec is the dep's.
+- **The bridge was costlier than the roadmap said.** It measured 3.14 µs on 6.5.36, and 5.1 µs per
+  requirement here on 6.7.18 with bayan 1.11.1. Why it grew was not measured.
+- **The derive stays.** It is public, and daimon calls one. That leaves two writers of each shape, so
+  the corpus below is permanent: a field added to a struct reaches the derive by itself, and the
+  suite fails until it reaches `_rr_node` or `_ce_node` too.
+
+### One difference, in the tree only
+
+For a non-finite `cpu_cores`, `*_to_jsonv` now holds a float node where it held a JSON null. The
+built bytes are the same `null`, and reading either back gives 0 cores. Restore refuses such a value,
+so it can only come from a caller's own `resource_req_new`.
+
+### Consumers
+
+- **No source change is needed.** `dist/samay.deps` is unchanged.
+- **None of daimon, kavach or stiva reaches this code.** The one samay JSON call among them is daimon's
+  `SchedulingDecision_to_json`, a derive this release leaves alone.
+- **daimon's 56 scheduler tests and 40 main tests pass against 1.4.2**, in a scratch copy on its own
+  6.6.6 pin.
+
+### Tests
+
+- **The roadmap's entry gate, kept in the suite.** 2,022 `ResourceReq` and 2,020 `CronExpr` values
+  must match both the derive and the old bridge byte for byte. They include 1/3, 0.1, 7/9, both zeros,
+  NaN, both infinities, denormals, the ends of the f64 range, i64 min and max, and random bit
+  patterns. The gate was written first and passed on the old bridge, so it is a real baseline.
+- **Four new tests, 12 assertions.** They also cover the tree's node types and a fixed nested document.
+- **All 23 mutations of this work are caught**: every field dropped, keys swapped or misspelled, a
+  wrong accessor, an extra field, and a float written as an integer. One writes non-finite values
+  through `_f64_is_finite`, which looks right and would turn a legal `1e+21` into `null`.
+- **`tests/samay.bcyr` gains `scheduled_task_to_jsonv` and `cron_entry_to_jsonv`.**
+
+### Performance
+
+1.4.1 against 1.4.2, both on cyrius 6.7.18, interleaved, shuffled and pinned to one CPU. The suite
+rows ran 60 rounds, the snapshot rows 30. The rows this release does not touch stayed within 1.3%.
+Medians:
+
+| row | 1.4.1 | 1.4.2 | Δ | p |
+|---|---:|---:|---:|---:|
+| `node_can_fit` | 12.58 ns | 12.58 ns | 0.0% | 0.73 |
+| `priority_from_numeric` | 4.50 ns | 4.51 ns | +0.1% | 0.71 |
+| `samay_uuid_v4` | 663.5 ns | 655.0 ns | −1.3% | <0.01 |
+| `scheduled_task_new` | 2.30 µs | 2.30 µs | +0.3% | <0.01 |
+| `cron_expr_matches` | 18.53 ns | 18.54 ns | 0.0% | 0.85 |
+| `pending_tasks_2000` | 366.9 µs | 369.5 µs | +0.7% | 0.45 |
+| `cron_count_window` | 24.12 µs | 24.12 µs | 0.0% | 0.39 |
+| `scheduled_task_to_jsonv` | 6.39 µs | 2.48 µs | **−61.2%** | <0.01 |
+| `cron_entry_to_jsonv` | 10.64 µs | 2.58 µs | **−75.8%** | <0.01 |
+| snapshot, 200 tasks (scratch) | 4.32 ms | 3.43 ms | **−20.8%** | <0.01 |
+| snapshot, 200 cron entries (scratch) | 4.85 ms | 3.12 ms | **−35.7%** | <0.01 |
+
+### Verified
+
+- **Real binaries, byte for byte.** Against 1.4.1 built from its tag: 120,000 documents from extreme
+  structs built through the API, and 200 random snapshots, 48,000 requirements and 23.5 MB, taken
+  through a full restore and rewrite. There is no difference in any of them. A one-field mutation
+  trips the same compare at byte 221, so it can fail.
+- **Old readers.** The bytes match 1.4.1's, so what reads a 1.4.1 snapshot reads a 1.4.2 one.
+- CI's steps, run locally on 6.7.18: build, 864/864 tests, fmt and lint over `src/` and `tests/`,
+  every public function called by a test, every allocation guarded (ADR-0009), `dist/` in sync
+  (2,691 lines), and the benchmarks. `cyrius coverage --min 100` passes, 82/82.
+- No symbol collisions, and no new functions in `src/`.
+
+### Docs
+
+- **Nothing on the roadmap is version-pinned now.** What remains is trigger-gated.
+
 ## [1.4.1] — 2026-11-01
 
 **A check after a long outage takes microseconds per entry, its counts are exact, and a catch-up

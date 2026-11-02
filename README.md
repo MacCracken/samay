@@ -5,7 +5,7 @@ accelerator-conscious** task placement. Cyrius port of the original Rust library
 
 - **Language**: Cyrius (toolchain 6.7.18) · **License**: GPL-3.0-only
 - **Consumers**: daimon (task scheduling), kavach (sandboxed execution), stiva (scheduled containers)
-- **Status**: **v1.4.1** — port complete, P-1 and concurrency audited. Real cron
+- **Status**: **v1.4.2** — port complete, P-1 and concurrency audited. Real cron
   (Vixie DOM/DOW), ai-hwaccel placement, JSON snapshot/restore, deterministic
   scheduling, fail-closed restore, conserved node capacity. Downstream consumers
   kavach, daimon and stiva are integrated.
@@ -33,7 +33,7 @@ accelerator-conscious** task placement. Cyrius port of the original Rust library
 cyrius deps                          # resolve stdlib + ai-hwaccel into lib/
 cyrius build src/main.cyr build/samay
 ./build/samay                        # runnable demo
-cyrius test  tests/samay.tcyr        # 852/852 assertions
+cyrius test  tests/samay.tcyr        # 864/864 assertions
 cyrius bench tests/samay.bcyr
 ```
 
@@ -44,7 +44,7 @@ Consumers declare the dep and include the committed bundle:
 ```toml
 [deps.samay]
 git = "https://github.com/MacCracken/samay.git"
-tag = "1.4.1"
+tag = "1.4.2"
 modules = ["dist/samay.cyr"]
 ```
 

@@ -9,8 +9,9 @@
 # bayan_json_v_arr_push to build, bayan_json_v_parse / bayan_json_v_obj_get
 # to read — which handles string escaping, nesting and arrays natively
 # (unlike the derive's flat-parser from_json, which does not unescape).
-# Nested *leaf* structs are bridged through their derive: since leaves have
-# no Str fields, their flat-parser round-trip is exact.
+# The two leaves nested in those types, ResourceReq and CronExpr, are built and
+# read field by field here rather than through their derive; see _rr_node and
+# _rr_from.
 #
 # Convention per type:
 #   <type>_to_jsonv(p)        -> json_v node   (composable build)
@@ -206,13 +207,27 @@ fn _log_profile_refused(node_id): i64 {
     return 0;
 }
 
-# --- nested-leaf bridges (leaves have no Str fields -> exact round-trip) ---
+# --- nested leaves ---
 
-# ResourceReq -> json node, via its #derive codec.
+# ResourceReq -> json node, built directly. Through 1.4.1 this printed the struct
+# with its #derive codec and parsed the text back, which was 72% of the cost of
+# serializing a task. The derive is public and stays, so there are two writers of
+# this shape: keep these keys and their order the same as the struct's. A field
+# added to the struct reaches the derive by itself and has to reach here by hand;
+# test_wire_corpus_resource_req fails until it does (1.4.2).
+#
+# cpu_cores stores the f64 as it is. bayan prints a non-finite one as `null`, the
+# same bytes the derive writes. _f64_is_finite is no use for mapping it by hand:
+# that gate stops at 1e18, and a larger value is legal on the wire.
 fn _rr_node(req): i64 {
-    var sb = str_builder_new();
-    ResourceReq_to_json(req, sb);
-    return _parse(str_builder_build(sb));
+    var o = bayan_json_v_obj_new();
+    bayan_json_v_obj_set(o, str_from("cpu_cores"), bayan_json_v_float_new(ResourceReq_cpu_cores(req)));
+    bayan_json_v_obj_set(o, str_from("memory_mb"), bayan_json_v_int_new(ResourceReq_memory_mb(req)));
+    bayan_json_v_obj_set(o, str_from("accel_req"), bayan_json_v_int_new(ResourceReq_accel_req(req)));
+    bayan_json_v_obj_set(o, str_from("accel_min_chips"), bayan_json_v_int_new(ResourceReq_accel_min_chips(req)));
+    bayan_json_v_obj_set(o, str_from("network"), bayan_json_v_int_new(ResourceReq_network(req)));
+    bayan_json_v_obj_set(o, str_from("disk_mb"), bayan_json_v_int_new(ResourceReq_disk_mb(req)));
+    return o;
 }
 
 # json node (at key) -> ResourceReq, or 0 if absent / not an object / not
@@ -241,11 +256,18 @@ fn _rr_from(obj, key): i64 {
       _jv_uint(el, "disk_mb", 0));
 }
 
-# CronExpr -> json node.
+# CronExpr -> json node, built directly. Same reasoning and the same rule as
+# _rr_node; test_wire_corpus_cron_expr holds it to the derive.
 fn _ce_node(expr): i64 {
-    var sb = str_builder_new();
-    CronExpr_to_json(expr, sb);
-    return _parse(str_builder_build(sb));
+    var o = bayan_json_v_obj_new();
+    bayan_json_v_obj_set(o, str_from("minute_mask"), bayan_json_v_int_new(CronExpr_minute_mask(expr)));
+    bayan_json_v_obj_set(o, str_from("hour_mask"), bayan_json_v_int_new(CronExpr_hour_mask(expr)));
+    bayan_json_v_obj_set(o, str_from("dom_mask"), bayan_json_v_int_new(CronExpr_dom_mask(expr)));
+    bayan_json_v_obj_set(o, str_from("month_mask"), bayan_json_v_int_new(CronExpr_month_mask(expr)));
+    bayan_json_v_obj_set(o, str_from("dow_mask"), bayan_json_v_int_new(CronExpr_dow_mask(expr)));
+    bayan_json_v_obj_set(o, str_from("dom_star"), bayan_json_v_int_new(CronExpr_dom_star(expr)));
+    bayan_json_v_obj_set(o, str_from("dow_star"), bayan_json_v_int_new(CronExpr_dow_star(expr)));
+    return o;
 }
 
 # json node (at key) -> CronExpr, or 0 if absent / not an object / not
