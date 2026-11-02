@@ -2,6 +2,9 @@
 
 **Status**: accepted (2026-08-29, v1.0.3). Records a divergence that shipped
 unrecorded in v0.3.0, and the semantics settled by the P-1 sweep.
+**Amended** 2026-11-01 (v1.4.3): a large backward clock step re-anchors the watermark (section 3),
+an entry replaced under the same name keeps its place (section 6), disabling an entry logs what it
+gave up (section 4), and every late fire is logged (section 5).
 **Amended** 2026-09-23 (v1.1.5). The first version misdescribed the oracle's model, both
 its field names and its first-fire rule. It also did not record the one capability that
 had no replacement. Both corrections are made below. This ADR is the record of the
@@ -67,7 +70,7 @@ but then **discarded the starred field's mask** instead of AND-ing it.
 
 That is equivalent to Vixie only when the starred field is a bare `*`, whose mask is
 all-ones and therefore an AND identity. For a step it is not: `*/2` over DOM 1-31 is the
-odd days. So `0 0 */2 * *` fired 365 days a year instead of 183, and `0 0 * * */2` fired
+odd days. So `0 0 */2 * *` fired 365 days a year instead of 186, and `0 0 * * */2` fired
 7 days a week instead of 4. Both masks are now always applied.
 
 This is a **behavioural break for any schedule using `*/N` in DOM or DOW**, and it is
@@ -90,6 +93,14 @@ The watermark now only ever moves forward, and a backward step is logged rather 
 acted on. `cron_scheduler_check_due` reads `CLOCK_REALTIME`, so this needed no caller
 error to trigger.
 
+**v1.4.3: a backward step past 3 hours re-anchors.** A monotonic watermark has a failure of its
+own: one reading ahead of the truth, a bad clock at boot, leaves every entry waiting for real
+time to catch up, and a 30-day error stops all cron work for 30 days. Vixie's `cron.c` solves the same
+problem the same way: a small step back waits, and a large one starts again from now. So a step
+of up to `CRON_CLOCK_RESET_SECS` (3 hours) holds the watermark as above, and a larger one treats the
+entry as a first evaluation, firing if the current minute matches. The cost is that a real clock step
+back of more than 3 hours, such as a restored VM, re-fires that interval as it passes again.
+
 ### 4. A disabled entry tracks the clock; it does not accrue debt
 
 The whole per-entry body was gated on `enabled == 1`, so `last_fired` froze while an
@@ -101,14 +112,36 @@ A disabled entry now advances its watermark like an enabled one, so disabling me
 not run", not "queue it all up for later". Chosen because the alternative is a burst of
 task creation for a window the operator deliberately turned the schedule off, which is
 both surprising and unbounded by anything except the catch-up cap. Neither consumer
-(kavach, daimon) calls the cron API today, so nothing downstream depended on the old
+(kavach, daimon) called the cron API then, so nothing downstream depended on the old
 behaviour — this was the free moment to settle it.
+
+**v1.4.3:** disabling gives up what the entry owed from before it was disabled, too, and until then
+said nothing. The first check that sees it disabled now logs how many occurrences it gave up. The flag
+is read only at a check, so disabling and re-enabling between two checks is not seen at all.
 
 ### 5. Every catch-up burst is logged
 
 Previously only a `CRON_CATCHUP_CAP`-capped burst logged. A sub-cap burst fired silently,
 which violates the domain principle that the missed-schedule policy is always visible.
 All three outcomes — skip, catch-up, and capped catch-up — now emit a `sakshi` warning.
+
+**v1.4.3:** so does a single late fire, which is all a daily entry ever does, under either policy. An
+occurrence that is on time is not counted as missed. A count past the 366-day window covers only the
+window and says so.
+
+### 6. An entry replaced under the same name keeps its place (v1.4.3)
+
+`cron_scheduler_add` built a new entry with no history, so editing a schedule re-fired the current
+minute and forgot everything owed since the last check, with no log line. A replaced entry now takes
+the old watermark, unless the new one brings its own, as stiva's does. Removing an entry and adding it
+back is different: nothing is left to keep, and it starts fresh.
+
+### 7. Grammar that differs from Vixie (v1.4.3, recording what shipped)
+
+- `N/S` is accepted and runs from N to the end of the field, as in cronie. Vixie refuses it. `JAN/3`
+  and `MON/2` follow.
+- `@reboot` is refused at parse time: samay has no boot to run at.
+- A number has at most 9 digits, so `*/1000000000` and `0000000001` are refused.
 
 ## Consequences
 

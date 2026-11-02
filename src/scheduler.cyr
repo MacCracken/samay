@@ -11,21 +11,22 @@
 # tasks/nodes are Str-keyed hashmaps (map_new_str) of heap struct pointers.
 # Str keys hash by content (hash_str_v) and compare via str_eq, so a lookup
 # by an equal-but-distinct Str works.
-# Iteration uses map_values (→ vec). Pending tasks are sorted by priority
-# desc, then created_at asc, matching Rust's sort_by.
+# Anything that runs on every pass walks the table with _map_slot rather than
+# calling map_values, which copies. Pending tasks are sorted by priority desc,
+# then created_at asc, matching Rust's sort_by.
 # Requires: hashmap, vec, str, string, chrono, result + types.cyr.
 
 #derive(accessors)
 struct TaskScheduler {
     tasks: i64;
     nodes: i64;
+    pending_scratch: i64;
 }
 
 fn task_scheduler_new(): i64 {
-    samay_init();   # close the chrono lazy-init window while single-threaded
-    var s = alloc(16);
+    var s = alloc(24);
     if (s == 0) { panic("samay: out of memory in task_scheduler_new"); }
-    # map_new_str returns 0 on OOM (lib/hashmap.cyr:164) WITHOUT aborting --
+    # map_new_str returns 0 on OOM (lib/hashmap.cyr) WITHOUT aborting --
     # unlike map_set/_map_grow, which abort via _hm_die. The stdlib is
     # inconsistent here and samay inherits the quiet half: a scheduler with
     # both fields null survives construction and dies later inside map_set.
@@ -35,6 +36,10 @@ fn task_scheduler_new(): i64 {
     if (nodes == 0) { panic("samay: out of memory in task_scheduler_new (nodes map)"); }
     TaskScheduler_set_tasks(s, tasks);
     TaskScheduler_set_nodes(s, nodes);
+    # Reused by every schedule_pending, so an idle pass allocates no list of its own.
+    var scratch = vec_new();
+    if (scratch == 0) { panic("samay: out of memory in task_scheduler_new (scratch)"); }
+    TaskScheduler_set_pending_scratch(s, scratch);
     return s;
 }
 
@@ -70,16 +75,64 @@ fn _node_id_cmp(a, b): i64 {
     return _samay_str_cmp(NodeCapacity_node_id(a), NodeCapacity_node_id(b));
 }
 
+# The order tasks were placed in: scheduled_at, then the unique task_id.
+fn _placement_cmp(a, b): i64 {
+    var sa = ScheduledTask_scheduled_at(a);
+    var sb = ScheduledTask_scheduled_at(b);
+    if (sa < sb) { return 0 - 1; }
+    if (sa > sb) { return 1; }
+    return _task_id_cmp(a, b);
+}
+
+# Every task holding a reservation, in the order they were placed. That includes a
+# finished task the next pass has not reconciled yet: until then it is still charged.
+fn _holding_tasks(s): i64 {
+    var tasks = TaskScheduler_tasks(s);
+    var cap = map_cap(tasks);
+    var out = vec_new();
+    if (out == 0) { panic("samay: out of memory in _holding_tasks"); }
+    var i = 0;
+    while (i < cap) {
+        var t = _map_slot(tasks, i);
+        if (t != 0) {
+            if (ScheduledTask_reserved_on(t) != 0) { vec_push(out, t); }
+        }
+        i = i + 1;
+    }
+    vec_sort_by(out, &_placement_cmp);
+    return out;
+}
+
 # --- registration / submission / lookup ---
 
+# Register a node. An id already known replaces its description, which is what a
+# node agent reconnecting does, so what its tasks hold is carried onto the new one.
+# Through 1.4.2 the replacement came up empty, and the same capacity was sold twice.
 fn task_scheduler_register_node(s, node): i64 {
-    map_set(TaskScheduler_nodes(s), NodeCapacity_node_id(node), node);
+    var nodes = TaskScheduler_nodes(s);
+    var id = NodeCapacity_node_id(node);
+    var was = map_get(nodes, id);
+    map_set(nodes, id, node);
+    if (was == 0) { return 0; }
+    if (was == node) { return 0; }
+    var held = _holding_tasks(s);
+    var n = vec_len(held);
+    var i = 0;
+    while (i < n) {
+        var t = vec_get(held, i);
+        if (str_eq(ScheduledTask_reserved_on(t), id) == 1) {
+            node_capacity_reserve(node, ScheduledTask_resource_requirements(t));
+        }
+        i = i + 1;
+    }
     return 0;
 }
 
-# Submit a task; returns Ok(task_id).
+# Submit a task; returns Ok(task_id), or Err(1) if that id is already here. Replacing
+# a task would orphan whatever it holds, past anything that could release it.
 fn task_scheduler_submit_task(s, task): i64 {
     var id = ScheduledTask_task_id(task);
+    if (map_has(TaskScheduler_tasks(s), id) == 1) { return Err(1); }
     map_set(TaskScheduler_tasks(s), id, task);
     return Ok(id);
 }
@@ -122,18 +175,20 @@ fn _release_task_node(s, task): i64 {
 # low bits in available_cpu from run to run (ADR-0004, ADR-0011). The vec is made only
 # when something needs releasing, so a normal pass allocates nothing here.
 fn _reconcile_reservations(s): i64 {
-    var all = map_values(TaskScheduler_tasks(s));
-    var n = vec_len(all);
+    var tasks = TaskScheduler_tasks(s);
+    var cap = map_cap(tasks);
     var stale = 0;
     var i = 0;
-    while (i < n) {
-        var t = vec_get(all, i);
-        if (ScheduledTask_reserved_on(t) != 0) {
-            var st = ScheduledTask_status(t);
-            if (st != TASK_SCHEDULED) {
-                if (st != TASK_RUNNING) {
-                    if (stale == 0) { stale = vec_new(); }
-                    vec_push(stale, t);
+    while (i < cap) {
+        var t = _map_slot(tasks, i);
+        if (t != 0) {
+            if (ScheduledTask_reserved_on(t) != 0) {
+                var st = ScheduledTask_status(t);
+                if (st != TASK_SCHEDULED) {
+                    if (st != TASK_RUNNING) {
+                        if (stale == 0) { stale = vec_new(); }
+                        vec_push(stale, t);
+                    }
                 }
             }
         }
@@ -141,7 +196,7 @@ fn _reconcile_reservations(s): i64 {
     }
     if (stale == 0) { return 0; }
     vec_sort_by(stale, &_task_id_cmp);
-    n = vec_len(stale);
+    var n = vec_len(stale);
     i = 0;
     while (i < n) {
         _release_task_node(s, vec_get(stale, i));
@@ -159,7 +214,6 @@ fn task_scheduler_cancel_task(s, id): i64 {
     # Release only once the transition is accepted, so a rejected cancel
     # cannot hand back capacity the task is still using.
     _release_task_node(s, task);
-    ScheduledTask_set_completed_at(task, dt_now());
     return Ok(0);
 }
 
@@ -181,8 +235,110 @@ fn task_scheduler_complete_task(s, id, final_status): i64 {
     var r_t, r_v = scheduled_task_transition(task, final_status);
     if (is_err_result(r_t) == 1) { return Err(r_v); }
     _release_task_node(s, task);
-    ScheduledTask_set_completed_at(task, dt_now());
     return Ok(0);
+}
+
+# --- restore ---
+#
+# A snapshot states each node's capacity and each task's reservation, and nothing
+# makes the two agree. The tasks are the record of who holds what, so restore checks
+# the nodes against them. Through 1.4.2 it trusted the nodes, and capacity leaked by
+# a 1.0.2 build stayed lost for good (ADR-0007).
+
+fn _log_capacity_rebuilt(id): i64 {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "node '");
+    str_builder_add(sb, id);
+    str_builder_add_cstr(sb, "': snapshot capacity disagrees with its tasks; rebuilt from them");
+    var msg = str_builder_build(sb);
+    sakshi_warn(str_data(msg), str_len(msg));
+    return 0;
+}
+
+# By node, then in placement order.
+fn _held_cmp(a, b): i64 {
+    var c = _samay_str_cmp(ScheduledTask_reserved_on(a), ScheduledTask_reserved_on(b));
+    if (c != 0) { return c; }
+    return _placement_cmp(a, b);
+}
+
+# Replay held[from..to), all this node's, through reserve, which rebuilds its device
+# holds too. A node that agrees keeps the bits it came with, so a good snapshot writes
+# back byte for byte: f64 sums depend on order, and this is not the order they ran in.
+fn _settle_node(node, held, from, to): i64 {
+    var cpu = NodeCapacity_available_cpu(node);
+    var mem = NodeCapacity_available_memory_mb(node);
+    var disk = NodeCapacity_available_disk_mb(node);
+    var rt = NodeCapacity_running_tasks(node);
+    NodeCapacity_set_available_cpu(node, NodeCapacity_total_cpu(node));
+    NodeCapacity_set_available_memory_mb(node, NodeCapacity_total_memory_mb(node));
+    NodeCapacity_set_available_disk_mb(node, NodeCapacity_total_disk_mb(node));
+    NodeCapacity_set_running_tasks(node, 0);
+    var i = from;
+    while (i < to) {
+        node_capacity_reserve(node, ScheduledTask_resource_requirements(vec_get(held, i)));
+        i = i + 1;
+    }
+    var agree = 1;
+    if (NodeCapacity_available_memory_mb(node) != mem) { agree = 0; }
+    if (NodeCapacity_available_disk_mb(node) != disk) { agree = 0; }
+    if (NodeCapacity_running_tasks(node) != rt) { agree = 0; }
+    var gap = f64_sub(NodeCapacity_available_cpu(node), cpu);
+    if (f64_gt(gap, _CPU_SETTLE) == 1) { agree = 0; }
+    if (f64_lt(gap, f64_sub(f64_from(0), _CPU_SETTLE)) == 1) { agree = 0; }
+    if (agree == 1) {
+        NodeCapacity_set_available_cpu(node, cpu);
+    } else {
+        _log_capacity_rebuilt(NodeCapacity_node_id(node));
+    }
+    return 0;
+}
+
+# 1e-6 of a core: well past any rounding a real snapshot's sums can carry.
+var _CPU_SETTLE = 0x3EB0C6F7A0B5ED8D;
+
+# Bring every node into line with the tasks. A task placed and running that lost its
+# reservation still occupies its node, so it gets it back first.
+fn _settle_capacity(s): i64 {
+    var tasks = TaskScheduler_tasks(s);
+    var cap = map_cap(tasks);
+    var t = 0;
+    while (t < cap) {
+        var task = _map_slot(tasks, t);
+        if (task != 0) {
+            if (ScheduledTask_reserved_on(task) == 0) {
+                var st = ScheduledTask_status(task);
+                if (st == TASK_SCHEDULED) { ScheduledTask_set_reserved_on(task, ScheduledTask_assigned_node(task)); }
+                elif (st == TASK_RUNNING) { ScheduledTask_set_reserved_on(task, ScheduledTask_assigned_node(task)); }
+            }
+        }
+        t = t + 1;
+    }
+    var held = _holding_tasks(s);
+    vec_sort_by(held, &_held_cmp);
+    var hn = vec_len(held);
+    var nodes = map_values(TaskScheduler_nodes(s));
+    vec_sort_by(nodes, &_node_id_cmp);
+    var h = 0;
+    var i = 0;
+    while (i < vec_len(nodes)) {
+        var node = vec_get(nodes, i);
+        var id = NodeCapacity_node_id(node);
+        # Both are sorted by node id, so this walks them together. A reservation on a
+        # node the snapshot does not have matches nothing and is passed over.
+        while (h < hn) {
+            if (_samay_str_cmp(ScheduledTask_reserved_on(vec_get(held, h)), id) >= 0) { break; }
+            h = h + 1;
+        }
+        var from = h;
+        while (h < hn) {
+            if (_samay_str_cmp(ScheduledTask_reserved_on(vec_get(held, h)), id) != 0) { break; }
+            h = h + 1;
+        }
+        _settle_node(node, held, from, h);
+        i = i + 1;
+    }
+    return 0;
 }
 
 # --- removal ---
@@ -217,8 +373,8 @@ fn task_scheduler_remove_task(s, id): i64 {
 # Forget every finished task that completed before `before_ns`, and return how many
 # went. Only the caller decides this: samay never prunes on its own, and takes the
 # time as an argument, as cron_scheduler_check_due_at does, so the same schedule at
-# the same time prunes the same tasks. A task with no completed_at, because a consumer
-# finished it through scheduled_task_transition, counts as the oldest.
+# the same time prunes the same tasks. A task with no completed_at, which only an old
+# snapshot can hold, counts as the oldest.
 #
 # task_scheduler_stats counts the tasks it can see, so its totals drop by what goes.
 fn task_scheduler_prune_terminal(s, before_ns): i64 {
@@ -244,18 +400,26 @@ fn task_scheduler_prune_terminal(s, before_ns): i64 {
 
 # --- queries ---
 
-# Pending (Queued) tasks, sorted by priority desc then created_at asc.
-fn task_scheduler_pending_tasks(s): i64 {
-    var all = map_values(TaskScheduler_tasks(s));
-    var out = vec_new();
-    var n = vec_len(all);
+# Fill `out` with the pending tasks, sorted.
+fn _collect_pending(s, out): i64 {
+    var tasks = TaskScheduler_tasks(s);
+    var cap = map_cap(tasks);
     var i = 0;
-    while (i < n) {
-        var t = vec_get(all, i);
-        if (ScheduledTask_status(t) == TASK_QUEUED) { vec_push(out, t); }
+    while (i < cap) {
+        var t = _map_slot(tasks, i);
+        if (t != 0) {
+            if (ScheduledTask_status(t) == TASK_QUEUED) { vec_push(out, t); }
+        }
         i = i + 1;
     }
     vec_sort_by(out, &_task_cmp);
+    return 0;
+}
+
+# Pending (Queued) tasks, sorted by priority desc then created_at asc.
+fn task_scheduler_pending_tasks(s): i64 {
+    var out = vec_new();
+    _collect_pending(s, out);
     return out;
 }
 
@@ -263,18 +427,20 @@ fn task_scheduler_pending_tasks(s): i64 {
 # rather than assigned_node, so a task a consumer drove to Scheduled itself,
 # without schedule_pending, is still listed on the node it asked for.
 fn task_scheduler_tasks_for_node(s, node_id): i64 {
-    var all = map_values(TaskScheduler_tasks(s));
+    var tasks = TaskScheduler_tasks(s);
+    var cap = map_cap(tasks);
     var out = vec_new();
-    var n = vec_len(all);
     var i = 0;
-    while (i < n) {
-        var t = vec_get(all, i);
-        var np = ScheduledTask_node_preference(t);
-        if (np != 0) {
-            if (str_eq(np, node_id) == 1) {
-                var st = ScheduledTask_status(t);
-                if (st == TASK_SCHEDULED) { vec_push(out, t); }
-                elif (st == TASK_RUNNING) { vec_push(out, t); }
+    while (i < cap) {
+        var t = _map_slot(tasks, i);
+        if (t != 0) {
+            var np = ScheduledTask_node_preference(t);
+            if (np != 0) {
+                if (str_eq(np, node_id) == 1) {
+                    var st = ScheduledTask_status(t);
+                    if (st == TASK_SCHEDULED) { vec_push(out, t); }
+                    elif (st == TASK_RUNNING) { vec_push(out, t); }
+                }
             }
         }
         i = i + 1;
@@ -284,31 +450,29 @@ fn task_scheduler_tasks_for_node(s, node_id): i64 {
 }
 
 # Node with the most available capacity (lowest utilization) that fits req;
-# returns its node_id Str, or 0 if none fits.
-# Takes the node vec rather than the scheduler: map_values() rebuilds the
-# whole vec on every call, and this runs once per pending task. Hoisting it
-# to the caller turned 500 nodes x 2000 pending tasks from 16.4 MB of
-# unreclaimable bump-allocator traffic per schedule_pending into one vec.
-# The vec holds pointers to the same NodeCapacity structs, so the in-place
-# reserve below stays visible to later iterations.
+# returns its node_id Str, or 0 if none fits. This runs once per pending task, so
+# it walks the table: at 500 nodes x 2000 pending tasks, a map_values here was
+# 16.4 MB of unreclaimable bump-allocator traffic per schedule_pending.
 fn _best_fit_node(nodes, req): i64 {
-    var n = vec_len(nodes);
+    var cap = map_cap(nodes);
     var best = 0;
     var best_util = f64_from(0);
     var i = 0;
-    while (i < n) {
-        var node = vec_get(nodes, i);
-        if (node_capacity_can_fit(node, req) == 1) {
-            var u = node_capacity_utilization(node);
-            # Every IEEE comparison against NaN is false, so a NaN utilization
-            # would fail both f64_lt and f64_eq and skip the ADR-0004
-            # tie-break entirely, letting map_values bucket order pick the
-            # winner. Treat NaN as fully-utilised (worst) so it never wins.
-            if (_f64_is_finite(u) == 0) { u = f64_from(1); }
-            if (best == 0) { best = node; best_util = u; }
-            elif (f64_lt(u, best_util) == 1) { best = node; best_util = u; }
-            elif (f64_eq(u, best_util) == 1) {
-                if (samay_str_lt(NodeCapacity_node_id(node), NodeCapacity_node_id(best)) == 1) { best = node; }
+    while (i < cap) {
+        var node = _map_slot(nodes, i);
+        if (node != 0) {
+            if (node_capacity_can_fit(node, req) == 1) {
+                var u = node_capacity_utilization(node);
+                # Every IEEE comparison against NaN is false, so a NaN utilization
+                # would fail both f64_lt and f64_eq and skip the ADR-0004
+                # tie-break entirely, letting table order pick the winner. Treat
+                # NaN as fully-utilised (worst) so it never wins.
+                if (_f64_is_finite(u) == 0) { u = f64_from(1); }
+                if (best == 0) { best = node; best_util = u; }
+                elif (f64_lt(u, best_util) == 1) { best = node; best_util = u; }
+                elif (f64_eq(u, best_util) == 1) {
+                    if (samay_str_lt(NodeCapacity_node_id(node), NodeCapacity_node_id(best)) == 1) { best = node; }
+                }
             }
         }
         i = i + 1;
@@ -323,21 +487,28 @@ fn _best_fit_node(nodes, req): i64 {
 # SchedulingDecision pointers.
 # No node could satisfy a pending task's requirements. Mirrors the oracle's
 # warn!("no node with sufficient capacity").
+#
+# A stuck task logs on every pass, so the line is built on the stack: a builder
+# here cost 313 bytes per stuck task per pass, never freed. A task_id that is not
+# one of samay's own UUIDs can be any length after a restore, so it is cut at 128.
 fn _log_no_capacity(task_id): i64 {
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "task '");
-    str_builder_add(sb, task_id);
-    str_builder_add_cstr(sb, "': no node with sufficient capacity");
-    var msg = str_builder_build(sb);
-    sakshi_warn(str_data(msg), str_len(msg));
+    var msg[176];
+    var n = str_len(task_id);
+    if (n > 128) { n = 128; }
+    memcpy(&msg, "task '", 6);
+    memcpy(&msg + 6, str_data(task_id), n);
+    memcpy(&msg + 6 + n, "': no node with sufficient capacity", 35);
+    sakshi_warn(&msg, n + 41);
     return 0;
 }
 
 fn task_scheduler_schedule_pending(s): i64 {
     var decisions = vec_new();
     _reconcile_reservations(s);
-    var nodes = map_values(TaskScheduler_nodes(s));
-    var pending = task_scheduler_pending_tasks(s);
+    var nodes = TaskScheduler_nodes(s);
+    var pending = TaskScheduler_pending_scratch(s);
+    vec_truncate(pending, 0);
+    _collect_pending(s, pending);
     var n = vec_len(pending);
     var i = 0;
     while (i < n) {
@@ -347,15 +518,17 @@ fn task_scheduler_schedule_pending(s): i64 {
 
         var chosen = 0;
         if (pref != 0) {
-            var pnode = map_get(TaskScheduler_nodes(s), pref);
+            var pnode = map_get(nodes, pref);
             if (pnode != 0) {
-                if (node_capacity_can_fit(pnode, req) == 1) { chosen = pref; }
+                # The node's own id, not the task's copy: this becomes reserved_on,
+                # which has to keep naming this node.
+                if (node_capacity_can_fit(pnode, req) == 1) { chosen = NodeCapacity_node_id(pnode); }
             }
         }
         if (chosen == 0) { chosen = _best_fit_node(nodes, req); }
 
         if (chosen != 0) {
-            var node = map_get(TaskScheduler_nodes(s), chosen);
+            var node = map_get(nodes, chosen);
             var score = f64_sub(f64_from(1), node_capacity_utilization(node));
             node_capacity_reserve(node, req);
             scheduled_task_transition(task, TASK_SCHEDULED);
@@ -391,27 +564,49 @@ fn _preempt_reason(hi, lo): Str {
     return out;
 }
 
-# If `task` should preempt a running task, return a PreemptionAction; else 0.
-# Picks the lowest-priority running task the new task can preempt; ties go
-# to the newest (later created_at). Mirrors the Rust candidate selection.
+# Would stopping `victim` let `req` fit where it is running?
+fn _preempt_helps(s, victim, req): i64 {
+    var ron = ScheduledTask_reserved_on(victim);
+    if (ron == 0) { return 0; }
+    var node = map_get(TaskScheduler_nodes(s), ron);
+    if (node == 0) { return 0; }
+    return _fits_without(node, ScheduledTask_resource_requirements(victim), req);
+}
+
+# If a queued `task` needs a running task's place, return a PreemptionAction; else 0.
+# Of the running tasks it may preempt and whose node would then fit it, picks the
+# lowest priority; ties go to the newest (later created_at).
+#
+# Priority alone used to decide (ADR-0013). That stopped tasks for a task that
+# already fitted, that could never run, or that had finished, and it could stop a job
+# on one node while the device needed was held on another. One victim must be enough:
+# stopping several for one task is a plan, and samay does not make those.
 fn task_scheduler_preempt_if_needed(s, task): i64 {
+    if (ScheduledTask_status(task) != TASK_QUEUED) { return 0; }
+    var req = ScheduledTask_resource_requirements(task);
+    if (_best_fit_node(TaskScheduler_nodes(s), req) != 0) { return 0; }
     var new_prio = scheduled_task_priority_class(task);
-    var all = map_values(TaskScheduler_tasks(s));
-    var n = vec_len(all);
+    var tasks = TaskScheduler_tasks(s);
+    var cap = map_cap(tasks);
     var cand = 0;
     var i = 0;
-    while (i < n) {
-        var t = vec_get(all, i);
-        if (ScheduledTask_status(t) == TASK_RUNNING) {
-            if (task_priority_can_preempt(new_prio, scheduled_task_priority_class(t)) == 1) {
-                if (cand == 0) { cand = t; }
-                elif (ScheduledTask_priority(t) < ScheduledTask_priority(cand)) { cand = t; }
-                elif (ScheduledTask_priority(t) == ScheduledTask_priority(cand)) {
-                    var ct = ScheduledTask_created_at(t);
-                    var cc = ScheduledTask_created_at(cand);
-                    if (ct > cc) { cand = t; }
-                    elif (ct == cc) {
-                        if (samay_str_lt(ScheduledTask_task_id(t), ScheduledTask_task_id(cand)) == 1) { cand = t; }
+    while (i < cap) {
+        var t = _map_slot(tasks, i);
+        if (t != 0) {
+            if (ScheduledTask_status(t) == TASK_RUNNING) {
+                if (task_priority_can_preempt(new_prio, scheduled_task_priority_class(t)) == 1) {
+                    if (_preempt_helps(s, t, req) == 1) {
+                        if (cand == 0) { cand = t; }
+                        elif (ScheduledTask_priority(t) < ScheduledTask_priority(cand)) { cand = t; }
+                        elif (ScheduledTask_priority(t) == ScheduledTask_priority(cand)) {
+                            var ct = ScheduledTask_created_at(t);
+                            var cc = ScheduledTask_created_at(cand);
+                            if (ct > cc) { cand = t; }
+                            elif (ct == cc) {
+                                var lower = samay_str_lt(ScheduledTask_task_id(t), ScheduledTask_task_id(cand));
+                                if (lower == 1) { cand = t; }
+                            }
+                        }
                     }
                 }
             }
@@ -427,9 +622,9 @@ fn task_scheduler_preempt_if_needed(s, task): i64 {
 
 fn task_scheduler_stats(s): i64 {
     var st = scheduler_stats_new();
-    var all = map_values(TaskScheduler_tasks(s));
-    var n = vec_len(all);
-    SchedulerStats_set_total_tasks(st, n);
+    var tasks = TaskScheduler_tasks(s);
+    var cap = map_cap(tasks);
+    SchedulerStats_set_total_tasks(st, map_size(tasks));
 
     var wait_sum = 0;
     var wait_cnt = 0;
@@ -437,35 +632,37 @@ fn task_scheduler_stats(s): i64 {
     var run_cnt = 0;
 
     var i = 0;
-    while (i < n) {
-        var t = vec_get(all, i);
-        var status = ScheduledTask_status(t);
-        if (status == TASK_QUEUED) { SchedulerStats_set_queued(st, SchedulerStats_queued(st) + 1); }
-        elif (status == TASK_SCHEDULED) { SchedulerStats_set_queued(st, SchedulerStats_queued(st) + 1); }
-        elif (status == TASK_RUNNING) { SchedulerStats_set_running(st, SchedulerStats_running(st) + 1); }
-        elif (status == TASK_COMPLETED) {
-            SchedulerStats_set_completed(st, SchedulerStats_completed(st) + 1);
-            var started = ScheduledTask_started_at(t);
-            var completed = ScheduledTask_completed_at(t);
-            if (started != 0) {
-                if (completed != 0) {
-                    var ms = (completed - started) / 1000000;
-                    if (ms < 0) { ms = 0; }
-                    run_sum = run_sum + ms;
-                    run_cnt = run_cnt + 1;
+    while (i < cap) {
+        var t = _map_slot(tasks, i);
+        if (t != 0) {
+            var status = ScheduledTask_status(t);
+            if (status == TASK_QUEUED) { SchedulerStats_set_queued(st, SchedulerStats_queued(st) + 1); }
+            elif (status == TASK_SCHEDULED) { SchedulerStats_set_queued(st, SchedulerStats_queued(st) + 1); }
+            elif (status == TASK_RUNNING) { SchedulerStats_set_running(st, SchedulerStats_running(st) + 1); }
+            elif (status == TASK_COMPLETED) {
+                SchedulerStats_set_completed(st, SchedulerStats_completed(st) + 1);
+                var started = ScheduledTask_started_at(t);
+                var completed = ScheduledTask_completed_at(t);
+                if (started != 0) {
+                    if (completed != 0) {
+                        var ms = (completed - started) / 1000000;
+                        if (ms < 0) { ms = 0; }
+                        run_sum = run_sum + ms;
+                        run_cnt = run_cnt + 1;
+                    }
                 }
             }
-        }
-        elif (status == TASK_FAILED) { SchedulerStats_set_failed(st, SchedulerStats_failed(st) + 1); }
-        elif (status == TASK_CANCELLED) { SchedulerStats_set_completed(st, SchedulerStats_completed(st) + 1); }
-        elif (status == TASK_PREEMPTED) { SchedulerStats_set_queued(st, SchedulerStats_queued(st) + 1); }
+            elif (status == TASK_FAILED) { SchedulerStats_set_failed(st, SchedulerStats_failed(st) + 1); }
+            elif (status == TASK_CANCELLED) { SchedulerStats_set_completed(st, SchedulerStats_completed(st) + 1); }
+            elif (status == TASK_PREEMPTED) { SchedulerStats_set_queued(st, SchedulerStats_queued(st) + 1); }
 
-        var started2 = ScheduledTask_started_at(t);
-        if (started2 != 0) {
-            var wms = (started2 - ScheduledTask_created_at(t)) / 1000000;
-            if (wms < 0) { wms = 0; }
-            wait_sum = wait_sum + wms;
-            wait_cnt = wait_cnt + 1;
+            var started2 = ScheduledTask_started_at(t);
+            if (started2 != 0) {
+                var wms = (started2 - ScheduledTask_created_at(t)) / 1000000;
+                if (wms < 0) { wms = 0; }
+                wait_sum = wait_sum + wms;
+                wait_cnt = wait_cnt + 1;
+            }
         }
         i = i + 1;
     }

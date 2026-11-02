@@ -1,13 +1,328 @@
-# samay fuzz harness
+# samay fuzz harness: restore mutated snapshots, then use what comes back.
+#
+# Each round mutates a valid document, restores it, drives the result through
+# the operations a real scheduler runs, and checks what must hold whatever the
+# input was. Parsing without a crash is not the point: the worst restore defects
+# here were documents that parsed fine and produced a scheduler that misbehaved
+# later (ADR-0005). The seed is fixed, so a failure reproduces exactly.
+#
+# A broken invariant prints the round and the document that caused it. A crash
+# ends the run with a signal: raise FUZZ_TRACE to name the round before it runs.
 
-fn fuzz_main(data, len) {
-    if (len == 0) { return 0; }
+include "src/lib.cyr"
+
+var _fz_rng = 88172645463325252;
+var FUZZ_ROUNDS = 4000;
+var FUZZ_TRACE = 0;
+var _fz_doc = 0;
+
+fn _fz_rand(n) {
+    var x = _fz_rng;
+    x = x ^ (x << 13);
+    x = x ^ (x >> 7);
+    x = x ^ (x << 17);
+    _fz_rng = x;
+    return (x >> 1) % n;
+}
+
+fn _fz_num(prefix, i) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, prefix);
+    str_builder_add_int(sb, i);
+    return str_builder_build(sb);
+}
+
+# Tokens a hostile snapshot would put where a value belongs.
+fn _fz_tokens() {
+    var v = vec_new();
+    vec_push(v, "null");
+    vec_push(v, "true");
+    vec_push(v, "false");
+    vec_push(v, "0");
+    vec_push(v, "-1");
+    vec_push(v, "1e400");
+    vec_push(v, "-1e400");
+    vec_push(v, "9223372036854775807");
+    vec_push(v, "-9223372036854775808");
+    vec_push(v, "9223372036854775808");
+    vec_push(v, "0.1");
+    vec_push(v, "\"\"");
+    vec_push(v, "\"x\"");
+    vec_push(v, "[]");
+    vec_push(v, "{}");
+    vec_push(v, "[[[[[[[[");
+    vec_push(v, "\"\\u0000\"");
+    vec_push(v, "\"\\ud800\"");
+    return v;
+}
+
+# A task with a fixed id and clock, so the base document is the same on every run.
+fn _fz_task(s, i, prio, req) {
+    var t = scheduled_task_new(_fz_num("name", i), str_from("d\"e\\s"), str_from("agent"), prio, req);
+    ScheduledTask_set_task_id(t, _fz_num("task-", i));
+    ScheduledTask_set_created_at(t, 1700000000000000000 + i);
+    task_scheduler_submit_task(s, t);
+    return t;
+}
+
+# Pin what schedule_pending stamped from the wall clock.
+fn _fz_pin_clock(t) {
+    if (ScheduledTask_scheduled_at(t) != 0) { ScheduledTask_set_scheduled_at(t, 1700000000000000100); }
+    if (ScheduledTask_started_at(t) != 0) { ScheduledTask_set_started_at(t, 1700000000000000200); }
+    if (ScheduledTask_completed_at(t) != 0) { ScheduledTask_set_completed_at(t, 1700000000000000300); }
+    return 0;
+}
+
+# A task snapshot with real shapes in it: placed, running, finished and queued
+# tasks, and nodes with accelerators.
+fn _fz_task_doc() {
+    var s = task_scheduler_new();
+    task_scheduler_register_node(s, node_capacity_add_accel(
+        node_capacity_new(str_from("tpu-1"), f64_from(8), 16384, 102400, 0),
+        profile_tpu(0, 8, TPU_V5P)));
+    task_scheduler_register_node(s, node_capacity_new(str_from("cpu-1"), f64_from(16), 65536, 1048576, 0));
+    var i = 0;
+    while (i < 6) {
+        _fz_task(s, i, 1 + i, resource_req_new(f64_div(f64_from(1 + i), f64_from(3)), 256, REQ_NONE, 0, i % 2, 64));
+        i = i + 1;
+    }
+    _fz_task(s, 6, 9, resource_req_new(f64_from(2), 4096, REQ_TPU, 4, 0, 1024));
+    task_scheduler_schedule_pending(s);
+    i = 0;
+    while (i < 7) {
+        var t2 = task_scheduler_get_task(s, _fz_num("task-", i));
+        if (i % 3 == 0) { scheduled_task_transition(t2, TASK_RUNNING); }
+        if (i == 3) { task_scheduler_complete_task(s, ScheduledTask_task_id(t2), TASK_COMPLETED); }
+        _fz_pin_clock(t2);
+        i = i + 1;
+    }
+    _fz_task(s, 7, 5, resource_req_new(f64_from(1000), 1, REQ_NONE, 0, 0, 0));
+    return task_scheduler_to_json_str(s);
+}
+
+fn _fz_cron_doc() {
+    var c = cron_scheduler_new();
+    var tmpl = cron_task_template_new(str_from("t"), str_from("d"), str_from("a"), 5,
+      resource_req_new(f64_from(1), 128, REQ_NONE, 0, 0, 64));
+    cron_scheduler_add(c, str_from("each"), str_from("* * * * *"), tmpl, 1, CRON_CATCHUP);
+    cron_scheduler_add(c, str_from("day"), str_from("30 3 * * 1-5"), tmpl, 1, CRON_SKIP);
+    cron_scheduler_add(c, str_from("off"), str_from("0 0 1 1 *"), tmpl, 0, CRON_CATCHUP);
+    cron_scheduler_check_due_at(c, 1798761600000000000);
+    return cron_scheduler_to_json_str(c);
+}
+
+# One mutation of `doc`, drawing spans from `other` when splicing.
+fn _fz_mutate(doc, other, tokens) {
+    var n = str_len(doc);
+    var data = str_data(doc);
+    var sb = str_builder_new();
+    var at = _fz_rand(n);
+    var kind = _fz_rand(6);
+    if (kind == 0) {
+        # Swap a value for a hostile token.
+        var i = at;
+        while (i < n) {
+            if (load8(data + i) == 58) { break; }
+            i = i + 1;
+        }
+        if (i >= n) { i = at; }
+        var j = i + 1;
+        while (j < n) {
+            var c = load8(data + j);
+            if (c == 44) { break; }
+            if (c == 125) { break; }
+            if (c == 93) { break; }
+            j = j + 1;
+        }
+        str_builder_add(sb, str_new(data, i + 1));
+        str_builder_add_cstr(sb, vec_get(tokens, _fz_rand(vec_len(tokens))));
+        str_builder_add(sb, str_new(data + j, n - j));
+        return str_builder_build(sb);
+    }
+    if (kind == 1) {
+        # Change one byte.
+        str_builder_add(sb, str_new(data, at));
+        str_builder_add_byte(sb, _fz_rand(256));
+        str_builder_add(sb, str_new(data + at + 1, n - at - 1));
+        return str_builder_build(sb);
+    }
+    if (kind == 2) {
+        # Delete a span.
+        var len = 1 + _fz_rand(40);
+        if (at + len > n) { len = n - at; }
+        str_builder_add(sb, str_new(data, at));
+        str_builder_add(sb, str_new(data + at + len, n - at - len));
+        return str_builder_build(sb);
+    }
+    if (kind == 3) {
+        # Repeat a span, which can duplicate a key or a whole record.
+        var len2 = 1 + _fz_rand(200);
+        if (at + len2 > n) { len2 = n - at; }
+        str_builder_add(sb, str_new(data, at + len2));
+        str_builder_add(sb, str_new(data + at, n - at));
+        return str_builder_build(sb);
+    }
+    if (kind == 4) {
+        # Splice in a span of the other document.
+        var on = str_len(other);
+        var from = _fz_rand(on);
+        var len3 = 1 + _fz_rand(120);
+        if (from + len3 > on) { len3 = on - from; }
+        str_builder_add(sb, str_new(data, at));
+        str_builder_add(sb, str_new(str_data(other) + from, len3));
+        str_builder_add(sb, str_new(data + at, n - at));
+        return str_builder_build(sb);
+    }
+    # Cut it short.
+    return str_new(data, at);
+}
+
+# Exit with the round number on a broken promise.
+fn _fz_fail(round, what) {
+    syscall(1, 2, "fuzz: invariant failed: ", 24);
+    syscall(1, 2, what, strlen(what));
+    syscall(1, 2, " at round ", 10);
+    var s = str_from_int(round);
+    syscall(1, 2, str_data(s), str_len(s));
+    syscall(1, 2, "\n", 1);
+    if (_fz_doc != 0) {
+        syscall(1, 2, str_data(_fz_doc), str_len(_fz_doc));
+        syscall(1, 2, "\n", 1);
+    }
+    syscall(60, 1);
+    return 0;
+}
+
+# Capacity stays within [0, total] on every axis.
+fn _fz_check_nodes(s, round) {
+    var nodes = map_values(TaskScheduler_nodes(s));
+    var i = 0;
+    while (i < vec_len(nodes)) {
+        var n = vec_get(nodes, i);
+        if (NodeCapacity_available_memory_mb(n) > NodeCapacity_total_memory_mb(n)) { _fz_fail(round, "memory above total"); }
+        if (NodeCapacity_available_disk_mb(n) > NodeCapacity_total_disk_mb(n)) { _fz_fail(round, "disk above total"); }
+        if (f64_gt(NodeCapacity_available_cpu(n), NodeCapacity_total_cpu(n)) == 1) { _fz_fail(round, "cpu above total"); }
+        if (NodeCapacity_available_memory_mb(n) < 0) { _fz_fail(round, "memory below zero"); }
+        if (NodeCapacity_available_disk_mb(n) < 0) { _fz_fail(round, "disk below zero"); }
+        if (NodeCapacity_running_tasks(n) < 0) { _fz_fail(round, "running count below zero"); }
+        if (f64_lt(NodeCapacity_available_cpu(n), f64_from(0)) == 1) { _fz_fail(round, "cpu below zero"); }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Once no task holds anything, every node is back to full (ADR-0007). Whatever a
+# hostile snapshot claimed, restore settles it, so this holds for all of them.
+fn _fz_check_idle(s, round) {
+    var all = map_values(TaskScheduler_tasks(s));
+    var i = 0;
+    while (i < vec_len(all)) {
+        if (ScheduledTask_reserved_on(vec_get(all, i)) != 0) { return 0; }
+        i = i + 1;
+    }
+    var nodes = map_values(TaskScheduler_nodes(s));
+    i = 0;
+    while (i < vec_len(nodes)) {
+        var n = vec_get(nodes, i);
+        if (NodeCapacity_running_tasks(n) != 0) { _fz_fail(round, "idle node still counts a task"); }
+        if (NodeCapacity_available_memory_mb(n) != NodeCapacity_total_memory_mb(n)) { _fz_fail(round, "idle node short of memory"); }
+        if (NodeCapacity_available_disk_mb(n) != NodeCapacity_total_disk_mb(n)) { _fz_fail(round, "idle node short of disk"); }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Drive a restored scheduler through a whole working life.
+fn _fz_use_tasks(s, round) {
+    _fz_check_nodes(s, round);
+    task_scheduler_schedule_pending(s);
+    _fz_check_nodes(s, round);
+    task_scheduler_stats(s);
+    var all = map_values(TaskScheduler_tasks(s));
+    var i = 0;
+    while (i < vec_len(all)) {
+        var t = vec_get(all, i);
+        var id = ScheduledTask_task_id(t);
+        task_scheduler_preempt_if_needed(s, t);
+        scheduled_task_transition(t, TASK_RUNNING);
+        if (i % 2 == 0) { task_scheduler_complete_task(s, id, TASK_COMPLETED); }
+        else { task_scheduler_cancel_task(s, id); }
+        i = i + 1;
+    }
+    _fz_check_nodes(s, round);
+    task_scheduler_schedule_pending(s);
+    _fz_check_nodes(s, round);
+    task_scheduler_prune_terminal(s, 9223372036854775807);
+    _fz_check_nodes(s, round);
+    _fz_check_idle(s, round);
+    return 0;
+}
+
+# What a writer produces, a reader must take back to the same bytes.
+fn _fz_fixed_point_tasks(s, round) {
+    var a = task_scheduler_to_json_str(s);
+    if (a == 0) { return 0; }
+    var r = task_scheduler_from_json_str(a);
+    if (r == 0) { _fz_fail(round, "own task snapshot refused"); }
+    var b = task_scheduler_to_json_str(r);
+    if (str_eq(a, b) != 1) { _fz_fail(round, "task snapshot is not a fixed point"); }
+    return 0;
+}
+
+fn _fz_fixed_point_cron(c, round) {
+    var a = cron_scheduler_to_json_str(c);
+    if (a == 0) { return 0; }
+    var r = cron_scheduler_from_json_str(a);
+    if (r == 0) { _fz_fail(round, "own cron snapshot refused"); }
+    var b = cron_scheduler_to_json_str(r);
+    if (str_eq(a, b) != 1) { _fz_fail(round, "cron snapshot is not a fixed point"); }
+    return 0;
+}
+
+fn _fz_round(round, task_doc, cron_doc, tokens) {
+    var m = _fz_mutate(task_doc, cron_doc, tokens);
+    var c = _fz_mutate(cron_doc, task_doc, tokens);
+    if (_fz_rand(3) == 0) { m = _fz_mutate(m, cron_doc, tokens); }
+    _fz_doc = m;
+    if (FUZZ_TRACE == 1) { println_str(str_from_int(round)); }
+    var s = task_scheduler_from_json_str(m);
+    if (s != 0) {
+        _fz_fixed_point_tasks(s, round);
+        _fz_use_tasks(s, round);
+        _fz_fixed_point_tasks(s, round);
+    }
+    _fz_doc = c;
+    var cs = cron_scheduler_from_json_str(c);
+    if (cs != 0) {
+        _fz_fixed_point_cron(cs, round);
+        cron_scheduler_check_due_at(cs, 1798761600000000000);
+        cron_scheduler_check_due_at(cs, 1798848000000000000);
+        cron_scheduler_check_due_at(cs, 1000000000);
+        cron_scheduler_list_entries(cs);
+        _fz_fixed_point_cron(cs, round);
+    }
+    # The other public readers, on the same hostile bytes.
+    node_capacity_from_json_str(m);
+    scheduled_task_from_json_str(m);
+    cron_entry_from_json_str(c);
+    cron_task_template_from_json_str(c);
+    training_job_template_from_json_str(c);
     return 0;
 }
 
 fn main() {
     alloc_init();
-    fuzz_main("test", 4);
+    sakshi_set_level(0);
+    var task_doc = _fz_task_doc();
+    var cron_doc = _fz_cron_doc();
+    if (task_doc == 0) { _fz_fail(0, "no task document"); }
+    if (cron_doc == 0) { _fz_fail(0, "no cron document"); }
+    var tokens = _fz_tokens();
+    var round = 0;
+    while (round < FUZZ_ROUNDS) {
+        _fz_round(round, task_doc, cron_doc, tokens);
+        round = round + 1;
+    }
     println("fuzz: ok");
     return 0;
 }

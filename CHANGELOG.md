@@ -4,6 +4,202 @@ All notable changes to Samay are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.3] — 2026-11-01
+
+**A P(-1) sweep, the first since 1.0.3: accelerators are now actually reserved, restore checks its
+nodes against its tasks, and a long-running scheduler stopped growing.** Four independent audits ran
+the code rather than reading it, alongside whole-source mutation and the project's first real fuzz
+harness. **1,224 tests**, up 360, and now also run on aarch64 and in bounds-checked mode. The
+toolchain, deps and wire format are unchanged. **⚠ Placement changes for anyone using accelerators.**
+
+### Fixed — accelerators were never reserved ([ADR-0013](docs/adr/0013-accelerators-are-reserved.md))
+
+The most serious finding, on the happy path. `can_fit` asked whether a device existed, and nothing
+recorded that it had been taken, so **one GPU went to four tasks**, and an 8-chip TPU pod to three
+tasks that each needed all 8. Every figure on record used `REQ_NONE`, which never reaches a device.
+
+- **A task now takes a whole device, or its chips of a TPU pod**, and holds it until it finishes.
+- **Each reservation records which device it took**, because undoing a pick by requirement type can
+  free the wrong device.
+- **Nothing is added to the wire.** Reservations already say who holds what, so restore rebuilds this
+  from them, and snapshots from any earlier release work.
+- **⚠ Tasks that shared a device now queue.** There is no way to ask for sharing yet.
+
+`task_scheduler_preempt_if_needed` compared priorities and nothing else. It would stop work for a
+task that already fitted, could never run, or had finished, and for an Emergency task needing a GPU
+it stopped the cheapest job anywhere while the GPU's holder ran on, round after round. It now answers
+only for a queued task that fits nowhere, and only names a victim whose node would then fit it. One
+victim has to be enough, which also ends a livelock where the same task was stopped every round.
+
+### Fixed — restore trusted what it read
+
+- **A real 1.0.2 snapshot stranded capacity for good.** 1.0.2 only released on cancel, so its nodes
+  show capacity held by tasks long finished. The tasks are the record of who holds what, so restore now
+  replays them over each node. A node that agrees keeps its exact bits, so a good snapshot is byte
+  identical. One that does not is rebuilt, with a log line. The same check settles a double claim that
+  sold 12 cores on an 8-core node, capacity nothing holds, and reservations the node never charged.
+- **An unknown accelerator requirement restored as "none"**, so GPU work landed on a CPU node. It is
+  now kept, nothing satisfies it, and the task waits.
+- **Wrong types read as zero.** `"cpu_cores":"8"` restored as no cores, `"status":"running"` as
+  QUEUED, `"enabled":true` as off, and a `tasks` object keyed by id as an empty scheduler reporting
+  success. Every field and collection is now checked, and a wrong one rejects its record or the
+  snapshot. JSON `true` and `false` are read as flags. A nullable Str of the wrong type still reads as
+  None, as ADR-0010 recorded.
+- **A cron expression must have all five masks.** A missing one matched nothing, silently.
+- **Two records under one id now refuse the snapshot**, and a node past the profile limit refuses its
+  scheduler instead of vanishing. Any record dropped is now counted in the log.
+- **A task could get easier to place through a snapshot.** A requirement past 1e18 cores read back as
+  0. It now stays one no node can meet.
+- **Restored objects own their Strs**, so a tree parsed on an arena can be reset.
+- **`*_from_json_str(0)` no longer crashes**, so a refused write can be fed straight back.
+
+### Fixed — capacity
+
+- **Releasing a huge reservation wrapped negative**, leaving a node with
+  `mem=-9223372036854767717`. The fuzz harness found this within seconds of first running.
+- **Re-registering a node id wiped its reservations**, so the same capacity was sold twice. daimon's
+  `POST /v1/scheduler/nodes` reaches this. What the node's tasks hold now carries over.
+- **An idle node could stop one bit short of full**, because f64 sums round, and that bit refused a
+  whole-node task forever. An idle node is now exactly full, and `can_fit` has a margin of 1e-9 of a
+  core, so requests that sum to the node all fit.
+- **Negative and NaN requirements ran capacity backwards.** `resource_req_new` now applies the domain
+  restore always did.
+- **A task keeps its own copy of its requirement**, so a caller reusing a `ResourceReq` cannot change
+  what release returns.
+- **A requested node in a reused buffer became the reservation's key**, losing that capacity when the
+  buffer changed. `training_job_template_new` and `ScheduledTask_set_node_preference` now own theirs.
+- **Submitting an id already present orphaned its reservation.** It now returns `Err(1)`.
+- **`scheduled_task_transition` now stamps `started_at` and `completed_at`**, so stats have something
+  to average. Nothing stamped `started_at` before: a consumer had to.
+
+### Fixed — a long-lived process
+
+`alloc()` never frees, and every pass copied every task the scheduler had ever held.
+
+| per call | 1.4.2 | 1.4.3 |
+|---|---:|---:|
+| idle `schedule_pending` | 760 B | 152 B |
+| the same, with 1,000 finished tasks | 33,016 B | 152 B |
+| the same, with 100 stuck tasks | 37,336 B | 160 B |
+| quiet `check_due_at`, 100 entries | 2,118 B | 174 B |
+
+At one pass a second, 1,000 finished tasks cost 2.7 GB a day, on a scheduler with nothing to do. What
+remains is the vec the caller receives.
+
+### Fixed — cron
+
+The parser, matcher, counter and burst budget came back clean: 1.2M expressions and 36M instants
+against an independent reference, and 24M tasks through the budget with no loss or double-fire.
+These are all at the edges ([ADR-0006](docs/adr/0006-cron-expression-model.md)).
+
+- **`cron_scheduler_add` keyed the table on the caller's Str**, so names read through a reused buffer
+  broke the map.
+- **Editing an entry re-fired the current minute and forgot what it owed**, silently. A replaced entry
+  now keeps its watermark.
+- **One bad clock reading stopped every entry until real time caught up.** Following Vixie, a step back
+  of up to 3 hours waits, and a larger one starts again from now (`CRON_CLOCK_RESET_SECS`).
+- **Disabling an entry gave up what it owed with no log line.** It now says how many.
+- **A single late fire logged nothing**, which is all a daily entry ever does. On-time occurrences are
+  no longer counted as missed.
+- **Logs past the window were wrong by half.** 1.4.1 said they gave the true figure; a count covers
+  the window, and now says so. The clamp line no longer claims occurrences were dropped when none
+  existed.
+- **`cron_expr_next_after` answered -1 for schedules decades off**, the same answer as never. It now
+  searches the full 400-year calendar cycle, and -1 means never.
+- **Smaller:** `enabled=2` was dormant until a restore normalised it, an epoch-zero clock fired on
+  every call, and a long entry name pushed the count off the log line.
+
+### Changed
+
+- **`samay_init()` now does nothing.** The chrono race it worked around was fixed upstream in cyrius
+  6.5.37, and samay stopped reading that table in 1.4.1. It stays because it is public.
+- **Hash seeding (audit F4) shipped upstream in cyrius 6.5.39.** samay was already unaffected.
+- **`cron_task_template_new` clamps priority** and `training_job_template_new` clamps negative times,
+  matching restore.
+- **The README no longer claims deadline-aware scheduling.** A deadline is stored and nothing reads
+  it.
+
+### Not fixed
+
+On the [roadmap](docs/development/roadmap.md), with the evidence. Restore's item limits bound neither
+memory nor bytes, so 30 MB of hostile JSON can reach 1.9 GB. A writer past bayan's 2 GiB limit exits
+instead of refusing. A pass is O(pending × nodes). Deadlines and `network` do nothing, a task cannot
+use part of a GPU or several, and SCHEDULED tasks cannot be preempted. The stats labels are unchanged.
+
+### Consumers
+
+- **No source change is needed**, and `dist/samay.deps` is unchanged.
+- **⚠ Accelerator tasks that shared a device will now queue.** daimon's `gpu_available` nodes have one
+  GPU, so one task at a time.
+- **daimon's 56 scheduler tests and 40 main tests pass against 1.4.3** on its own 6.6.6 pin. stiva's
+  real `cron_due_at` passes on this tree. stiva's full suite still cannot run, and kavach was not rerun:
+  it reads `ResourceReq` fields only.
+
+### Tests
+
+- **Whole-source mutation, a first for this project.** 1.4.2 survived 217 of 892 mutants, 24%, in
+  places that mattered: `task_scheduler_stats` was nearly untested, disk could be dropped from
+  placement, and five snapshot fields could vanish from the writer. 1.4.3 survives 151 of 1,176, 13%.
+  All 151 were read: 111 cannot change behaviour, and the rest are boundaries that give the same answer,
+  ignored returns, or a sort that only affects low-order float bits.
+- **`tests/samay.fcyr` is real.** It was the scaffold stub: it called nothing and printed PASS. It now
+  restores mutated snapshots and drives each through a working life, checking capacity invariants.
+- **A test audit read every assertion** against an authority other than the code. None pinned a wrong
+  cron value. Several could not fail, and are fixed: the sort gate shared a string compare with the code
+  it checked, the matcher's reference shared `_cron_dow`, "reverse-sorted" input was shuffled by the
+  hashmap first, and "no double release" could not see a second release.
+- **The first runs on aarch64 and in bounds-checked mode.** Both pass. Neither is in CI.
+- **The oracle-ported preemption tests were rewritten**: they pinned priority-only behaviour on a
+  cluster with no nodes.
+
+### Performance
+
+1.4.2 against 1.4.3, both on cyrius 6.7.18, interleaved, shuffled and pinned to one CPU. The suite
+rows ran 60 rounds, the others 30. Rows this release does not touch stayed within 1%. Medians:
+
+| row | 1.4.2 | 1.4.3 | Δ | p |
+|---|---:|---:|---:|---:|
+| `priority_from_numeric` | 4.51 ns | 4.52 ns | +0.2% | 0.71 |
+| `samay_uuid_v4` | 656.0 ns | 657.0 ns | +0.2% | 0.57 |
+| `cron_count_window` | 24.19 µs | 24.21 µs | +0.1% | 0.04 |
+| `cron_expr_matches` | 18.61 ns | 18.71 ns | +0.5% | <0.01 |
+| `scheduled_task_to_jsonv` | 2.49 µs | 2.47 µs | −0.7% | <0.01 |
+| `cron_entry_to_jsonv` | 2.59 µs | 2.58 µs | 0.0% | 0.71 |
+| `scheduled_task_new` | 2.30 µs | 2.36 µs | +2.5% | <0.01 |
+| `node_can_fit` | 12.61 ns | 15.86 ns | **+25.8%** | <0.01 |
+| `node_can_fit_gpu` | 103.0 ns | 167.0 ns | **+62.1%** | <0.01 |
+| `best_fit_tpu_100_nodes` | 11.68 µs | 13.72 µs | **+17.5%** | <0.01 |
+| `pending_tasks_2000` | 365.8 µs | 341.7 µs | −6.6% | <0.01 |
+| an idle pass (scratch) | 303 ns | 277 ns | −8.6% | <0.01 |
+| a check, nothing fires, per entry (scratch) | 455.5 ns | 484.5 ns | +6.4% | <0.01 |
+| a check, all fire, per entry (scratch) | 3.03 µs | 3.12 µs | +3.0% | <0.01 |
+| snapshot write, 200 tasks (scratch) | 3.41 ms | 3.42 ms | +0.1% | 0.02 |
+| snapshot restore, 200 tasks (scratch) | 3.25 ms | 3.60 ms | **+10.5%** | <0.01 |
+
+The slower rows are the price of the fixes: `node_can_fit` adds the margin, the accelerator rows check
+what is free, and restore checks types and settles capacity. The `best_fit` figure for 1.4.2 includes
+the `map_values` copy it made then. These are the first accelerator figures this project has had.
+
+### Verified
+
+- **Real binaries against 1.4.2.** Writers are byte-identical over 90,000 documents, 150 consistent
+  random snapshots rewrite byte-identically, and so do the 1.0.4 and 1.2.2 fixtures. 1,400 cron traces
+  and 2.6M fires match, apart from 20 traces that each hit the new clock re-anchor, and none unexplained.
+- **The auditors' reproducers** were rerun against the fixes, and report the right answers.
+- CI's steps, run locally on 6.7.18: build, 1,224/1,224 tests, fmt and lint over `src/` and `tests/`,
+  every public function called by a test, every allocation guarded (ADR-0009), `dist/` in sync
+  (3,353 lines), and the benchmarks. `cyrius coverage --min 100` passes, 82/82.
+- No symbol collisions: none of samay's 188 functions or 10 variables is defined in the vendored `lib/`.
+- The README example compiles and gives `decisions=1`.
+
+### Docs
+
+- **The roadmap is rebuilt**: completed history is gone, and it now holds the gaps this sweep found.
+- **Two "trigger-gated" items had already fired**, and aarch64 never needed a trigger.
+- **About 30 false claims are corrected**, in the README, guides, ADRs and comments. CLAUDE.md still
+  says `Ok`/`Err` allocate and that a bare `cyrius fmt --check` passes silently; both are on the roadmap
+  for the owner to change.
+
 ## [1.4.2] — 2026-11-01
 
 **Writing a snapshot is 21 to 36% faster, and not one byte of it changed.** This is the last pinned

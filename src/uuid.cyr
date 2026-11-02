@@ -39,9 +39,9 @@ fn samay_uuid_v4(): Str {
         i = i + 1;
     }
     store8(out + op, 0);
-    # str_new returns 0 on OOM (lib/str.cyr:44). A null Str here becomes
+    # str_new returns 0 on OOM (lib/str.cyr). A null Str here becomes
     # ScheduledTask.task_id and then a hashmap key -- and it does NOT fault
-    # there, because hash_str_v null-guards at lib/hashmap.cyr:85. The task
+    # there, because hash_str_v null-guards in lib/hashmap.cyr. The task
     # inserts under bucket 0 and the SIGSEGV lands on some LATER, unrelated
     # submit that probes into slot 0 and reaches str_eq(0, key). Measured at
     # the 8th/10th/10th subsequent submit across three runs: nondeterministic,

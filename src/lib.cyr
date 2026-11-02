@@ -2,8 +2,7 @@
 #
 # Include this (in-tree) to pull the whole scheduler into scope; external
 # consumers include the bundled `dist/samay.cyr` instead. Modules are
-# listed in dependency order (single-pass forward-reference resolution);
-# the Cyrius stdlib + the ai-hwaccel dep are auto-prepended by the build
+# listed in dependency order; the Cyrius stdlib + the ai-hwaccel dep are auto-prepended by the build
 # tool from cyrius.cyml. This file is include-only (no code) and is
 # excluded from the distlib bundle.
 

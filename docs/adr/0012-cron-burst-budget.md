@@ -76,8 +76,9 @@ ration they would add a limit with nothing to protect.
 - **Positive** — A long outage is smoothed out. 100 hourly CATCHUP entries after 30 days owe 72,000
   tasks: 1.4.0 fired them in one 223 ms, 37 MB check, and 1.4.1 fires them over 8 checks of 24 ms
   and 4 MB. The total is unchanged.
-- **Positive** — Logs now give the true figure. `fired 1000 of 527041` replaces
-  `fired 1000 of >= 100000`.
+- **Positive** — Logs now give the true figure for the window. `fired 1000 of 527041` replaces
+  `fired 1000 of >= 100000`. Past the window the count still covers only the window; since 1.4.3 the
+  line says so.
 - **Positive** — The same schedule at the same time holds the same entries, because the budget counts
   tasks rather than time. A snapshot taken mid-drain carries the held work, because it is only
   watermarks.

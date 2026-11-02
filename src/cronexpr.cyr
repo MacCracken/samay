@@ -3,7 +3,9 @@
 # Fields:  minute(0-59) hour(0-23) day-of-month(1-31) month(1-12) day-of-week(0-6)
 # Per field: `*`, `N`, `N-M`, `A,B,C` lists, `*/S` and `N-M/S` steps, plus
 # 3-letter month/day names (JAN.. / SUN..) and `@hourly`/`@daily`/... shortcuts.
-# day-of-week accepts 0 or 7 for Sunday. Expressions are validated at PARSE
+# `N/S` is also accepted, running from N to the field's end: cronie's reading, which
+# Vixie refuses. `@reboot` is refused: samay has no boot to run at. A number is at
+# most 9 digits. day-of-week accepts 0 or 7 for Sunday. Expressions are validated at PARSE
 # time (Err on any malformed field), never at execution time.
 #
 # Each field is stored as an i64 bitmask of allowed values. The DOM/DOW
@@ -235,9 +237,8 @@ fn cron_expr_parse(s): i64 {
     }
 
     var expr = alloc(56);
-    # Cannot be an Err: Ok/Err themselves heap-allocate 16 bytes, so under true
-    # OOM this function has no way to return at all -- not even to reject a
-    # malformed expression. Fail-fast is the only honest option here.
+    # Cannot be an Err: this function's Err already means a malformed expression,
+    # so a caller would report an out-of-memory host as a bad schedule (ADR-0009).
     if (expr == 0) { panic("samay: out of memory in cron_expr_parse"); }
     CronExpr_set_minute_mask(expr, mmask);
     CronExpr_set_hour_mask(expr, hmask);
@@ -342,15 +343,44 @@ fn cron_expr_matches(expr, epoch_secs): i64 {
     return _cron_day_matches(expr, epoch_secs);
 }
 
-# Next matching epoch-seconds strictly after `epoch_secs` (minute-aligned),
-# or -1 if none within a ~10-year scan (wide enough to reach Feb-29 schedules
-# across century-non-leap gaps).
+# Bits set in x.
+fn _cron_bits(x): i64 {
+    var n = 0;
+    while (x != 0) {
+        x = x & (x - 1);
+        n = n + 1;
+    }
+    return n;
+}
+
+# Matching minutes in a whole UTC day that passes the day fields. A snapshot's
+# masks are not range-checked on restore, so only bits a real minute or hour can
+# test are counted: cron_expr_matches can never reach the others.
+fn _cron_day_total(expr): i64 {
+    var minutes = _cron_bits(CronExpr_minute_mask(expr) & ((1 << 60) - 1));
+    var hours = _cron_bits(CronExpr_hour_mask(expr) & ((1 << 24) - 1));
+    return minutes * hours;
+}
+
+# Next matching epoch-seconds strictly after `epoch_secs` (minute-aligned), or -1 if
+# the expression can never match. The calendar repeats every 400 years, day of week
+# included, so a day pattern that has not matched in that span never will, and -1
+# means never rather than "not soon". It steps by day, so that span costs about as
+# much as ten years did minute by minute.
 fn cron_expr_next_after(expr, epoch_secs): i64 {
-    var t = (epoch_secs / 60) * 60 + 60;
-    var limit = t + 3660 * 24 * 60 * 60;
+    if (_cron_day_total(expr) == 0) { return 0 - 1; }
+    var t = 0;
+    if (epoch_secs >= 0) { t = (epoch_secs / 60) * 60 + 60; }
+    var limit = t + 146097 * 86400;
     while (t < limit) {
-        if (cron_expr_matches(expr, t) == 1) { return t; }
-        t = t + 60;
+        var next_day = t - t % 86400 + 86400;
+        if (_cron_day_matches(expr, t) == 1) {
+            while (t < next_day) {
+                if (_cron_time_matches(expr, t) == 1) { return t; }
+                t = t + 60;
+            }
+        }
+        t = next_day;
     }
     return 0 - 1;
 }

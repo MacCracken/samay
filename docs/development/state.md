@@ -5,6 +5,14 @@
 
 ## Version
 
+**1.4.3** — a P(-1) sweep. Accelerators are reserved ([ADR-0013](../adr/0013-accelerators-are-reserved.md)):
+through 1.4.2 one GPU went to four tasks. `preempt_if_needed` names a victim only if that places the
+task. Restore checks nodes against tasks, so a real 1.0.2 snapshot no longer strands capacity, and it
+refuses wrong types and duplicate ids. A pass no longer allocates with history: 33 KB to 152 B at 1,000
+finished tasks. Cron gained a clock reset and honest logs ([ADR-0006](../adr/0006-cron-expression-model.md)).
+Whole-source mutation kills 87%, up from 76%, and `tests/samay.fcyr` is a real fuzz harness. 1,224
+assertions.
+
 **1.4.2** — the write-side JSON codec. `_rr_node` and `_ce_node` build their tree directly instead of
 printing with the derive and parsing it back, so a whole snapshot writes 21 to 36% faster. Every byte
 is unchanged, proven against real 1.4.1 binaries and held by a permanent corpus in the suite. The
@@ -76,11 +84,11 @@ sweep).
 
 - `src/{uuid,types,scheduler,cronexpr,cron,training,json}.cyr` + `src/lib.cyr`
   aggregation header + `src/main.cyr` demo. The seven `[lib].modules` bundle to
-  2,691 lines in `dist/samay.cyr` (as `cyrius distlib` reports it); `json.cyr` is the largest module.
+  3,353 lines in `dist/samay.cyr` (as `cyrius distlib` reports it); `json.cyr` is the largest module.
 - **Strings are `Str` (ptr+len), not cstr** since **v0.5.0**
   ([ADR-0003](../adr/0003-str-string-representation.md)) — required because
   `#derive(Serialize)` core dumps on a cstr in a `Str`-typed field. Passing a
-  bare literal where a `Str` is expected compiles and then segfaults, which is
+  bare literal where a `Str` is expected compiles and then misbehaves at runtime, which is
   how the benchmark suite sat dead from v0.5.0 to v1.0.1 and how the README's
   own example was broken until v1.0.4. Wrap literals in `str_from(...)`.
 - Bundle: `dist/samay.cyr` (regenerate with `cyrius distlib` after any src change).
@@ -90,7 +98,7 @@ sweep).
 
 ## Tests
 
-- `tests/samay.tcyr` — **864/864 assertions passing** (`cyrius test`), up from 296 in
+- `tests/samay.tcyr` — **1224/1224 assertions passing**, on x86_64, aarch64 under qemu, and in bounds-checked mode (`cyrius test`), up from 296 in
   v1.0.2. Includes the v1.0.3 additions: the capacity-conservation invariant (the
   assertion whose absence let ADR-0007's defect ship), a cron differential guard pinning
   the optimised matcher to an in-test reference implementation, back-compat snapshot
@@ -118,14 +126,18 @@ sweep).
   walk, no-allocation checks, the budget's rules, and the first tests that read samay's log lines,
   through a sakshi emit hook. All 37 mutations of that work are caught. v1.4.2 adds the wire corpus:
   over 4,000 `ResourceReq` and `CronExpr` values must match the derive byte for byte, which is the
-  only thing keeping the two writers of those shapes together. All 23 mutations are caught.
-- `tests/samay.bcyr` — 9 benchmarks, all green (see `docs/benchmarks.md`). Was dead
+  only thing keeping the two writers of those shapes together. All 23 mutations are caught. v1.4.3
+  was driven by whole-source mutation, with 151 of 1,176 surviving, all read. It adds tests for
+  accelerators, preemption, restore, stats, disk and every snapshot field.
+- `tests/samay.fcyr` — restores mutated snapshots and drives each through a working life, checking
+  capacity invariants, with a pinned seed. `cyrius fuzz tests/samay.fcyr`. Not yet in CI.
+- `tests/samay.bcyr` — 11 benchmarks, all green (see `docs/benchmarks.md`). Was dead
   (SIGSEGV) from v0.5.0 to v1.0.1: the `Str` migration left it passing bare cstring
   literals into `Str`-taking APIs. Now run by CI so it cannot rot silently again.
 - Gates: `cyrius fmt <file> --check` clean, `cyrius lint <file>` 0 warnings and 0
   untracked deferrals, `cyrius distlib --check` in sync. **All four now run in CI** —
   note `fmt`/`lint` take a file argument, so a bare `cyrius fmt --check` gates nothing.
-- Coverage (v1.4.2): `cyrius coverage --min 100`, **82/82** (cyrius 6.6.14's tool no longer
+- Coverage (v1.4.3): `cyrius coverage --min 100`, **82/82** (cyrius 6.6.14's tool no longer
   counts `src/main.cyr`'s `main`; 1.1.5 read 79/79 on 6.6.6), plus a strict CI check
   that every public function in `[lib].modules` is *called* by a test. The strict
   check exists because the tool counts a name that appears anywhere in the tests,
@@ -152,9 +164,9 @@ sweep).
   chrono, random, result, tagged, fnptr, freelist, atomic,
   sakshi, process, args, thread, assert, bench.
   (`math` left this list in 1.2.0, and samay calls nothing in it or in `slice`.
-  `cyrius deps` vendors both from bayan-json's sidecar.) Vendor with `cyrius lib sync`
-  (not `cyrius deps`), which also copies the unused `lib/hashmap_fast.cyr`; `cyrius deps`
-  prints a note about that file, and it stays in `lib/` and the lock.
+  `cyrius deps` vendors both from bayan-json's sidecar.) `cyrius deps` vendors all of it from an empty `lib/`.
+  `cyrius lib sync` also copies the unused `lib/hashmap_fast.cyr`; `cyrius deps` prints a note about
+  that file, and it stays in `lib/` and the lock.
 
 ## Consumers
 
@@ -184,27 +196,25 @@ deferral of three that survived verification (capped counts report as floors);
 **1.1.1** is checked `alloc()`; **1.2.0** took the cyrius 6.7 bump; **1.3.0**
 split `node_preference`; **1.4.0** closed F5 (the stdlib sort, task removal and
 refused oversized snapshots); **1.4.1** closed F8/F9 (the exact due count and the
-burst budget); **1.4.2** shipped the write-side JSON codec. Nothing is version-pinned
-now: everything left is trigger-gated, deliberately.
+burst budget); **1.4.2** shipped the write-side JSON codec; **1.4.3** was the P(-1)
+sweep. Nothing is version-pinned now.
 
 **Concurrency — audited in v1.0.4, see [ADR-0008](../adr/0008-threading-contract.md).**
 Retired as an unknown; now a stated contract with measured backing. Open items from it:
-the `lib/chrono.cyr` publish-before-fill ordering is an **upstream ask** filed against
-cyrius (samay stopped reading that table in 1.4.1); `lib/sakshi.cyr`'s unsynchronised ring
+`lib/chrono.cyr`'s publish-before-fill ordering was fixed upstream in cyrius 6.5.37; `lib/sakshi.cyr`'s unsynchronised ring
 indices and span depth can interleave log output under concurrent use (observability
 only, and outside the contract); and an opt-in debug mode that *detects* concurrent entry
 was considered and not built — worth revisiting if any consumer adopts a threaded shape.
 
-**Not covered by any audit to date — treat as unretired risk:**
-- **The accelerator placement path.** Every `can_fit`/`_best_fit_node` measurement used
-  `REQ_NONE`, which short-circuits before touching profiles. ai-hwaccel's
-  `find_satisfying_profile` has never been benchmarked inside the placement loop — the
-  numbers understate exactly the workload the domain principles are about.
-- **Test correctness, as distinct from coverage.** v1.0.3 found one test that asserted a
-  defect and stated the wrong rule in its own comment. Nothing establishes it was the only
-  one.
-- **Non-x86_64 targets.** No aarch64 or agnos measurements; the new NaN/Inf handling is
-  the part most likely to differ.
-- **Fuzzing.** All restore probing has been hand-crafted against specific hypotheses. A
-  structure-aware fuzzer over `task_scheduler_from_json_str` is the obvious next
-  instrument, and v1.0.3's validation is what it should be pointed at.
+**Audited in the 1.4.3 sweep, which retired the four risks previously listed here:**
+- **The accelerator placement path** was run with real profiles, which found that devices were never
+  reserved ([ADR-0013](../adr/0013-accelerators-are-reserved.md)), and it now has benchmark rows.
+- **Test correctness** has a number: whole-source mutation, recorded in the CHANGELOG. A second audit
+  read every assertion against an authority other than the code.
+- **aarch64** passes the whole suite under qemu, and so does bounds-checked mode. Neither is in CI.
+- **Fuzzing** is real: `tests/samay.fcyr` restores mutated snapshots and then drives them through a
+  working life. It was a stub until 1.4.3.
+
+**Still unretired:** agnos has no run at all. Restore's item limits bound neither memory nor bytes
+(see the roadmap). Replay after a restore can assign a different device than the original on a node
+whose profiles overlap (ADR-0013).

@@ -1,6 +1,11 @@
 # ADR 0005 — Input validation on snapshot restore
 
-**Status**: accepted (2026-07-21, v0.7.0 / M5 security audit).
+**Status**: accepted (2026-07-21, v0.7.0 / M5 security audit). **Amended** 2026-11-01 (v1.4.3):
+the "wrong type" half of this contract had only reached nested requirements. Every record field and
+container is now checked, a collection of the wrong type refuses the snapshot, two records under one
+key refuse it, a node past the profile limit refuses its scheduler, and a dropped record is counted
+and logged. Restore also checks each node against its tasks
+([ADR-0007](0007-reservation-lifecycle.md)).
 
 ## Context
 

@@ -47,9 +47,10 @@ fn training_job_template_new(model_id, method, dataset, target_node, max_duratio
     TrainingJobTemplate_set_model_id(p, _samay_own(model_id, "samay: out of memory in training_job_template_new"));
     TrainingJobTemplate_set_method(p, method);
     TrainingJobTemplate_set_dataset(p, _samay_own(dataset, "samay: out of memory in training_job_template_new"));
-    TrainingJobTemplate_set_target_node(p, target_node);
-    TrainingJobTemplate_set_max_duration_secs(p, max_duration_secs);
-    TrainingJobTemplate_set_checkpoint_interval_secs(p, checkpoint_interval_secs);
+    var target = _samay_own(target_node, "samay: out of memory in training_job_template_new");
+    TrainingJobTemplate_set_target_node(p, target);
+    TrainingJobTemplate_set_max_duration_secs(p, _req_amount(max_duration_secs));
+    TrainingJobTemplate_set_checkpoint_interval_secs(p, _req_amount(checkpoint_interval_secs));
     return p;
 }
 

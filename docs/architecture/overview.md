@@ -36,11 +36,14 @@ schedule_pending ──►  reconcile reservations (release anything no longer
 complete_task ────►  transition to Completed/Failed ─► release reserved_on
 cancel_task ──────►  transition to Cancelled ─► release reserved_on
 cron check_due ───►  due entries fire ScheduledTasks ─► submit_task
-preempt_if_needed ►  lowest-priority running task a new task outranks ─► PreemptionAction
+preempt_if_needed ►  lowest-priority running task whose node would then fit it ─► PreemptionAction
 ```
 
-A reservation is held for exactly as long as a task is `Scheduled` or `Running`.
-Reconciliation runs at the head of every `schedule_pending` rather than hooking
+A reservation is held while a task is `Scheduled` or `Running`, and it holds any
+accelerator the task took as well as its CPU, memory and disk
+([ADR-0013](../adr/0013-accelerators-are-reserved.md)). `complete_task` and `cancel_task`
+return it at once. A task finished through a raw transition returns it at the next
+`schedule_pending`: reconciliation runs at the head of every pass rather than hooking
 the transition, because `scheduled_task_transition` is public — a consumer can
 drive a task terminal without calling any scheduler API
 ([ADR-0007](../adr/0007-reservation-lifecycle.md)).
@@ -50,8 +53,8 @@ drive a task terminal without calling any scheduler API
 All structs are heap pointers (`#derive(accessors)`); **strings are `Str`
 (ptr+len), not cstr** — migrated in v0.5.0 because `#derive(Serialize)` core
 dumps on a cstr in a `Str`-typed field ([ADR-0003](../adr/0003-str-string-representation.md)).
-Passing a bare literal where a `Str` is expected compiles and then segfaults, so
-callers wrap with `str_from(...)`. Timestamps are i64 epoch-ns; optional fields
+Passing a bare literal where a `Str` is expected compiles and then misbehaves at runtime,
+so callers wrap with `str_from(...)`. Timestamps are i64 epoch-ns; optional fields
 use `0`/empty sentinels. A task's
 accelerator requirement is an ai-hwaccel `REQ_*` constant; a node's accelerator
 *availability* is a list of ai-hwaccel device profiles, matched via
@@ -82,4 +85,4 @@ All integrated against `dist/samay.cyr`:
   `last_fired` itself, which is why a single fire is never held
   ([ADR-0012](../adr/0012-cron-burst-budget.md)).
 
-Neither calls samay's cron or JSON API today, and neither is multi-threaded.
+None of them restores a snapshot, and none is multi-threaded.

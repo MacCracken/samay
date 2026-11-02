@@ -5,7 +5,7 @@ accelerator-conscious** task placement. Cyrius port of the original Rust library
 
 - **Language**: Cyrius (toolchain 6.7.18) · **License**: GPL-3.0-only
 - **Consumers**: daimon (task scheduling), kavach (sandboxed execution), stiva (scheduled containers)
-- **Status**: **v1.4.2** — port complete, P-1 and concurrency audited. Real cron
+- **Status**: **v1.4.3** — port complete, P-1 and concurrency audited. Real cron
   (Vixie DOM/DOW), ai-hwaccel placement, JSON snapshot/restore, deterministic
   scheduling, fail-closed restore, conserved node capacity. Downstream consumers
   kavach, daimon and stiva are integrated.
@@ -13,12 +13,15 @@ accelerator-conscious** task placement. Cyrius port of the original Rust library
 ## What it does
 
 - **Priority-aware task queue** (Normal / High / Critical / Emergency) with
-  preemption, cancellation, deadline-aware scheduling, and aggregate stats.
+  preemption, cancellation, and aggregate stats. A task can carry a deadline, stored
+  and serialized, but nothing schedules by it yet.
 - **Resource-aware placement** — CPU / memory / disk plus real accelerator
   availability: each node carries ai-hwaccel device profiles (CUDA / ROCm / TPU /
-  Gaudi / Neuron) and `can_fit` places via ai-hwaccel `requirement_satisfied()`,
-  best-fit by utilization (an accelerator task never lands on a node without a
-  matching device — see [ADR-0002](docs/adr/0002-ai-hwaccel-profile-placement.md)).
+  Gaudi / Neuron), and a placed task holds its device, or its chips of a TPU pod,
+  until it finishes. Placement is best-fit by utilization: an accelerator task never
+  lands on a node without a free matching device
+  ([ADR-0002](docs/adr/0002-ai-hwaccel-profile-placement.md),
+  [ADR-0013](docs/adr/0013-accelerators-are-reserved.md)).
 - **Real cron expressions** — standard 5-field (`min hour dom month dow`) with
   `*`, ranges, lists, `*/step`, month/day names, and `@hourly`…`@yearly`
   shortcuts, **validated at parse time**. Missed schedules follow an explicit
@@ -33,7 +36,7 @@ accelerator-conscious** task placement. Cyrius port of the original Rust library
 cyrius deps                          # resolve stdlib + ai-hwaccel into lib/
 cyrius build src/main.cyr build/samay
 ./build/samay                        # runnable demo
-cyrius test  tests/samay.tcyr        # 864/864 assertions
+cyrius test  tests/samay.tcyr        # 1224/1224 assertions
 cyrius bench tests/samay.bcyr
 ```
 
@@ -44,7 +47,7 @@ Consumers declare the dep and include the committed bundle:
 ```toml
 [deps.samay]
 git = "https://github.com/MacCracken/samay.git"
-tag = "1.4.2"
+tag = "1.4.3"
 modules = ["dist/samay.cyr"]
 ```
 
@@ -53,8 +56,9 @@ weekday cron with catch-up:
 
 > Every string argument is a `Str`, not a bare cstring — wrap literals in
 > `str_from(...)` ([ADR-0003](docs/adr/0003-str-string-representation.md)).
-> Passing a literal directly compiles and then segfaults, because `str_data`
-> reads it as a ptr+len header.
+> Passing a literal directly compiles, and what happens next depends on its bytes,
+> because `str_data` reads it as a ptr+len header: a segfault, a misleading
+> out-of-memory panic, or a silent wrong value.
 
 ```
 var s = task_scheduler_new();
@@ -102,11 +106,9 @@ deliberate contract, not an oversight — the query functions return raw pointer
 scheduler-owned structs, so an internal lock could not make sharing safe. See
 [ADR-0008](docs/adr/0008-threading-contract.md) for the measurements and the reasoning.
 
-Separate schedulers on separate threads need nothing extra. Through 1.4.0 they needed
-`samay_init()` before spawning, because cron evaluation read a lazily built month table in
-the vendored `chrono` module. Since 1.4.1 it does not
-([ADR-0012](docs/adr/0012-cron-burst-budget.md)). `samay_init()` remains, and is worth
-calling once before spawning only if your own threads use `chrono` directly.
+Separate schedulers on separate threads need nothing extra. `samay_init()` used to be
+needed before spawning, against a race in the vendored `chrono` module. chrono fixed that
+in cyrius 6.5.37, so the function now does nothing and stays only because it is public.
 
 ## Layout
 

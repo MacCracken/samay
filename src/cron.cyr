@@ -18,6 +18,7 @@
 var CRON_CATCHUP_CAP = 1000;         # max tasks fired per entry per check
 var CRON_BURST_BUDGET = 10000;       # max tasks fired by bursts per check (ADR-0012)
 var CRON_SCAN_WINDOW_SECS = 31622400; # 366 days — the catch-up look-back window
+var CRON_CLOCK_RESET_SECS = 10800;   # a backward step past this re-anchors (ADR-0006)
 
 #derive(accessors)
 struct CronTaskTemplate {
@@ -34,6 +35,8 @@ fn cron_task_template_new(name, description, agent_id, priority, req): i64 {
     CronTaskTemplate_set_name(p, _samay_own(name, "samay: out of memory in cron_task_template_new"));
     CronTaskTemplate_set_description(p, _samay_own(description, "samay: out of memory in cron_task_template_new"));
     CronTaskTemplate_set_agent_id(p, _samay_own(agent_id, "samay: out of memory in cron_task_template_new"));
+    if (priority < 1) { priority = 1; }
+    if (priority > 10) { priority = 10; }
     CronTaskTemplate_set_priority(p, priority);
     CronTaskTemplate_set_resource_requirements(p, req);
     return p;
@@ -49,14 +52,17 @@ struct CronEntry {
     enabled: i64;
     last_fired: i64;
     missed_policy: i64;
+    disabled_seen: i64;
 }
 
 fn cron_entry_new(name, expr, task_template, enabled, missed_policy): i64 {
-    var p = alloc(48);
+    var p = alloc(56);
     if (p == 0) { panic("samay: out of memory in cron_entry_new"); }
     CronEntry_set_name(p, _samay_own(name, "samay: out of memory in cron_entry_new"));
     CronEntry_set_expr(p, expr);
     CronEntry_set_task_template(p, task_template);
+    # Compared with `== 1`, so anything truthy must be 1. Restore does the same.
+    if (enabled != 0) { enabled = 1; }
     CronEntry_set_enabled(p, enabled);
     CronEntry_set_last_fired(p, 0);
     CronEntry_set_missed_policy(p, missed_policy);
@@ -66,18 +72,36 @@ fn cron_entry_new(name, expr, task_template, enabled, missed_policy): i64 {
 #derive(accessors)
 struct CronScheduler {
     entries: i64;
+    check_scratch: i64;
 }
 
 fn cron_scheduler_new(): i64 {
-    samay_init();   # close the chrono lazy-init window while single-threaded
-    var c = alloc(8);
+    var c = alloc(16);
     if (c == 0) { panic("samay: out of memory in cron_scheduler_new"); }
     # map_new_str returns 0 on OOM without aborting; a null entries map
     # survives construction and dies later inside map_set.
     var entries = map_new_str();
     if (entries == 0) { panic("samay: out of memory in cron_scheduler_new (entries map)"); }
     CronScheduler_set_entries(c, entries);
+    # Reused by every check, so a quiet check allocates no list of its own.
+    var scratch = vec_new();
+    if (scratch == 0) { panic("samay: out of memory in cron_scheduler_new (scratch)"); }
+    CronScheduler_set_check_scratch(c, scratch);
     return c;
+}
+
+# Put an entry in the table, keyed on its own name: the caller's Str may be a reused
+# buffer. An entry replaced under the same name keeps its place in time unless the
+# new one brings its own. A fresh 0 would fire the current minute a second time, and
+# forget everything owed since the last check with no log line (ADR-0006).
+fn _cron_put(c, entry): i64 {
+    var table = CronScheduler_entries(c);
+    var old = map_get(table, CronEntry_name(entry));
+    if (old != 0) {
+        if (CronEntry_last_fired(entry) == 0) { CronEntry_set_last_fired(entry, CronEntry_last_fired(old)); }
+    }
+    map_set(table, CronEntry_name(entry), entry);
+    return 0;
 }
 
 # Parse + validate a cron expression, then register the entry. Ok(0) on
@@ -87,15 +111,14 @@ fn cron_scheduler_add(c, name, expr_str, task_template, enabled, missed_policy):
     if (str_len(name) == 0) { return Err(1); }
     var r_t, r_v = cron_expr_parse(expr_str);
     if (is_err_result(r_t) == 1) { return Err(1); }
-    var entry = cron_entry_new(name, result_unwrap(r_t, r_v), task_template, enabled, missed_policy);
-    map_set(CronScheduler_entries(c), name, entry);
+    _cron_put(c, cron_entry_new(name, result_unwrap(r_t, r_v), task_template, enabled, missed_policy));
     return Ok(0);
 }
 
 # Register a pre-built entry. Err(1) if the name is empty.
 fn cron_scheduler_add_entry(c, entry): i64 {
     if (str_len(CronEntry_name(entry)) == 0) { return Err(1); }
-    map_set(CronScheduler_entries(c), CronEntry_name(entry), entry);
+    _cron_put(c, entry);
     return Ok(0);
 }
 
@@ -152,26 +175,7 @@ fn _cron_fire(e): i64 {
         CronTaskTemplate_description(tmpl),
         CronTaskTemplate_agent_id(tmpl),
         CronTaskTemplate_priority(tmpl),
-        resource_req_clone(CronTaskTemplate_resource_requirements(tmpl)));
-}
-
-# Bits set in x.
-fn _cron_bits(x): i64 {
-    var n = 0;
-    while (x != 0) {
-        x = x & (x - 1);
-        n = n + 1;
-    }
-    return n;
-}
-
-# Matching minutes in a whole UTC day that passes the day fields. A snapshot's
-# masks are not range-checked on restore, so only bits a real minute or hour can
-# test are counted: cron_expr_matches can never reach the others.
-fn _cron_day_total(expr): i64 {
-    var minutes = _cron_bits(CronExpr_minute_mask(expr) & ((1 << 60) - 1));
-    var hours = _cron_bits(CronExpr_hour_mask(expr) & ((1 << 24) - 1));
-    return minutes * hours;
+        CronTaskTemplate_resource_requirements(tmpl));
 }
 
 # Matching times of day in [from, to], both minute-aligned and in one UTC day.
@@ -227,42 +231,60 @@ fn _cron_count_due(expr, lf_secs, now_secs, clamped_out): i64 {
     return count;
 }
 
-fn _cron_log_skip(name, skipped): i64 {
+# A log line's opening. sakshi's line buffer holds 256 bytes and a name can be any
+# length, so the name stops at 64 and the count after it always survives.
+fn _cron_log_head(name): i64 {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "cron '");
-    str_builder_add(sb, name);
+    var n = str_len(name);
+    if (n > 64) { n = 64; }
+    str_builder_add(sb, str_new(str_data(name), n));
+    return sb;
+}
+
+# The count only ever covers the window, so a clamped one says so.
+fn _cron_log_window(sb, clamped): i64 {
+    if (clamped == 1) { str_builder_add_cstr(sb, " in the catch-up window"); }
+    return 0;
+}
+
+fn _cron_log_skip(name, skipped, clamped): i64 {
+    var sb = _cron_log_head(name);
     str_builder_add_cstr(sb, "': skip policy dropped ");
     str_builder_add_int(sb, skipped);
     str_builder_add_cstr(sb, " missed occurrence(s)");
+    _cron_log_window(sb, clamped);
     var msg = str_builder_build(sb);
     sakshi_warn(str_data(msg), str_len(msg));
     return 0;
 }
 
-fn _cron_log_catchup_cap(name, due): i64 {
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "cron '");
-    str_builder_add(sb, name);
+fn _cron_log_catchup_cap(name, due, clamped): i64 {
+    var sb = _cron_log_head(name);
     str_builder_add_cstr(sb, "': catch-up capped — fired ");
     str_builder_add_int(sb, CRON_CATCHUP_CAP);
     str_builder_add_cstr(sb, " of ");
     str_builder_add_int(sb, due);
     str_builder_add_cstr(sb, " due occurrence(s)");
+    _cron_log_window(sb, clamped);
     var msg = str_builder_build(sb);
     sakshi_warn(str_data(msg), str_len(msg));
     return 0;
 }
 
-# Every catch-up burst is logged, not only the capped ones. The domain
-# principle is that the missed-schedule policy is ALWAYS visible; before
-# v1.0.3 a sub-cap burst (e.g. 720 tasks after a 30-day gap) fired silently
-# because only the CRON_CATCHUP_CAP path logged.
-fn _cron_log_catchup(name, fired): i64 {
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "cron '");
-    str_builder_add(sb, name);
-    str_builder_add_cstr(sb, "': catch-up policy fired ");
-    str_builder_add_int(sb, fired);
+# Every late fire is logged, not only the capped ones. The domain principle is
+# that the missed-schedule policy is ALWAYS visible: before v1.0.3 a sub-cap burst
+# (720 tasks after a 30-day gap) fired silently, and until 1.4.3 so did a single
+# late fire, which is all a daily entry ever does. `missed` leaves out an occurrence
+# that is on time.
+fn _cron_log_missed(name, skip, missed): i64 {
+    var sb = _cron_log_head(name);
+    if (skip == 1) {
+        str_builder_add_cstr(sb, "': skip policy fired ");
+    } else {
+        str_builder_add_cstr(sb, "': catch-up policy fired ");
+    }
+    str_builder_add_int(sb, missed);
     str_builder_add_cstr(sb, " missed occurrence(s)");
     var msg = str_builder_build(sb);
     sakshi_warn(str_data(msg), str_len(msg));
@@ -272,9 +294,7 @@ fn _cron_log_catchup(name, fired): i64 {
 # The clock moved backwards (NTP correction, VM restore, or a caller of the
 # injected-clock API passing a stale instant). Logged, never silent.
 fn _cron_log_clock_regression(name): i64 {
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "cron '");
-    str_builder_add(sb, name);
+    var sb = _cron_log_head(name);
     str_builder_add_cstr(sb, "': clock moved backwards; watermark held, no re-fire");
     var msg = str_builder_build(sb);
     sakshi_warn(str_data(msg), str_len(msg));
@@ -295,12 +315,34 @@ fn _cron_fire_n(tasks, e, n): i64 {
     return 0;
 }
 
-# Occurrences older than the catch-up window were dropped — logged, not silent.
+# The clock moved back too far to wait for. A watermark from the future, such as one
+# bad reading at boot, would otherwise stop the entry until real time caught up
+# (ADR-0006).
+fn _cron_log_clock_reset(name): i64 {
+    var sb = _cron_log_head(name);
+    str_builder_add_cstr(sb, "': clock moved backwards past the reset limit; watermark re-anchored");
+    var msg = str_builder_build(sb);
+    sakshi_warn(str_data(msg), str_len(msg));
+    return 0;
+}
+
+# Disabling an entry gives up what it owed. A choice, but not a silent one.
+fn _cron_log_disabled(name, owed, clamped): i64 {
+    var sb = _cron_log_head(name);
+    str_builder_add_cstr(sb, "': disabled, giving up ");
+    str_builder_add_int(sb, owed);
+    str_builder_add_cstr(sb, " missed occurrence(s)");
+    _cron_log_window(sb, clamped);
+    var msg = str_builder_build(sb);
+    sakshi_warn(str_data(msg), str_len(msg));
+    return 0;
+}
+
+# Anything older than the window is out of reach — logged, not silent. Whether any
+# such occurrence exists is unknown, so this does not claim one was dropped.
 fn _cron_log_clamp(name): i64 {
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "cron '");
-    str_builder_add(sb, name);
-    str_builder_add_cstr(sb, "': last_fired predates the ~366-day catch-up window; older missed occurrences dropped");
+    var sb = _cron_log_head(name);
+    str_builder_add_cstr(sb, "': last_fired predates the ~366-day catch-up window; anything older is not counted");
     var msg = str_builder_build(sb);
     sakshi_warn(str_data(msg), str_len(msg));
     return 0;
@@ -331,6 +373,19 @@ fn _cron_over_budget(fire_n, spent): i64 {
     return 0;
 }
 
+# Say what a check did about `due` occurrences, unless it was just the one on time.
+fn _cron_log_outcome(e, due, skip, clamped, now_secs): i64 {
+    var name = CronEntry_name(e);
+    if (skip == 1) {
+        if (due > 1) { return _cron_log_skip(name, due - 1, clamped); }
+    } elif (due > CRON_CATCHUP_CAP) {
+        return _cron_log_catchup_cap(name, due, clamped);
+    }
+    var missed = due - cron_expr_matches(CronEntry_expr(e), (now_secs / 60) * 60);
+    if (missed > 0) { _cron_log_missed(name, skip, missed); }
+    return 0;
+}
+
 # Evaluate one entry: fire per the missed-schedule policy and advance the
 # watermark. Returns the tasks a burst fired, which count against
 # CRON_BURST_BUDGET, or -1 if the entry was held: no task, no log and no
@@ -340,22 +395,41 @@ fn _cron_check_entry(tasks, e, now_ns, now_secs, spent): i64 {
     # A disabled entry TRACKS the clock rather than freezing. Freezing made
     # the whole disabled interval count as "missed", so re-enabling fired a
     # burst for time the operator had deliberately turned the schedule off
-    # (720 tasks for a 30-day disable of `0 * * * *`). See ADR-0007.
+    # (720 tasks for a 30-day disable of `0 * * * *`). See ADR-0006.
+    var expr = CronEntry_expr(e);
     if (CronEntry_enabled(e) != 1) {
+        # What it owed from before it was disabled goes, and says so once.
+        if (CronEntry_disabled_seen(e) == 0) {
+            CronEntry_set_disabled_seen(e, 1);
+            var was = CronEntry_last_fired(e);
+            if (was != 0) {
+                var cut = 0;
+                var owed = _cron_count_due(expr, was / 1000000000, now_secs, &cut);
+                if (owed > 0) { _cron_log_disabled(CronEntry_name(e), owed, cut); }
+            }
+        }
         _cron_advance(e, now_ns);
         return 0;
     }
+    CronEntry_set_disabled_seen(e, 0);
     var lf = CronEntry_last_fired(e);
     if (now_ns < lf) {
-        _cron_log_clock_regression(CronEntry_name(e));
-        return 0;
+        if (lf - now_ns <= CRON_CLOCK_RESET_SECS * 1000000000) {
+            _cron_log_clock_regression(CronEntry_name(e));
+            return 0;
+        }
+        # Vixie's rule: a small step back waits, a large one starts again from now.
+        _cron_log_clock_reset(CronEntry_name(e));
+        CronEntry_set_last_fired(e, 0);
+        lf = 0;
     }
-    var expr = CronEntry_expr(e);
     if (lf == 0) {
         # First evaluation: fire only if the current minute matches;
         # anchor last_fired at now (no retroactive firing).
         if (cron_expr_matches(expr, now_secs) == 1) { vec_push(tasks, _cron_fire(e)); }
         _cron_advance(e, now_ns);
+        # 0 means never, so an instant at or before the epoch cannot anchor one.
+        if (CronEntry_last_fired(e) == 0) { CronEntry_set_last_fired(e, 1); }
         return 0;
     }
     var clamped = 0;
@@ -371,13 +445,7 @@ fn _cron_check_entry(tasks, e, now_ns, now_secs, spent): i64 {
     if (_cron_over_budget(fire_n, spent) == 1) { return 0 - 1; }
     if (clamped == 1) { _cron_log_clamp(CronEntry_name(e)); }
     _cron_fire_n(tasks, e, fire_n);
-    if (skip == 1) {
-        if (due > 1) { _cron_log_skip(CronEntry_name(e), due - 1); }
-    } elif (due > CRON_CATCHUP_CAP) {
-        _cron_log_catchup_cap(CronEntry_name(e), due);
-    } elif (fire_n > 1) {
-        _cron_log_catchup(CronEntry_name(e), fire_n);
-    }
+    if (due > 0) { _cron_log_outcome(e, due, skip, clamped, now_secs); }
     _cron_advance(e, now_ns);
     if (fire_n > 1) { return fire_n; }
     return 0;
@@ -398,7 +466,16 @@ fn cron_scheduler_check_due_at(c, now_ns): i64 {
     # hand back a 0 that faults a frame up (ADR-0009).
     var tasks = vec_new();
     if (tasks == 0) { panic("samay: out of memory in cron_scheduler_check_due_at"); }
-    var entries = map_values(CronScheduler_entries(c));
+    var table = CronScheduler_entries(c);
+    var cap = map_cap(table);
+    var entries = CronScheduler_check_scratch(c);
+    vec_truncate(entries, 0);
+    var slot = 0;
+    while (slot < cap) {
+        var entry = _map_slot(table, slot);
+        if (entry != 0) { vec_push(entries, entry); }
+        slot = slot + 1;
+    }
     vec_sort_by(entries, &_entry_due_cmp);
     var n = vec_len(entries);
     var spent = 0;

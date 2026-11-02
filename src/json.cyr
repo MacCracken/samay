@@ -35,6 +35,8 @@
 # `_str` is a Cyrius dispatch suffix, so it was renamed) — the 1-arg
 # bayan_json_v_parse form trips a spurious linter arity warning.
 fn _parse(s): i64 {
+    # A writer past the item limit answers 0, and a caller may hand that straight here.
+    if (s == 0) { return 0; }
     return bayan_json_v_parse_buf(str_data(s), str_len(s));
 }
 
@@ -97,10 +99,7 @@ fn _jv_f64(obj, key, dflt): i64 {
 
 # Ceiling on how many items a restored collection may hold, so a hostile
 # snapshot cannot force unbounded allocation. Far above any realistic
-# scheduler; caps the anti-catastrophe bound (OOM / minutes-long work). Note
-# this bounds but does not fully eliminate the hash-collision (F4) cost within
-# the cap, which is trigger-gated on an upstream fix (see
-# docs/development/roadmap.md); origin is docs/audit/2026-07-21-audit.md.
+# scheduler; caps the anti-catastrophe bound (OOM / minutes-long work).
 var SAMAY_JSON_MAX_ITEMS = 100000;
 
 # 1 if a collection is too large to write. Restore refuses a collection past the
@@ -152,9 +151,11 @@ fn _jv_f64_nonneg(obj, key, dflt): i64 {
 
 # Read an enum-domain field: anything outside [lo, hi] falls back to `dflt`.
 # Deliberately NOT _clamp_i64 — clamping a continuous quantity preserves its
-# meaning, but clamping an enum invents one (accel_req 99 would become
-# REQ_ANY_ACCELERATOR, a requirement nobody asked for). Matches how
-# `status` and `missed_policy` already handle an out-of-domain value.
+# meaning, but clamping an enum invents one. Matches how `status` and
+# `missed_policy` already handle an out-of-domain value. accel_req does not come
+# through here: a requirement samay does not know is kept as it is, because no
+# device satisfies it and the task stays queued. Falling back to REQ_NONE, as it did
+# through 1.4.2, put accelerator work on a node with no accelerator.
 fn _jv_enum(obj, key, lo, hi, dflt): i64 {
     var el = bayan_json_v_obj_get_by_cstr(obj, key);
     if (el == 0) { return dflt; }
@@ -165,12 +166,73 @@ fn _jv_enum(obj, key, lo, hi, dflt): i64 {
 }
 
 # Read a flag field normalised to exactly 0 or 1. Anything non-zero is 1, so
-# a truthy-but-not-1 value cannot land in a field compared with `== 1`.
+# a truthy-but-not-1 value cannot land in a field compared with `== 1`. A JSON
+# true is 1: bayan_json_v_int answers 0 for it, which read `"enabled":true` as off.
 fn _jv_bool01(obj, key, dflt): i64 {
     var el = bayan_json_v_obj_get_by_cstr(obj, key);
     if (el == 0) { return dflt; }
+    if (bayan_json_v_is_bool(el) == 1) { return bayan_json_v_bool(el); }
     if (bayan_json_v_int(el) == 0) { return 0; }
     return 1;
+}
+
+# Each of these is 1 if `key` is present and holds the wrong kind of thing. The readers
+# above answer 0 for a wrong type, so without them "status":"running" restores as
+# QUEUED, "cpu_cores":"8" as no cores at all, and a wrong-typed requirement fits any
+# node. A record that fails one is rejected (ADR-0005). An absent key stays the
+# reader's business: older snapshots lack some.
+fn _jv_not_num(obj, key): i64 {
+    var el = bayan_json_v_obj_get_by_cstr(obj, key);
+    if (el == 0) { return 0; }
+    if (bayan_json_v_is_int(el) == 1) { return 0; }
+    if (bayan_json_v_is_float(el) == 1) { return 0; }
+    return 1;
+}
+
+fn _jv_not_flag(obj, key): i64 {
+    var el = bayan_json_v_obj_get_by_cstr(obj, key);
+    if (el == 0) { return 0; }
+    if (bayan_json_v_is_bool(el) == 1) { return 0; }
+    return _jv_not_num(obj, key);
+}
+
+# 1 unless `key` is absent, or an array within the ceiling. A collection of the wrong
+# type read as empty, so a snapshot with its tasks keyed by id restored as an empty
+# scheduler and reported success.
+fn _jv_list_ok(obj, key): i64 {
+    var el = bayan_json_v_obj_get_by_cstr(obj, key);
+    if (el == 0) { return 1; }
+    if (bayan_json_v_is_arr(el) == 0) { return 0; }
+    if (bayan_json_v_arr_len(el) > SAMAY_JSON_MAX_ITEMS) { return 0; }
+    return 1;
+}
+
+# Records a restore could not use. A reader drops a bad record and carries on
+# (ADR-0005), but samay does not drop anything without saying so.
+fn _log_records_dropped(n, what): i64 {
+    if (n == 0) { return 0; }
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "restore dropped ");
+    str_builder_add_int(sb, n);
+    str_builder_add_cstr(sb, " unreadable ");
+    str_builder_add_cstr(sb, what);
+    var msg = str_builder_build(sb);
+    sakshi_warn(str_data(msg), str_len(msg));
+    return 0;
+}
+
+# An honest writer cannot produce two records under one key. Keeping either would
+# strand what the other held, so the whole snapshot is refused.
+fn _log_duplicate_key(what, key): i64 {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "snapshot refused: two ");
+    str_builder_add_cstr(sb, what);
+    str_builder_add_cstr(sb, " named '");
+    str_builder_add(sb, key);
+    str_builder_add_cstr(sb, "'");
+    var msg = str_builder_build(sb);
+    sakshi_error(str_data(msg), str_len(msg));
+    return 0;
 }
 
 # Read an int field, coerced to its non-negative (u64-like) domain; a
@@ -247,10 +309,14 @@ fn _rr_from(obj, key): i64 {
     if (bayan_json_v_is_obj(el) == 0) { return 0; }
     # Require a mandatory key, so a wrong-shaped object is rejected too.
     if (bayan_json_v_obj_get_by_cstr(el, "cpu_cores") == 0) { return 0; }
+    var bad = _jv_not_num(el, "cpu_cores") + _jv_not_num(el, "memory_mb") + _jv_not_num(el, "accel_req")
+    + _jv_not_num(el, "accel_min_chips") + _jv_not_flag(el, "network") + _jv_not_num(el, "disk_mb");
+    if (bad != 0) { return 0; }
+    # resource_req_new settles the domain, so a huge requirement stays one.
     return resource_req_new(
-      _jv_f64_nonneg(el, "cpu_cores", f64_from(0)),
+      _jv_f64(el, "cpu_cores", f64_from(0)),
       _jv_uint(el, "memory_mb", 0),
-      _jv_enum(el, "accel_req", REQ_NONE, REQ_ANY_ACCELERATOR, REQ_NONE),
+      _jv_int(el, "accel_req", REQ_NONE),
       _jv_uint(el, "accel_min_chips", 0),
       _jv_bool01(el, "network", 0),
       _jv_uint(el, "disk_mb", 0));
@@ -270,6 +336,12 @@ fn _ce_node(expr): i64 {
     return o;
 }
 
+fn _ce_mask_ok(el, key): i64 {
+    if (bayan_json_v_obj_get_by_cstr(el, key) == 0) { return 0; }
+    if (_jv_not_num(el, key) == 1) { return 0; }
+    return 1;
+}
+
 # json node (at key) -> CronExpr, or 0 if absent / not an object / not
 # shaped like a CronExpr. Same reasoning as _rr_from: the derive bridge could
 # not fail, so a wrong-typed `expr` produced an all-zero CronExpr whose masks
@@ -278,7 +350,13 @@ fn _ce_from(obj, key): i64 {
     var el = bayan_json_v_obj_get_by_cstr(obj, key);
     if (el == 0) { return 0; }
     if (bayan_json_v_is_obj(el) == 0) { return 0; }
-    if (bayan_json_v_obj_get_by_cstr(el, "minute_mask") == 0) { return 0; }
+    # Every mask, and each a number: a missing one reads as 0, which matches nothing.
+    if (_ce_mask_ok(el, "minute_mask") == 0) { return 0; }
+    if (_ce_mask_ok(el, "hour_mask") == 0) { return 0; }
+    if (_ce_mask_ok(el, "dom_mask") == 0) { return 0; }
+    if (_ce_mask_ok(el, "month_mask") == 0) { return 0; }
+    if (_ce_mask_ok(el, "dow_mask") == 0) { return 0; }
+    if (_jv_not_flag(el, "dom_star") + _jv_not_flag(el, "dow_star") != 0) { return 0; }
     var p = alloc(56);   # 7 fields * 8 — mirrors cron_expr_parse
     # NOT `return 0`: this function already returns 0 for ADR-0005's "absent or
     # wrong type -> reject this record", and the container readers act on that
@@ -321,6 +399,9 @@ fn training_job_template_from_jsonv(v): i64 {
     var dataset = _jv_str(v, "dataset");
     if (model == 0) { return 0; }
     if (dataset == 0) { return 0; }
+    var bad = _jv_not_num(v, "method") + _jv_not_num(v, "max_duration_secs")
+    + _jv_not_num(v, "checkpoint_interval_secs");
+    if (bad != 0) { return 0; }
     return training_job_template_new(
       model,
       _jv_enum(v, "method", TM_LORA, TM_DISTILL, TM_LORA),
@@ -358,6 +439,7 @@ fn cron_task_template_from_jsonv(v): i64 {
     if (desc == 0) { return 0; }
     if (agent == 0) { return 0; }
     if (req == 0) { return 0; }
+    if (_jv_not_num(v, "priority") == 1) { return 0; }
     return cron_task_template_new(
       name, desc, agent,
       _clamp_i64(_jv_int(v, "priority", 5), 1, 10),
@@ -370,6 +452,12 @@ fn cron_task_template_from_json_str(s): i64 { return cron_task_template_from_jso
 # ---------------------------------------------------------------------------
 # ScheduledTask — nested ResourceReq + nullable fail_reason and node fields
 # ---------------------------------------------------------------------------
+
+# A nullable Str the task keeps, so it must own it: the tree may be arena-allocated
+# and reset the moment this returns.
+fn _own_opt(v, key): i64 {
+    return _samay_own(_jv_opt_str_get(v, key), "samay: out of memory in scheduled_task_from_jsonv");
+}
 
 # Rebuild a ScheduledTask from its raw stored state. scheduled_task_new
 # generates a fresh uuid and stamps created_at via dt_now(), so it can't be
@@ -389,6 +477,10 @@ fn scheduled_task_from_jsonv(v): i64 {
     if (req == 0) { return 0; }
     # task_id is a map key; an empty one collides with any other empty one.
     if (str_len(tid) == 0) { return 0; }
+    var bad = _jv_not_num(v, "priority") + _jv_not_num(v, "status") + _jv_not_num(v, "created_at")
+    + _jv_not_num(v, "scheduled_at") + _jv_not_num(v, "started_at") + _jv_not_num(v, "completed_at")
+    + _jv_not_num(v, "deadline");
+    if (bad != 0) { return 0; }
     var st = _jv_int(v, "status", TASK_QUEUED);
     if (st < TASK_QUEUED) { st = TASK_QUEUED; }
     if (st > TASK_PREEMPTED) { st = TASK_QUEUED; }
@@ -401,7 +493,7 @@ fn scheduled_task_from_jsonv(v): i64 {
     ScheduledTask_set_priority(p, _clamp_i64(_jv_int(v, "priority", 1), 1, 10));
     ScheduledTask_set_resource_requirements(p, req);
     ScheduledTask_set_status(p, st);
-    ScheduledTask_set_fail_reason(p, _jv_opt_str_get(v, "fail_reason"));
+    ScheduledTask_set_fail_reason(p, _own_opt(v, "fail_reason"));
     ScheduledTask_set_created_at(p, _jv_int(v, "created_at", 0));
     ScheduledTask_set_scheduled_at(p, _jv_int(v, "scheduled_at", 0));
     ScheduledTask_set_started_at(p, _jv_int(v, "started_at", 0));
@@ -412,11 +504,11 @@ fn scheduled_task_from_jsonv(v): i64 {
     # on its own. An older one has only the view. Placing a task overwrote its
     # request, so a placed task's view is its assignment and its request is gone.
     # That view stays as the request: it may be real, and it is how 1.2.x read it.
-    var npref = _jv_opt_str_get(v, "node_preference");
+    var npref = _own_opt(v, "node_preference");
     if (bayan_json_v_obj_get_by_cstr(v, "requested_node") == 0) {
         ScheduledTask_set_requested_node(p, npref);
     } else {
-        ScheduledTask_set_requested_node(p, _jv_opt_str_get(v, "requested_node"));
+        ScheduledTask_set_requested_node(p, _own_opt(v, "requested_node"));
     }
     if (bayan_json_v_obj_get_by_cstr(v, "assigned_node") == 0) {
         var placed = npref;
@@ -427,7 +519,7 @@ fn scheduled_task_from_jsonv(v): i64 {
         }
         ScheduledTask_set_assigned_node(p, placed);
     } else {
-        ScheduledTask_set_assigned_node(p, _jv_opt_str_get(v, "assigned_node"));
+        ScheduledTask_set_assigned_node(p, _own_opt(v, "assigned_node"));
     }
     # Back-compat: snapshots written before v1.0.3 carry no `reserved_on`.
     # A task that was SCHEDULED or RUNNING did hold a reservation, and
@@ -440,7 +532,7 @@ fn scheduled_task_from_jsonv(v): i64 {
         if (st == TASK_RUNNING) { ron = npref; }
         ScheduledTask_set_reserved_on(p, ron);
     } else {
-        ScheduledTask_set_reserved_on(p, _jv_opt_str_get(v, "reserved_on"));
+        ScheduledTask_set_reserved_on(p, _own_opt(v, "reserved_on"));
     }
     return p;
 }
@@ -521,9 +613,15 @@ fn node_capacity_from_jsonv(v): i64 {
     var nid = _jv_str(v, "node_id");
     if (nid == 0) { return 0; }
     if (str_len(nid) == 0) { return 0; }
-    var p = alloc(72);
+    var bad = _jv_not_num(v, "total_cpu") + _jv_not_num(v, "available_cpu") + _jv_not_num(v, "total_memory_mb")
+    + _jv_not_num(v, "available_memory_mb") + _jv_not_num(v, "total_disk_mb")
+    + _jv_not_num(v, "available_disk_mb") + _jv_not_num(v, "running_tasks");
+    if (bad != 0) { return 0; }
+    if (_jv_list_ok(v, "accel_profiles") == 0) { return 0; }
+    var p = alloc(88);   # 11 fields * 8 — MUST track node_capacity_new
     if (p == 0) { panic("samay: out of memory in node_capacity_from_jsonv"); }
-    NodeCapacity_set_node_id(p, nid);
+    NodeCapacity_set_node_id(p, _samay_own(nid, "samay: out of memory in node_capacity_from_jsonv"));
+    _node_init_holds(p);
     # Enforce `0 <= available <= total` on all three axes. Without it a
     # snapshot carrying available_cpu=1e18 against total_cpu=1.0 gives a
     # hugely negative utilization, and that node then wins every
@@ -551,7 +649,6 @@ fn node_capacity_from_jsonv(v): i64 {
     var arr = bayan_json_v_obj_get_by_cstr(v, "accel_profiles");
     if (arr != 0) {
         var n = bayan_json_v_arr_len(arr);
-        if (n > SAMAY_JSON_MAX_ITEMS) { return 0; }
         var i = 0;
         while (i < n) {
             # ai-hwaccel's profile_from_json takes a json_v node directly. Since
@@ -603,6 +700,8 @@ fn cron_entry_from_jsonv(v): i64 {
     # Both public add paths reject an empty name (src/cron.cyr); restore
     # writes the map directly, so it has to enforce the same invariant.
     if (str_len(name) == 0) { return 0; }
+    var bad = _jv_not_flag(v, "enabled") + _jv_not_num(v, "last_fired") + _jv_not_num(v, "missed_policy");
+    if (bad != 0) { return 0; }
     var mp = _jv_int(v, "missed_policy", CRON_CATCHUP);
     if (mp != CRON_SKIP) { mp = CRON_CATCHUP; }
     # `enabled` is compared with `== 1`, so a truthy-but-not-1 value would
@@ -641,17 +740,27 @@ fn cron_scheduler_to_jsonv(c): i64 {
 fn cron_scheduler_from_jsonv(v): i64 {
     if (v == 0) { return 0; }
     if (bayan_json_v_is_obj(v) == 0) { return 0; }
+    if (_jv_list_ok(v, "entries") == 0) { return 0; }
     var c = cron_scheduler_new();
     var arr = bayan_json_v_obj_get_by_cstr(v, "entries");
     if (arr != 0) {
         var n = bayan_json_v_arr_len(arr);
-        if (n > SAMAY_JSON_MAX_ITEMS) { return 0; }
+        var dropped = 0;
         var i = 0;
         while (i < n) {
             var e = cron_entry_from_jsonv(bayan_json_v_arr_get(arr, i));
-            if (e != 0) { map_set(CronScheduler_entries(c), CronEntry_name(e), e); }
+            if (e == 0) {
+                dropped = dropped + 1;
+            } else {
+                if (map_has(CronScheduler_entries(c), CronEntry_name(e)) == 1) {
+                    _log_duplicate_key("cron entries", CronEntry_name(e));
+                    return 0;
+                }
+                map_set(CronScheduler_entries(c), CronEntry_name(e), e);
+            }
             i = i + 1;
         }
+        _log_records_dropped(dropped, "cron entries");
     }
     return c;
 }
@@ -695,29 +804,56 @@ fn task_scheduler_to_jsonv(s): i64 {
 fn task_scheduler_from_jsonv(v): i64 {
     if (v == 0) { return 0; }
     if (bayan_json_v_is_obj(v) == 0) { return 0; }
+    if (_jv_list_ok(v, "tasks") == 0) { return 0; }
+    if (_jv_list_ok(v, "nodes") == 0) { return 0; }
     var s = task_scheduler_new();
+    var dropped = 0;
     var tarr = bayan_json_v_obj_get_by_cstr(v, "tasks");
     if (tarr != 0) {
         var tn = bayan_json_v_arr_len(tarr);
-        if (tn > SAMAY_JSON_MAX_ITEMS) { return 0; }
         var ti = 0;
         while (ti < tn) {
             var t = scheduled_task_from_jsonv(bayan_json_v_arr_get(tarr, ti));
-            if (t != 0) { map_set(TaskScheduler_tasks(s), ScheduledTask_task_id(t), t); }
+            if (t == 0) {
+                dropped = dropped + 1;
+            } else {
+                if (map_has(TaskScheduler_tasks(s), ScheduledTask_task_id(t)) == 1) {
+                    _log_duplicate_key("tasks", ScheduledTask_task_id(t));
+                    return 0;
+                }
+                map_set(TaskScheduler_tasks(s), ScheduledTask_task_id(t), t);
+            }
             ti = ti + 1;
         }
     }
+    _log_records_dropped(dropped, "tasks");
+    dropped = 0;
     var narr = bayan_json_v_obj_get_by_cstr(v, "nodes");
     if (narr != 0) {
         var nn = bayan_json_v_arr_len(narr);
-        if (nn > SAMAY_JSON_MAX_ITEMS) { return 0; }
         var ni = 0;
         while (ni < nn) {
-            var node = node_capacity_from_jsonv(bayan_json_v_arr_get(narr, ni));
-            if (node != 0) { map_set(TaskScheduler_nodes(s), NodeCapacity_node_id(node), node); }
+            var el = bayan_json_v_arr_get(narr, ni);
+            # A node past the profile limit refuses its scheduler, as it does on the
+            # write side. Skipping it would lose a whole node and report success.
+            if (bayan_json_v_is_obj(el) == 1) {
+                if (_jv_list_ok(el, "accel_profiles") == 0) { return 0; }
+            }
+            var node = node_capacity_from_jsonv(el);
+            if (node == 0) {
+                dropped = dropped + 1;
+            } else {
+                if (map_has(TaskScheduler_nodes(s), NodeCapacity_node_id(node)) == 1) {
+                    _log_duplicate_key("nodes", NodeCapacity_node_id(node));
+                    return 0;
+                }
+                map_set(TaskScheduler_nodes(s), NodeCapacity_node_id(node), node);
+            }
             ni = ni + 1;
         }
     }
+    _log_records_dropped(dropped, "nodes");
+    _settle_capacity(s);
     return s;
 }
 

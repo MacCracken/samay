@@ -1,6 +1,14 @@
 # ADR 0007 — Node capacity is returned on every exit from the running set
 
 **Status**: accepted (2026-08-29, v1.0.3). Diverges from the Rust oracle deliberately.
+**Amended** 2026-11-01 (v1.4.3): the invariant below held for a live scheduler and not across a
+restore. A snapshot states node capacity and task reservations separately and nothing made them
+agree, so a real 1.0.2 snapshot, written before capacity was ever returned, kept its leak for good.
+The tasks are the record of who holds what, so restore now replays them over each node. A node that
+agrees keeps its exact bits, and one that does not is rebuilt, with a log line. The same release makes
+an idle node exactly full: the f64 sum could stop one bit short and refuse a whole-node task forever.
+A reservation also holds any accelerator the task took
+([ADR-0013](0013-accelerators-are-reserved.md)).
 
 ## Context
 
@@ -45,8 +53,9 @@ faithfully would ship a scheduler that stops scheduling.
 
 ## Decision
 
-**A reservation is held for exactly as long as a task is `SCHEDULED` or `RUNNING`, and is
-returned on every other transition.**
+**A reservation is held while a task is `SCHEDULED` or `RUNNING`, and is returned on every
+other transition**, at once through the scheduler's calls, and at the next pass after a raw
+`scheduled_task_transition`.
 
 1. **`ScheduledTask` gains a 15th field, `reserved_on: Str`** — the node whose capacity
    this task currently holds, or `0` for none. It is distinct from `node_preference`,

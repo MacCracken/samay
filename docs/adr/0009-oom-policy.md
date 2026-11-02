@@ -34,7 +34,7 @@ that looks healthy. Two were measured producing a *wrong answer* before any cras
   determinism rules exist to forbid. The restore path had the identical bug.
 - **`samay_uuid_v4`** returned `str_new(out, 36)` unchecked. The null `Str`
   becomes `ScheduledTask.task_id` and then a hashmap key — and it does **not**
-  fault there, because `hash_str_v` null-guards (`lib/hashmap.cyr:85`). The task
+  fault there, because `hash_str_v` null-guards (`lib/hashmap.cyr`). The task
   inserts under bucket 0 and `map_size` becomes 1. The SIGSEGV lands on a later,
   unrelated submit that probes into slot 0 and reaches `str_eq(0, key)`. Measured
   at the 8th, 10th and 10th subsequent submit across three runs — nondeterministic,
@@ -62,7 +62,7 @@ and harmlessly. The unlisted one is the bug.
 **The one rule to remember: a null must never leave the function that created
 it.** Everything else is a consequence.
 
-28 guards across 7 modules. `panic` is `lib/assert.cyr:42` — three writes to fd 2
+28 guards across 7 modules. `panic` is in `lib/assert.cyr` — three writes to fd 2
 and `sys_exit(1). **It allocates nothing**, which is mandatory on this path, and
 it routes through `sys_exit` so it is target-portable (unlike a raw
 `syscall(60,1)`, which the stdlib always `#ifdef`-guards).
@@ -92,13 +92,11 @@ would pass on an OOM.
 
 ### Why not `Err`
 
-Structural, not stylistic. `Ok`/`Err` each heap-allocate 16 bytes
-(`lib/result.cyr`, measured via `alloc_used()` deltas) — constructing the error
-value requires the allocation that just failed. In `cron_expr_parse` this is
-total: the enum constructors are compiler-generated and unreachable from Cyrius
-source, so **under true OOM that function cannot return at all**, not even to
-reject a malformed expression. That is the strongest single argument for
-fail-fast.
+Structural, not stylistic. When this was decided `Ok`/`Err` each heap-allocated 16 bytes, so
+constructing the error value needed the allocation that had just failed. They have allocated
+nothing since cyrius 6.6.0, so that argument has gone. The decision stands on the other one: `0` and
+`Err` already have meanings, so an out-of-memory host would be reported as a bad record or a
+malformed expression.
 
 Adding an OOM `Err` arm to `task_scheduler_submit_task` would also be actively
 unsafe today: daimon reads the payload with no tag check, so an `Err(1)` would be
@@ -114,9 +112,9 @@ read as a `Str` and fault — after daimon had already emitted HTTP 201.
   crash instead.
 - **The OOM branch is not unit-testable.** `fail_after_n_allocs` intercepts
   `alloc_via` only, not bare `alloc()`. What is pinned instead is (a) the
-  invariant — `test_no_null_fields_from_constructors` asserts no constructor
-  returns a struct with a null field, which is what would have caught the
-  `accel_profiles` bug — and (b) a **CI gate** asserting every raw `alloc(` in
+  invariant on the path with no OOM — `test_no_null_fields_from_constructors`
+  asserts no constructor returns a struct with a null field, which could not itself
+  have caught the `accel_profiles` bug — and (b) a **CI gate** asserting every raw `alloc(` in
   `src/` has a `panic` within a few lines. Verified to fail when a guard is
   removed. Prose does not keep a rule; the gate does.
 - **Do not "simplify" a guard back into `return 0`.** The comments above the

@@ -35,3 +35,4 @@ Decisions about samay — what we chose, the context, and the consequences we ac
 | [0010](0010-request-and-assignment.md) | A task's request and its assignment are two fields | Accepted (v1.3.0) — `node_preference` stays as a view, in memory and on the wire |
 | [0011](0011-bounded-task-history.md) | The stdlib sort, explicit task removal, and refusing an oversized snapshot | Accepted (v1.4.0) — closes audit F5; capacity is released in `task_id` order |
 | [0012](0012-cron-burst-budget.md) | An exact due count, and a burst budget that holds entries instead of dropping them | Accepted (v1.4.1) — closes audit F8 and F9 |
+| [0013](0013-accelerators-are-reserved.md) | Accelerators are reserved, and preemption has to help | Accepted (v1.4.3) — what 0002's availability has to mean |

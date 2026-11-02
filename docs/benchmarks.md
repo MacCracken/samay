@@ -14,6 +14,43 @@ pre-warm off every hot path, and re-measured within noise of the table below
 | `samay_uuid_v4`         | 606 ns   | 613 ns   | getrandom(2) syscall-bound         |
 | `scheduled_task_new`    | 2.07 µs  | 2.06 µs  | alloc + uuid + `dt_now`            |
 
+## v1.4.3 — what the P(-1) fixes cost
+
+1.4.2 against 1.4.3, both on cyrius 6.7.18, interleaved, shuffled and pinned to one CPU, with the
+suite rows at 60 rounds and the others at 30 (2026-11-01). Rows this release does not touch stayed
+within 1%. Medians:
+
+| Op                                  | 1.4.2    | 1.4.3    | Δ       |
+|-------------------------------------|----------|----------|---------|
+| `node_can_fit`                      | 12.61 ns | 15.86 ns | **+25.8%** |
+| `cron_expr_matches`                 | 18.61 ns | 18.71 ns | +0.5%   |
+| `node_can_fit_gpu`                  | 103.0 ns | 167.0 ns | **+62.1%** |
+| `scheduled_task_new`                | 2.30 µs  | 2.36 µs  | +2.5%   |
+| `scheduled_task_to_jsonv`           | 2.49 µs  | 2.47 µs  | −0.7%   |
+| `best_fit_tpu_100_nodes`            | 11.68 µs | 13.72 µs | **+17.5%** |
+| `pending_tasks_2000`                | 365.8 µs | 341.7 µs | −6.6%   |
+| idle pass (scratch)                 | 303 ns   | 277 ns   | −8.6%   |
+| check, nothing fires, per entry (scratch) | 455.5 ns | 484.5 ns | +6.4% |
+| check, all fire, per entry (scratch) | 3.03 µs | 3.12 µs  | +3.0%   |
+| snapshot write, 200 tasks (scratch) | 3.41 ms  | 3.42 ms  | +0.1%   |
+| snapshot restore, 200 tasks (scratch) | 3.25 ms | 3.60 ms | **+10.5%** |
+
+- **`node_can_fit_gpu` and `best_fit_tpu_100_nodes` are the first accelerator figures on record.**
+  Every earlier `can_fit` number used `REQ_NONE`, which never reaches a profile. They got slower because
+  they now ask whether a device is free.
+- `node_can_fit` adds the 1e-9 core margin. Restore adds type checks and the capacity settle.
+- The 1.4.2 `best_fit` figure includes the `map_values` copy it made on every call.
+
+**Heap per call**, the reason for the pass-time gain. `alloc()` never frees, so this adds up.
+
+| Call                                | 1.4.2    | 1.4.3    |
+|-------------------------------------|----------|----------|
+| idle `schedule_pending`             | 760 B    | 152 B    |
+| with 1,000 finished tasks           | 33,016 B | 152 B    |
+| with 100 tasks that cannot be placed | 37,336 B | 160 B   |
+| quiet `check_due_at`, 10 entries    | 304 B    | 152 B    |
+| quiet `check_due_at`, 100 entries   | 2,118 B  | 174 B    |
+
 ## v1.4.2 — nested leaves built directly
 
 1.4.1 against 1.4.2, both on cyrius 6.7.18, interleaved, shuffled and pinned to one CPU, with the

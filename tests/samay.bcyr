@@ -103,6 +103,41 @@ fn main(): i64 {
     bench_batch_stop(b9, 20000);
     bench_report(b9);
 
+    # Accelerator placement. Every row above that touches can_fit uses REQ_NONE,
+    # which returns before reaching a profile. Last, for the same reason.
+    var gpu_node = node_capacity_new(t_name, f64_from(64), 524288, 1048576, 0);
+    i = 0;
+    while (i < 4) {
+        node_capacity_add_accel(gpu_node, profile_cuda(i, 17179869184));
+        i = i + 1;
+    }
+    var gpu_req = resource_req_new(f64_from(2), 4096, REQ_GPU, 1, 0, 1024);
+    var b10 = bench_new("node_can_fit_gpu");
+    bench_batch_start(b10);
+    i = 0;
+    while (i < 1000000) { node_capacity_can_fit(gpu_node, gpu_req); i = i + 1; }
+    bench_batch_stop(b10, 1000000);
+    bench_report(b10);
+
+    # _best_fit_node across 100 TPU nodes: what placing one task costs.
+    var fleet = map_new_str();
+    i = 0;
+    while (i < 100) {
+        var sb = str_builder_new();
+        str_builder_add_cstr(sb, "tpu-");
+        str_builder_add_int(sb, i);
+        var id = str_builder_build(sb);
+        map_set(fleet, id, node_capacity_add_accel(node_capacity_new(id, f64_from(32), 65536, 1048576, 0), profile_tpu(0, 8, TPU_V5P)));
+        i = i + 1;
+    }
+    var tpu_req = resource_req_new(f64_from(2), 4096, REQ_TPU, 4, 0, 1024);
+    var b11 = bench_new("best_fit_tpu_100_nodes");
+    bench_batch_start(b11);
+    i = 0;
+    while (i < 20000) { _best_fit_node(fleet, tpu_req); i = i + 1; }
+    bench_batch_stop(b11, 20000);
+    bench_report(b11);
+
     return 0;
 }
 

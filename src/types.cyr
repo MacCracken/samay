@@ -41,32 +41,25 @@ fn _samay_own(s, who): i64 {
     return c;
 }
 
-# Force the process-global lazy initialisers samay's code paths depend on to
-# run NOW, while the caller is still single-threaded.
-#
-# `lib/chrono.cyr:184` publishes `_chrono_mdays` (the month-length table) at
-# line 186 and only *then* fills it with 12 store64s. A second thread that
-# calls epoch_to_date inside that window sees the non-zero pointer, skips the
-# init, and reads an all-zero table — epoch_to_date's month loop then never
-# breaks, falls out with m == 12, and reports month 13 with a day-of-year for
-# a day. Through 1.4.0 samay reached this from cron_expr_matches, so the
-# observable damage was a cron entry evaluated against the WRONG DATE. Since
-# 1.4.1 no samay code reads that table (ADR-0012), so this now protects only a
-# consumer whose own threads call chrono.
-#
-# Measured on x86_64: 4 threads each racing their first epoch_to_date produced
-# a wrong date in 14 of 200 process runs; with this pre-warm, 0 of 200.
-#
-# The defect is in `lib/`, which samay must not modify (CLAUDE.md), so this
-# closes the window from the outside instead: once the table is published and
-# filled, the race cannot recur for the life of the process. It is idempotent
-# and costs one epoch_to_date call.
-#
-# Called automatically by task_scheduler_new() and cron_scheduler_new(). See
-# ADR-0008 for the threading contract this is part of.
+# Nothing to do, and kept because it is public. It existed to fill chrono's month
+# table while the caller was single-threaded, against a publish-before-fill race
+# (ADR-0008). chrono fixed that in cyrius 6.5.37, and samay stopped reading the table
+# in 1.4.1.
 fn samay_init(): i64 {
-    epoch_to_date(0);
     return 0;
+}
+
+# The value in slot i of a map's table, or 0 if the slot holds nothing. For a pass
+# that runs again and again: map_values copies everything the map holds into a
+# fresh vec and alloc() never frees, so a long-lived scheduler would pay for every
+# task it has ever held on every pass, finished or not. Walking the table allocates
+# nothing. Slots come in table order, so anything order-sensitive still sorts
+# (ADR-0004). lib/hashmap.cyr keeps walking map_entries/map_cap safe: neither a
+# delete nor an overwrite moves an entry.
+fn _map_slot(m, i): i64 {
+    var slot = map_entries(m) + i * 24;
+    if (load64(slot + 16) != 1) { return 0; }
+    return load64(slot + 8);
 }
 
 # Finite-f64 gate. NaN fails the self-equality test; +/-Inf exceeds any
@@ -208,21 +201,38 @@ struct ResourceReq {
     disk_mb: i64;
 }
 
+# A negative or NaN requirement runs capacity backwards through reserve and release,
+# which subtract it, so it reads as none. A value past 1e18 stops there: no node has
+# that, so it still never fits, and it stays a number the wire can carry. +Inf would
+# write as null, and a task must not get easier to place by going through a snapshot.
+fn _req_cpu(x): i64 {
+    if (f64_eq(x, x) == 0) { return f64_from(0); }
+    if (f64_lt(x, f64_from(0)) == 1) { return f64_from(0); }
+    var most = f64_from(1000000000000000000);
+    if (f64_gt(x, most) == 1) { return most; }
+    return x;
+}
+
+fn _req_amount(x): i64 {
+    if (x < 0) { return 0; }
+    return x;
+}
+
 fn resource_req_new(cpu_cores, memory_mb, accel_req, accel_min_chips, network, disk_mb): i64 {
     var p = alloc(48);
-    # NOT `return 0`: _rr_from (src/json.cyr:200) forwards this result, and
+    # NOT `return 0`: _rr_from (src/json.cyr) forwards this result, and
     # its callers read 0 as ADR-0005's "required field missing -- reject this
-    # record", then drop the record and continue (src/json.cyr:585, :635). An
+    # record", then drop the record and continue. An
     # OOM-0 would silently delete a WELL-FORMED task from a VALID snapshot
     # while the restore reported success -- contradicting the module's own rule
-    # that samay never silently drops (src/json.cyr:418). See ADR-0009.
+    # that samay never silently drops. See ADR-0009.
     if (p == 0) { panic("samay: out of memory in resource_req_new"); }
-    ResourceReq_set_cpu_cores(p, cpu_cores);
-    ResourceReq_set_memory_mb(p, memory_mb);
+    ResourceReq_set_cpu_cores(p, _req_cpu(cpu_cores));
+    ResourceReq_set_memory_mb(p, _req_amount(memory_mb));
     ResourceReq_set_accel_req(p, accel_req);
-    ResourceReq_set_accel_min_chips(p, accel_min_chips);
+    ResourceReq_set_accel_min_chips(p, _req_amount(accel_min_chips));
     ResourceReq_set_network(p, network);
-    ResourceReq_set_disk_mb(p, disk_mb);
+    ResourceReq_set_disk_mb(p, _req_amount(disk_mb));
     return p;
 }
 
@@ -234,9 +244,9 @@ fn resource_req_default(): i64 {
 # Deep copy (Rust derives Clone; cron fires clone the template's req).
 fn resource_req_clone(req): i64 {
     return resource_req_new(
-        ResourceReq_cpu_cores(req), ResourceReq_memory_mb(req),
-        ResourceReq_accel_req(req), ResourceReq_accel_min_chips(req),
-        ResourceReq_network(req), ResourceReq_disk_mb(req));
+      ResourceReq_cpu_cores(req), ResourceReq_memory_mb(req),
+      ResourceReq_accel_req(req), ResourceReq_accel_min_chips(req),
+      ResourceReq_network(req), ResourceReq_disk_mb(req));
 }
 
 # ---------------------------------------------------------------------------
@@ -288,7 +298,7 @@ fn ScheduledTask_node_preference(t): Str {
 # Ask for a node. Takes effect at the next schedule_pending, so on a task already
 # placed, ScheduledTask_node_preference keeps naming the assignment until then.
 fn ScheduledTask_set_node_preference(t, node): i64 {
-    ScheduledTask_set_requested_node(t, node);
+    ScheduledTask_set_requested_node(t, _samay_own(node, "samay: out of memory in ScheduledTask_set_node_preference"));
     return 0;
 }
 
@@ -304,7 +314,9 @@ fn scheduled_task_new(name, description, agent_id, priority, req): i64 {
     ScheduledTask_set_description(p, _samay_own(description, "samay: out of memory in scheduled_task_new"));
     ScheduledTask_set_agent_id(p, _samay_own(agent_id, "samay: out of memory in scheduled_task_new"));
     ScheduledTask_set_priority(p, prio);
-    ScheduledTask_set_resource_requirements(p, req);
+    # A copy, so a caller reusing one ResourceReq cannot change what a placed task
+    # gives back: release has to return exactly what reserve took (ADR-0007).
+    ScheduledTask_set_resource_requirements(p, resource_req_clone(req));
     ScheduledTask_set_status(p, TASK_QUEUED);
     ScheduledTask_set_fail_reason(p, 0);
     ScheduledTask_set_created_at(p, dt_now());
@@ -330,6 +342,17 @@ fn scheduled_task_transition(t, to): i64 {
         return Err(1);
     }
     ScheduledTask_set_status(t, to);
+    # Stamped here because a consumer can drive a task with this alone, and stats
+    # has nothing to average without them. A requeued task keeps its first start.
+    if (to == TASK_RUNNING) {
+        if (ScheduledTask_started_at(t) == 0) { ScheduledTask_set_started_at(t, dt_now()); }
+    } elif (to == TASK_COMPLETED) {
+        ScheduledTask_set_completed_at(t, dt_now());
+    } elif (to == TASK_FAILED) {
+        ScheduledTask_set_completed_at(t, dt_now());
+    } elif (to == TASK_CANCELLED) {
+        ScheduledTask_set_completed_at(t, dt_now());
+    }
     return Ok(0);
 }
 
@@ -351,10 +374,24 @@ struct NodeCapacity {
     available_disk_mb: i64;
     accel_profiles: i64;
     running_tasks: i64;
+    accel_used: i64;
+    accel_holds: i64;
+}
+
+# Empty hold records for a new node. Neither reaches the wire: reservations already
+# say who holds what, so restore rebuilds these from the tasks (ADR-0013).
+fn _node_init_holds(p): i64 {
+    var used = vec_new();
+    if (used == 0) { panic("samay: out of memory in _node_init_holds"); }
+    var holds = vec_new();
+    if (holds == 0) { panic("samay: out of memory in _node_init_holds"); }
+    NodeCapacity_set_accel_used(p, used);
+    NodeCapacity_set_accel_holds(p, holds);
+    return 0;
 }
 
 fn node_capacity_new(node_id, total_cpu, total_memory_mb, total_disk_mb, gpu_available): i64 {
-    var p = alloc(72);   # 9 fields * 8
+    var p = alloc(88);   # 11 fields * 8 — MUST track node_capacity_from_jsonv
     if (p == 0) { panic("samay: out of memory in node_capacity_new"); }
     NodeCapacity_set_node_id(p, _samay_own(node_id, "samay: out of memory in node_capacity_new"));
     NodeCapacity_set_total_cpu(p, total_cpu);
@@ -375,6 +412,7 @@ fn node_capacity_new(node_id, total_cpu, total_memory_mb, total_disk_mb, gpu_ava
     if (profs == 0) { panic("samay: out of memory in node_capacity_new (accel_profiles)"); }
     NodeCapacity_set_accel_profiles(p, profs);
     NodeCapacity_set_running_tasks(p, 0);
+    _node_init_holds(p);
     # Convenience: a `gpu_available` node registers one CUDA profile.
     if (gpu_available == 1) {
         vec_push(NodeCapacity_accel_profiles(p), profile_cuda(0, 0));
@@ -398,22 +436,168 @@ fn node_capacity_with_tpu(node, chip_count): i64 {
     return node;
 }
 
+# --- accelerator holds (ADR-0013) ---
+#
+# requirement_satisfied says a device exists. Placement also needs it to be free,
+# so a node counts what is in use on each profile. accel_used runs parallel to
+# accel_profiles. accel_holds is flat pairs of (requirement, profile index), one per
+# reservation, so a release gives back exactly the profile that reservation took:
+# undoing a pick by requirement type alone would free the wrong one when two
+# requirements overlap, and leave the other held for good.
+
+# What a profile offers: a TPU pod shares its chips, anything else is one device.
+fn _accel_capacity(p): i64 {
+    if (profile_accel_type(p) == ACCEL_TPU) { return profile_tpu_chips(p); }
+    return 1;
+}
+
+# What a requirement takes of a profile. REQ_GPU_OR_TPU and REQ_ANY_ACCELERATOR do
+# not check chips, so one can ask for more than a pod has. It then takes the pod.
+fn _accel_units(p, req_chips): i64 {
+    if (profile_accel_type(p) != ACCEL_TPU) { return 1; }
+    var chips = profile_tpu_chips(p);
+    if (req_chips < 1) { return 1; }
+    if (req_chips > chips) { return chips; }
+    return req_chips;
+}
+
+fn _accel_used_at(node, i): i64 {
+    var used = NodeCapacity_accel_used(node);
+    if (i >= vec_len(used)) { return 0; }
+    return vec_get(used, i);
+}
+
+# accel_profiles can grow after a node is built, so this grows to match.
+fn _accel_add_used(node, i, delta): i64 {
+    var used = NodeCapacity_accel_used(node);
+    while (vec_len(used) <= i) { vec_push(used, 0); }
+    vec_set(used, i, vec_get(used, i) + delta);
+    return 0;
+}
+
+# The index of the profile this requirement would take, or -1. Ranked as ai-hwaccel's
+# find_satisfying_profile ranks: highest profile_rank, then most memory, then lowest
+# index. With free_only 0, a profile with no room left still counts.
+fn _accel_pick(node, req_ar, req_chips, free_only): i64 {
+    var profs = NodeCapacity_accel_profiles(node);
+    var n = vec_len(profs);
+    var best = 0 - 1;
+    var best_rank = 0;
+    var best_mem = 0;
+    var i = 0;
+    while (i < n) {
+        var p = vec_get(profs, i);
+        if (requirement_satisfied(req_ar, req_chips, p) == 1) {
+            var room = 1;
+            if (free_only == 1) {
+                if (_accel_used_at(node, i) + _accel_units(p, req_chips) > _accel_capacity(p)) { room = 0; }
+            }
+            if (room == 1) {
+                var rank = profile_rank(p);
+                var mem = profile_memory_bytes(p);
+                var better = 1;
+                if (best >= 0) {
+                    if (rank < best_rank) { better = 0; }
+                    if (rank == best_rank) {
+                        if (mem <= best_mem) { better = 0; }
+                    }
+                }
+                if (better == 1) {
+                    best = i;
+                    best_rank = rank;
+                    best_mem = mem;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return best;
+}
+
+# Record a reservation's use of a device. A requirement nothing here can serve holds
+# nothing. With no room it is counted anyway, past capacity: an old snapshot can hold
+# four tasks on one GPU, and losing track of three would offer the device again
+# while they run (ADR-0013).
+fn _accel_hold(node, req): i64 {
+    var ar = ResourceReq_accel_req(req);
+    if (ar == REQ_NONE) { return 0; }
+    var chips = ResourceReq_accel_min_chips(req);
+    var i = _accel_pick(node, ar, chips, 1);
+    if (i < 0) { i = _accel_pick(node, ar, chips, 0); }
+    if (i < 0) { return 0; }
+    _accel_add_used(node, i, _accel_units(vec_get(NodeCapacity_accel_profiles(node), i), chips));
+    var holds = NodeCapacity_accel_holds(node);
+    vec_push(holds, req);
+    vec_push(holds, i);
+    return 0;
+}
+
+# Where in accel_holds this requirement's hold sits, or -1. The same ResourceReq if
+# there is one; otherwise an equal one, for a caller releasing with its own copy.
+fn _accel_find_hold(node, req): i64 {
+    var holds = NodeCapacity_accel_holds(node);
+    var n = vec_len(holds);
+    var i = 0;
+    while (i < n) {
+        if (vec_get(holds, i) == req) { return i; }
+        i = i + 2;
+    }
+    i = 0;
+    while (i < n) {
+        var h = vec_get(holds, i);
+        if (ResourceReq_accel_req(h) == ResourceReq_accel_req(req)) {
+            if (ResourceReq_accel_min_chips(h) == ResourceReq_accel_min_chips(req)) { return i; }
+        }
+        i = i + 2;
+    }
+    return 0 - 1;
+}
+
+# Units a hold has on its profile.
+fn _accel_hold_units(node, at): i64 {
+    var holds = NodeCapacity_accel_holds(node);
+    var p = vec_get(NodeCapacity_accel_profiles(node), vec_get(holds, at + 1));
+    return _accel_units(p, ResourceReq_accel_min_chips(vec_get(holds, at)));
+}
+
+fn _accel_drop(node, req): i64 {
+    if (ResourceReq_accel_req(req) == REQ_NONE) { return 0; }
+    var at = _accel_find_hold(node, req);
+    if (at < 0) { return 0; }
+    var holds = NodeCapacity_accel_holds(node);
+    _accel_add_used(node, vec_get(holds, at + 1), 0 - _accel_hold_units(node, at));
+    # Holds have no order, so the last pair fills the gap.
+    var n = vec_len(holds);
+    vec_set(holds, at, vec_get(holds, n - 2));
+    vec_set(holds, at + 1, vec_get(holds, n - 1));
+    vec_truncate(holds, n - 2);
+    return 0;
+}
+
 # Accelerator availability check (M3, ADR-0002): delegates to ai-hwaccel's
-# requirement_satisfied() over this node's real profiles. REQ_NONE always
+# requirement_satisfied() over this node's real profiles, and a profile must also
+# have room. REQ_NONE always
 # fits; any other requirement must be satisfied by at least one profile —
 # so REQ_GAUDI / REQ_AWS_NEURON / REQ_ANY_ACCELERATOR now require an actual
 # matching accelerator (vs the Rust port's always-true stub).
 fn _accel_ok(req_ar, req_chips, node): i64 {
     if (req_ar == REQ_NONE) { return 1; }
-    if (find_satisfying_profile(req_ar, req_chips, NodeCapacity_accel_profiles(node)) != 0) {
-        return 1;
-    }
+    if (_accel_pick(node, req_ar, req_chips, 1) >= 0) { return 1; }
     return 0;
+}
+
+# 1 if `required` cores fit in `available`. The margin is 1e-9 of a core: f64 sums
+# are inexact, and 0.3 + 0.3 + 0.3 + 0.1 of one core must not leave the last 0.1
+# short by a rounding error.
+var _CPU_MARGIN = 0x3E112E0BE826D695;
+
+fn _cpu_short(available, required): i64 {
+    return f64_lt(f64_add(available, _CPU_MARGIN), required);
 }
 
 # True (1) if this node can fit the given resource requirements.
 fn node_capacity_can_fit(node, req): i64 {
-    if (f64_lt(NodeCapacity_available_cpu(node), ResourceReq_cpu_cores(req)) == 1) { return 0; }
+    if (_cpu_short(NodeCapacity_available_cpu(node), ResourceReq_cpu_cores(req)) == 1) { return 0; }
     if (NodeCapacity_available_memory_mb(node) < ResourceReq_memory_mb(req)) { return 0; }
     if (_accel_ok(ResourceReq_accel_req(req), ResourceReq_accel_min_chips(req), node) != 1) { return 0; }
     if (NodeCapacity_available_disk_mb(node) < ResourceReq_disk_mb(req)) { return 0; }
@@ -448,24 +632,61 @@ fn node_capacity_reserve(node, req): i64 {
     var disk = NodeCapacity_available_disk_mb(node) - ResourceReq_disk_mb(req);
     if (disk < 0) { disk = 0; }
     NodeCapacity_set_available_disk_mb(node, disk);
-    NodeCapacity_set_running_tasks(node, NodeCapacity_running_tasks(node) + 1);
+    var rt = NodeCapacity_running_tasks(node);
+    if (rt < 9223372036854775807) { NodeCapacity_set_running_tasks(node, rt + 1); }
+    _accel_hold(node, req);
     return 0;
+}
+
+# What is available once `held` comes back, capped at total. The cap is tested
+# before adding: a restored reservation can be any size up to i64 max, and the
+# plain sum wraps negative, which no `> total` check can catch.
+fn _capacity_returned(available, held, total): i64 {
+    if (held >= total - available) { return total; }
+    return available + held;
 }
 
 # Release resources after a task completes.
 fn node_capacity_release(node, req): i64 {
     var rel_cpu = f64_add(NodeCapacity_available_cpu(node), ResourceReq_cpu_cores(req));
     NodeCapacity_set_available_cpu(node, _f64_min(rel_cpu, NodeCapacity_total_cpu(node)));
-    var mem = NodeCapacity_available_memory_mb(node) + ResourceReq_memory_mb(req);
-    if (mem > NodeCapacity_total_memory_mb(node)) { mem = NodeCapacity_total_memory_mb(node); }
-    NodeCapacity_set_available_memory_mb(node, mem);
-    var disk = NodeCapacity_available_disk_mb(node) + ResourceReq_disk_mb(req);
-    if (disk > NodeCapacity_total_disk_mb(node)) { disk = NodeCapacity_total_disk_mb(node); }
-    NodeCapacity_set_available_disk_mb(node, disk);
+    NodeCapacity_set_available_memory_mb(node, _capacity_returned(NodeCapacity_available_memory_mb(node),
+        ResourceReq_memory_mb(req), NodeCapacity_total_memory_mb(node)));
+    NodeCapacity_set_available_disk_mb(node, _capacity_returned(NodeCapacity_available_disk_mb(node),
+        ResourceReq_disk_mb(req), NodeCapacity_total_disk_mb(node)));
     var rt = NodeCapacity_running_tasks(node) - 1;
     if (rt < 0) { rt = 0; }
     NodeCapacity_set_running_tasks(node, rt);
+    _accel_drop(node, req);
+    # An idle node is a full node (ADR-0007). f64 sums round, so giving back 0.1 and
+    # 0.2 can stop one bit short of the total, and that bit would refuse a whole-node
+    # task on an idle node forever.
+    if (rt == 0) { NodeCapacity_set_available_cpu(node, NodeCapacity_total_cpu(node)); }
     return 0;
+}
+
+# Would `req` fit on this node once `held`, a reservation here, was gone? Changes
+# nothing, which is why it is not a release and a reserve: those would round cpu.
+fn _fits_without(node, held, req): i64 {
+    var cpu = f64_add(NodeCapacity_available_cpu(node), ResourceReq_cpu_cores(held));
+    cpu = _f64_min(cpu, NodeCapacity_total_cpu(node));
+    if (_cpu_short(cpu, ResourceReq_cpu_cores(req)) == 1) { return 0; }
+    var mem = _capacity_returned(NodeCapacity_available_memory_mb(node),
+      ResourceReq_memory_mb(held), NodeCapacity_total_memory_mb(node));
+    if (mem < ResourceReq_memory_mb(req)) { return 0; }
+    var disk = _capacity_returned(NodeCapacity_available_disk_mb(node),
+      ResourceReq_disk_mb(held), NodeCapacity_total_disk_mb(node));
+    if (disk < ResourceReq_disk_mb(req)) { return 0; }
+    var ar = ResourceReq_accel_req(req);
+    if (ar == REQ_NONE) { return 1; }
+    var at = _accel_find_hold(node, held);
+    if (at < 0) { return _accel_ok(ar, ResourceReq_accel_min_chips(req), node); }
+    var slot = vec_get(NodeCapacity_accel_holds(node), at + 1);
+    var units = _accel_hold_units(node, at);
+    _accel_add_used(node, slot, 0 - units);
+    var ok = _accel_ok(ar, ResourceReq_accel_min_chips(req), node);
+    _accel_add_used(node, slot, units);
+    return ok;
 }
 
 # ---------------------------------------------------------------------------
@@ -486,7 +707,7 @@ fn scheduling_decision_new(task_id, assigned_node, reason, score): i64 {
     if (p == 0) { panic("samay: out of memory in scheduling_decision_new"); }
     SchedulingDecision_set_task_id(p, _samay_own(task_id, "samay: out of memory in scheduling_decision_new"));
     SchedulingDecision_set_assigned_node(p,
-        _samay_own(assigned_node, "samay: out of memory in scheduling_decision_new"));
+      _samay_own(assigned_node, "samay: out of memory in scheduling_decision_new"));
     SchedulingDecision_set_reason(p, _samay_own(reason, "samay: out of memory in scheduling_decision_new"));
     SchedulingDecision_set_score(p, score);
     return p;
@@ -504,15 +725,15 @@ fn preemption_action_new(preempted_task_id, preempting_task_id, reason): i64 {
     var p = alloc(24);
     # NOT `return 0`: 0 is already a live value one frame up with an
     # incompatible meaning -- task_scheduler_preempt_if_needed returns 0 for
-    # "no candidate needs preempting" (src/scheduler.cyr:358) and forwards this
+    # "no candidate needs preempting" and forwards this
     # pointer as the affirmative answer. An OOM-0 would be indistinguishable
-    # from "nothing to preempt", and tests/samay.tcyr:319/:328 assert exactly
+    # from "nothing to preempt", and the tests assert exactly
     # that equality -- so they would PASS on an OOM. See ADR-0009.
     if (p == 0) { panic("samay: out of memory in preemption_action_new"); }
     PreemptionAction_set_preempted_task_id(p,
-        _samay_own(preempted_task_id, "samay: out of memory in preemption_action_new"));
+      _samay_own(preempted_task_id, "samay: out of memory in preemption_action_new"));
     PreemptionAction_set_preempting_task_id(p,
-        _samay_own(preempting_task_id, "samay: out of memory in preemption_action_new"));
+      _samay_own(preempting_task_id, "samay: out of memory in preemption_action_new"));
     PreemptionAction_set_reason(p, _samay_own(reason, "samay: out of memory in preemption_action_new"));
     return p;
 }
