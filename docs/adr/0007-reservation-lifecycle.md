@@ -102,3 +102,19 @@ drives the state machine. It costs one `map_values` pass on a path that already 
 - Terminal tasks still accumulate in `TaskScheduler.tasks` — there is no removal API.
   Capacity is no longer leaked, but memory and per-pass sort cost still grow. Audit F5,
   closed in v1.4.0 by [ADR-0011](0011-bounded-task-history.md).
+
+## Amendment (v1.5.1)
+
+The 1.5.1 audit found three ways the invariant still broke.
+
+- **Over-commitment counts below zero.** A reservation replayed on a node smaller than what its tasks
+  hold (a node re-registered smaller, or a snapshot that says so) stopped at zero, and the next release
+  gave back the whole amount, so the node was sold twice. Cores, memory and disk now go below zero
+  there, as devices already went past capacity (ADR-0013), and a release brings them back to what is
+  really free. An ordinary placement, which fits by can_fit's own test, still stops at zero, so every
+  ordinary decision is unchanged. Amounts stop at -2^62, far below anything real, so nothing wraps.
+- **A node registered after its tasks are restored is charged for them.** A snapshot that lacked a node
+  its tasks held left those reservations with no node, and registering the node later charged nothing.
+  Restore counts such tasks, and registering the node replays them.
+- **`preempt_if_needed` reconciles first,** as a pass does. It counted a victim already stopped, or a
+  task finished through its transition, as still holding its node, and stopped a second job needlessly.

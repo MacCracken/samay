@@ -8,12 +8,14 @@ src/cron.cyr	<-><=	while (slot < cap) {
 src/cron.cyr	>->>=	if (due > 0) { _cron_log_outcome(e, due, skip, clamped, now_secs); }
 src/cron.cyr	>->>=	if (fire_n > 1) { fire_n = 1; }
 src/cron.cyr	>->>=	if (last > end) { last = end; }
+src/cron.cyr	>->>=	if (lf > CronEntry_reset_from(e)) { CronEntry_set_reset_from(e, lf); }
 src/cron.cyr	>->>=	if (n > 0) {
-src/cron.cyr	>->>=	if (n > 64) { n = 64; }
 src/cron.cyr	>->>=	if (now_ns > CronEntry_last_fired(e)) { CronEntry_set_last_fired(e, now_ns); }
 src/cron.cyr	>->>=	if (priority > 10) { priority = 10; }
+src/cron.cyr	>->>=	if (rf > lf) {
 src/cron.cyr	>->>=	} elif (fire_n > CRON_CATCHUP_CAP) {
 src/cron.cyr	delete-stmt	CronEntry_set_last_fired(p, 0);
+src/cron.cyr	return 0->1	return 0;
 src/cron.cyr	return 0->1	return 0;
 src/cron.cyr	return 0->1	return 0;
 src/cron.cyr	return 0->1	return 0;
@@ -39,6 +41,7 @@ src/cronexpr.cyr	- 1->- 2	if (tmask == 0 - 1) { return 0 - 1; }
 src/cronexpr.cyr	- 1->- 2	return 0 - 1;
 src/cronexpr.cyr	- 1->- 2	return 0 - 1;
 src/cronexpr.cyr	- 1->- 2	return 0 - 1;
+src/cronexpr.cyr	<-><=	if (t < _CRON_LAST_SECS - 146097 * 86400) { limit = t + 146097 * 86400; }
 src/cronexpr.cyr	<-><=	if (tend < 0) { tend = end; }
 src/cronexpr.cyr	<-><=	while (i < end) {
 src/cronexpr.cyr	<-><=	while (i < end) {
@@ -54,6 +57,7 @@ src/cronexpr.cyr	>->>=	if (len > 0) {
 src/cronexpr.cyr	>->>=	while (len > 0) {
 src/cronexpr.cyr	>->>=	while (len > 0) {
 src/cronexpr.cyr	>=->>	if (dash >= 0) {
+src/cronexpr.cyr	>=->>	if (epoch_secs >= _CRON_LAST_SECS) { return 0 - 1; }
 src/cronexpr.cyr	>=->>	if (i >= len) { break; }
 src/cronexpr.cyr	>=->>	if (nf >= 5) { return Err(1); }
 src/cronexpr.cyr	>=->>	if (slash >= 0) {
@@ -61,18 +65,31 @@ src/cronexpr.cyr	>=->>	if (slash >= 0) { rhi = hi; } else { rhi = n; }
 src/cronexpr.cyr	delete-stmt	rhi = hi;
 src/cronexpr.cyr	delete-stmt	rlo = lo;
 src/cronexpr.cyr	delete-stmt	store64(star_out, 0);
+src/json.cyr	- 1->- 2	if (bayan_json_v_is_arr(arr) == 0) { return 0 - 1; }
+src/json.cyr	- 1->- 2	if (bayan_json_v_is_int(x) == 0) { return 0 - 1; }
+src/json.cyr	- 1->- 2	if (n > SAMAY_MAX_NODE_DEVICES) { return 0 - 1; }
+src/json.cyr	<-><=	if (adisk < _CAPACITY_FLOOR) { adisk = _CAPACITY_FLOOR; }
+src/json.cyr	<-><=	if (amem < _CAPACITY_FLOOR) { amem = _CAPACITY_FLOOR; }
 src/json.cyr	<-><=	if (st < TASK_QUEUED) { st = TASK_QUEUED; }
 src/json.cyr	<-><=	if (x < 0) { return 0; }
 src/json.cyr	<-><=	if (x < lo) { return lo; }
 src/json.cyr	>->>=	if (adisk > tdisk) { adisk = tdisk; }
 src/json.cyr	>->>=	if (amem > tmem) { amem = tmem; }
 src/json.cyr	>->>=	if (size > ALLOC_MAX || used > load64(st + 8)) {
-src/json.cyr	>->>=	if (st > TASK_PREEMPTED) { st = TASK_QUEUED; }
 src/json.cyr	>->>=	if (x > hi) { return hi; }
-src/json.cyr	delete-stmt	_log_profile_skip(NodeCapacity_node_id(node));
 src/json.cyr	delete-stmt	store64(st + 16, 0);
+src/json.cyr	delete-stmt	store64(st + 24, 0);
+src/json.cyr	delete-stmt	store64(st + 32, 0);
 src/json.cyr	delete-stmt	store64(st, 0);
+src/json.cyr	delete-stmt	v = 0;
+src/json.cyr	return 0->1	if (_accel_held_list(node, ScheduledTask_resource_requirements(t), list) == 0) { return 0; }
 src/json.cyr	return 0->1	if (n == 0) { return 0; }
+src/json.cyr	return 0->1	if (node == 0) { return 0; }
+src/json.cyr	return 0->1	if (ron == 0) { return 0; }
+src/json.cyr	return 0->1	if (s == 0) { return 0; }
+src/json.cyr	return 0->1	return 0;
+src/json.cyr	return 0->1	return 0;
+src/json.cyr	return 0->1	return 0;
 src/json.cyr	return 0->1	return 0;
 src/json.cyr	return 0->1	return 0;
 src/json.cyr	return 0->1	return 0;
@@ -89,18 +106,19 @@ src/scheduler.cyr	<-><=	while (i < cap) {
 src/scheduler.cyr	<-><=	while (i < cap) {
 src/scheduler.cyr	<-><=	while (i < cap) {
 src/scheduler.cyr	<-><=	while (i < cap) {
+src/scheduler.cyr	<-><=	while (i < n) {
 src/scheduler.cyr	<-><=	while (t < cap) {
 src/scheduler.cyr	>->>=	if (d > disk) { disk = d; }
 src/scheduler.cyr	>->>=	if (m > mem) { mem = m; }
 src/scheduler.cyr	>->>=	if (n > 128) { n = 128; }
 src/scheduler.cyr	>->>=	if (vec_len(NodeCapacity_accel_profiles(node)) > 0) {
+src/scheduler.cyr	delete-stmt	TaskScheduler_set_orphans(s, 0);
 src/scheduler.cyr	delete-stmt	h = h * 6364136223846793005;
 src/scheduler.cyr	delete-stmt	h = h ^ ((h >> 29) & 34359738367);
 src/scheduler.cyr	delete-stmt	knowing = 1;
 src/scheduler.cyr	delete-stmt	vec_sort_by(out, &_placement_cmp);
 src/scheduler.cyr	return 0->1	if (count >= _KNOWN_MOST) { return 0; }
 src/scheduler.cyr	return 0->1	if (stale == 0) { return 0; }
-src/scheduler.cyr	return 0->1	if (was == node) { return 0; }
 src/scheduler.cyr	return 0->1	return 0;
 src/scheduler.cyr	return 0->1	return 0;
 src/scheduler.cyr	return 0->1	return 0;
@@ -115,28 +133,36 @@ src/scheduler.cyr	return 0->1	return 0;
 src/training.cyr	>->>=	if (max > headroom) {
 src/training.cyr	delete-stmt	ScheduledTask_set_deadline(task, 0);
 src/training.cyr	return 0->1	return 0;
-src/types.cyr	- 1->- 2	at = 0 - 1;
 src/types.cyr	- 1->- 2	if (ca < cb) { return 0 - 1; }
 src/types.cyr	- 1->- 2	return 0 - 1;
-src/types.cyr	- 1->- 2	var at = 0 - 1;
+src/types.cyr	<-><=	if (a < b) { return 1; }
+src/types.cyr	<-><=	if (available < 0) {
 src/types.cyr	<-><=	if (d < 1) { d = 1; }
 src/types.cyr	<-><=	if (d < 1) { return 1; }
-src/types.cyr	<-><=	if (disk < 0) { disk = 0; }
 src/types.cyr	<-><=	if (lb < n) { n = lb; }
-src/types.cyr	<-><=	if (mem < 0) { mem = 0; }
+src/types.cyr	<-><=	if (left < _CAPACITY_FLOOR) { return _CAPACITY_FLOOR; }
 src/types.cyr	<-><=	if (prio < 1) { prio = 1; }
 src/types.cyr	<-><=	if (rt < 0) { rt = 0; }
 src/types.cyr	<-><=	if (rt < 9223372036854775807) { NodeCapacity_set_running_tasks(node, rt + 1); }
 src/types.cyr	<-><=	if (want < 1) { return 1; }
 src/types.cyr	<-><=	if (x < 0) { return 0; }
 src/types.cyr	<-><=	while (i < n) {
+src/types.cyr	<-><=	while (room < 2) {
 src/types.cyr	<=-><	if (p >= 1) { if (p <= 3) { return PRIO_NORMAL; } }
+src/types.cyr	<=-><	if (vec_get(list, j - 1) <= at) { break; }
+src/types.cyr	>->>=	if (back > total) { return total; }
+src/types.cyr	>->>=	if (held > available - _CAPACITY_FLOOR) { return _CAPACITY_FLOOR; }
+src/types.cyr	>->>=	if (n > most) { n = most; }
 src/types.cyr	>->>=	if (prio > 10) { prio = 10; }
 src/types.cyr	>->>=	if (s > SAMAY_ACCEL_WHOLE) { s = SAMAY_ACCEL_WHOLE; }
 src/types.cyr	>->>=	if (want > chips) { return chips; }
+src/types.cyr	>->>=	while (end > 0) {
+src/types.cyr	>=->>	if (available >= 0) {
 src/types.cyr	>=->>	if (held >= total - available) { return total; }
 src/types.cyr	>=->>	if (p >= 1) { if (p <= 3) { return PRIO_NORMAL; } }
 src/types.cyr	>=->>	if (s >= SAMAY_ACCEL_WHOLE) { return SAMAY_ACCEL_WHOLE; }
+src/types.cyr	delete-stmt	NodeCapacity_set_accel_order(node, order);
+src/types.cyr	delete-stmt	NodeCapacity_set_accel_order(p, 0);
 src/types.cyr	delete-stmt	NodeCapacity_set_running_tasks(p, 0);
 src/types.cyr	delete-stmt	ScheduledTask_set_assigned_node(p, 0);
 src/types.cyr	delete-stmt	ScheduledTask_set_completed_at(p, 0);
@@ -155,9 +181,18 @@ src/types.cyr	delete-stmt	SchedulerStats_set_queued(p, 0);
 src/types.cyr	delete-stmt	SchedulerStats_set_running(p, 0);
 src/types.cyr	delete-stmt	SchedulerStats_set_total_tasks(p, 0);
 src/types.cyr	delete-stmt	cpu = _f64_min(cpu, NodeCapacity_total_cpu(node));
+src/types.cyr	delete-stmt	i = n / 2 - 1;
 src/types.cyr	return 0->1	if (ResourceReq_accel_req(req) == REQ_NONE) { return 0; }
 src/types.cyr	return 0->1	if (ResourceReq_accel_req(req) == REQ_NONE) { return 0; }
+src/types.cyr	return 0->1	if (_accel_ranks_before(profs, vec_get(order, root), vec_get(order, child)) == 0) { return 0; }
 src/types.cyr	return 0->1	if (left == 0) { return 0; }
+src/types.cyr	return 0->1	if (s == 0) { return 0; }
+src/types.cyr	return 0->1	return 0;
+src/types.cyr	return 0->1	return 0;
+src/types.cyr	return 0->1	return 0;
+src/types.cyr	return 0->1	return 0;
+src/types.cyr	return 0->1	return 0;
+src/types.cyr	return 0->1	return 0;
 src/types.cyr	return 0->1	return 0;
 src/types.cyr	return 0->1	return 0;
 src/types.cyr	return 0->1	return 0;

@@ -41,6 +41,35 @@ fn _samay_own(s, who): i64 {
     return c;
 }
 
+# The same for a field that is never None: a null becomes the empty Str. Kept as 0 it
+# placed and counted like any task, then crashed the first writer that met it (1.5.1).
+fn _samay_own_req(s, who): i64 {
+    if (s == 0) {
+        var e = str_from("");
+        if (e == 0) { panic(who); }
+        return e;
+    }
+    return _samay_own(s, who);
+}
+
+# Add at most `most` bytes of `s` to a log line, a control byte shown as '?'. A name or
+# id can be any bytes, and a newline in one started a log line of its own (1.5.1).
+fn _samay_log_add(sb, s, most): i64 {
+    if (s == 0) { return 0; }
+    var n = str_len(s);
+    if (n > most) { n = most; }
+    var d = str_data(s);
+    var i = 0;
+    while (i < n) {
+        var c = load8(d + i);
+        if (c < 32) { c = 63; }
+        if (c == 127) { c = 63; }
+        str_builder_putc(sb, c);
+        i = i + 1;
+    }
+    return 0;
+}
+
 # Nothing to do, and kept because it is public. It existed to fill chrono's month
 # table while the caller was single-threaded, against a publish-before-fill race
 # (ADR-0008). chrono fixed that in cyrius 6.5.37, and samay stopped reading the table
@@ -364,9 +393,9 @@ fn scheduled_task_new(name, description, agent_id, priority, req): i64 {
     if (prio < 1) { prio = 1; }
     if (prio > 10) { prio = 10; }
     ScheduledTask_set_task_id(p, samay_uuid_v4());
-    ScheduledTask_set_name(p, _samay_own(name, "samay: out of memory in scheduled_task_new"));
-    ScheduledTask_set_description(p, _samay_own(description, "samay: out of memory in scheduled_task_new"));
-    ScheduledTask_set_agent_id(p, _samay_own(agent_id, "samay: out of memory in scheduled_task_new"));
+    ScheduledTask_set_name(p, _samay_own_req(name, "samay: out of memory in scheduled_task_new"));
+    ScheduledTask_set_description(p, _samay_own_req(description, "samay: out of memory in scheduled_task_new"));
+    ScheduledTask_set_agent_id(p, _samay_own_req(agent_id, "samay: out of memory in scheduled_task_new"));
     ScheduledTask_set_priority(p, prio);
     # A copy, so a caller reusing one ResourceReq cannot change what a placed task
     # gives back: release has to return exactly what reserve took (ADR-0007).
@@ -430,10 +459,17 @@ struct NodeCapacity {
     running_tasks: i64;
     accel_used: i64;
     accel_holds: i64;
+    accel_order: i64;
 }
 
-# Empty hold records for a new node. Neither reaches the wire: reservations already
-# say who holds what, so restore rebuilds these from the tasks (ADR-0013).
+# The most accelerator profiles one node may have. No host has a thousand devices, and
+# without a ceiling a 1 MB snapshot of one node and one task asking for all of them took
+# a minute and a half to restore. A var, so a consumer can raise it (1.5.1, ADR-0018).
+var SAMAY_MAX_NODE_DEVICES = 1024;
+
+# Empty hold records for a new node. Reservations say who holds what, so a restore
+# rebuilds these from the tasks (ADR-0013, ADR-0018). accel_order is the profiles in
+# rank order, 0 until a hold first needs it: most nodes in a large fleet have none.
 fn _node_init_holds(p): i64 {
     var used = vec_new();
     if (used == 0) { panic("samay: out of memory in _node_init_holds"); }
@@ -441,13 +477,14 @@ fn _node_init_holds(p): i64 {
     if (holds == 0) { panic("samay: out of memory in _node_init_holds"); }
     NodeCapacity_set_accel_used(p, used);
     NodeCapacity_set_accel_holds(p, holds);
+    NodeCapacity_set_accel_order(p, 0);
     return 0;
 }
 
 fn node_capacity_new(node_id, total_cpu, total_memory_mb, total_disk_mb, gpu_available): i64 {
-    var p = alloc(88);   # 11 fields * 8 — MUST track node_capacity_from_jsonv
+    var p = alloc(96);   # 12 fields * 8 — MUST track node_capacity_from_jsonv
     if (p == 0) { panic("samay: out of memory in node_capacity_new"); }
-    NodeCapacity_set_node_id(p, _samay_own(node_id, "samay: out of memory in node_capacity_new"));
+    NodeCapacity_set_node_id(p, _samay_own_req(node_id, "samay: out of memory in node_capacity_new"));
     # The domain restore reads back, so a node comes back as it was built: NaN or a
     # negative amount is none, and cores stop at 1e18. Through 1.4.4 a node past 1e18
     # restored with no cores at all, and one with negative memory with none.
@@ -478,19 +515,34 @@ fn node_capacity_new(node_id, total_cpu, total_memory_mb, total_disk_mb, gpu_ava
     return p;
 }
 
+fn _log_device_ceiling(node): i64 {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "node '");
+    _samay_log_add(sb, NodeCapacity_node_id(node), 128);
+    str_builder_add_cstr(sb, "': accelerator profile not added, past ");
+    str_builder_add_int(sb, SAMAY_MAX_NODE_DEVICES);
+    var msg = str_builder_build(sb);
+    sakshi_warn(str_data(msg), str_len(msg));
+    return 0;
+}
+
 # Attach a real ai-hwaccel accelerator profile (profile_cuda / profile_rocm /
 # profile_tpu / profile_gaudi / profile_neuron). Chainable. This is how
-# accelerator availability is registered for resource-aware placement.
+# accelerator availability is registered for resource-aware placement. Past
+# SAMAY_MAX_NODE_DEVICES the profile is not added, and that is logged.
 fn node_capacity_add_accel(node, profile): i64 {
-    vec_push(NodeCapacity_accel_profiles(node), profile);
+    var profs = NodeCapacity_accel_profiles(node);
+    if (vec_len(profs) >= SAMAY_MAX_NODE_DEVICES) {
+        _log_device_ceiling(node);
+        return node;
+    }
+    vec_push(profs, profile);
     return node;
 }
 
 # Convenience: register a TPU profile with `chip_count` chips (chainable).
 fn node_capacity_with_tpu(node, chip_count): i64 {
-    if (chip_count > 0) {
-        vec_push(NodeCapacity_accel_profiles(node), profile_tpu(0, chip_count, TPU_V4));
-    }
+    if (chip_count > 0) { node_capacity_add_accel(node, profile_tpu(0, chip_count, TPU_V4)); }
     return node;
 }
 
@@ -536,34 +588,24 @@ fn _accel_add_used(node, i, delta): i64 {
     return 0;
 }
 
-# 1 if profile `a` comes before profile `b` for `req`, as ai-hwaccel's
-# find_satisfying_profile ranks: highest profile_rank, then most memory, then lowest
-# index. A share puts a device already in use first, so it leaves whole devices whole
-# while a shared one has room (ADR-0016).
-fn _accel_before(node, req, a, b): i64 {
-    if (_req_share(req) < SAMAY_ACCEL_WHOLE) {
-        var ua = 0;
-        var ub = 0;
-        if (_accel_used_at(node, a) > 0) { ua = 1; }
-        if (_accel_used_at(node, b) > 0) { ub = 1; }
-        if (ua > ub) { return 1; }
-        if (ua < ub) { return 0; }
-    }
-    var profs = NodeCapacity_accel_profiles(node);
-    var pa = vec_get(profs, a);
-    var pb = vec_get(profs, b);
-    if (profile_rank(pa) > profile_rank(pb)) { return 1; }
-    if (profile_rank(pa) < profile_rank(pb)) { return 0; }
-    if (profile_memory_bytes(pa) > profile_memory_bytes(pb)) { return 1; }
-    if (profile_memory_bytes(pa) < profile_memory_bytes(pb)) { return 0; }
-    if (a < b) { return 1; }
-    return 0;
+# 1 if profile `a` comes before profile `b` when a share is picked: a device already in
+# use first, so a share leaves whole devices whole while a shared one has room
+# (ADR-0016), then _accel_ranks_before. Only a share is picked; whole devices go by
+# _accel_order.
+fn _accel_before(node, a, b): i64 {
+    var ua = 0;
+    var ub = 0;
+    if (_accel_used_at(node, a) > 0) { ua = 1; }
+    if (_accel_used_at(node, b) > 0) { ub = 1; }
+    if (ua > ub) { return 1; }
+    if (ua < ub) { return 0; }
+    return _accel_ranks_before(NodeCapacity_accel_profiles(node), a, b);
 }
 
 # The profile `req` would take next, or -1: the first, by _accel_before, of those that
-# satisfy it and come after `after` (-1 for none). `room` 1 looks only at profiles
-# with room left for it, and 0 only at those without.
-fn _accel_pick(node, req, room, after): i64 {
+# satisfy it. `room` 1 looks only at profiles with room left for it, and 0 only at those
+# without.
+fn _accel_pick(node, req, room): i64 {
     var profs = NodeCapacity_accel_profiles(node);
     var n = vec_len(profs);
     var ar = ResourceReq_accel_req(req);
@@ -575,19 +617,10 @@ fn _accel_pick(node, req, room, after): i64 {
         if (requirement_satisfied(ar, chips, p) == 1) {
             var fits = 1;
             if (_accel_used_at(node, i) + _accel_units(p, req) > _accel_capacity(p)) { fits = 0; }
-            var take = 0;
-            if (fits == room) { take = 1; }
-            if (take == 1) {
-                if (after >= 0) {
-                    if (_accel_before(node, req, after, i) == 0) { take = 0; }
-                }
+            if (fits == room) {
+                if (best < 0) { best = i; }
+                elif (_accel_before(node, i, best) == 1) { best = i; }
             }
-            if (take == 1) {
-                if (best >= 0) {
-                    if (_accel_before(node, req, i, best) == 0) { take = 0; }
-                }
-            }
-            if (take == 1) { best = i; }
         }
         i = i + 1;
     }
@@ -616,6 +649,74 @@ fn _accel_free(node, req, most): i64 {
     return free;
 }
 
+# 1 if profile `a` ranks before profile `b` by ai-hwaccel's order alone: highest
+# profile_rank, then most memory, then lowest index. What a whole device is chosen by.
+fn _accel_ranks_before(profs, a, b): i64 {
+    var pa = vec_get(profs, a);
+    var pb = vec_get(profs, b);
+    if (profile_rank(pa) > profile_rank(pb)) { return 1; }
+    if (profile_rank(pa) < profile_rank(pb)) { return 0; }
+    if (profile_memory_bytes(pa) > profile_memory_bytes(pb)) { return 1; }
+    if (profile_memory_bytes(pa) < profile_memory_bytes(pb)) { return 0; }
+    if (a < b) { return 1; }
+    return 0;
+}
+
+# Sift the heap order[0..n) down from `at`, the root last in rank order.
+fn _accel_sift(profs, order, at, n): i64 {
+    var root = at;
+    var child = root * 2 + 1;
+    while (child < n) {
+        if (child + 1 < n) {
+            if (_accel_ranks_before(profs, vec_get(order, child), vec_get(order, child + 1)) == 1) {
+                child = child + 1;
+            }
+        }
+        if (_accel_ranks_before(profs, vec_get(order, root), vec_get(order, child)) == 0) { return 0; }
+        var swap = vec_get(order, root);
+        vec_set(order, root, vec_get(order, child));
+        vec_set(order, child, swap);
+        root = child;
+        child = root * 2 + 1;
+    }
+    return 0;
+}
+
+# The node's profiles in rank order, sorted again only when the profiles changed. A
+# heap sort: it needs the profiles to compare, which vec_sort_by cannot pass, and it
+# allocates nothing.
+fn _accel_order(node): i64 {
+    var profs = NodeCapacity_accel_profiles(node);
+    var order = NodeCapacity_accel_order(node);
+    if (order == 0) {
+        order = vec_new();
+        if (order == 0) { panic("samay: out of memory in _accel_order"); }
+        NodeCapacity_set_accel_order(node, order);
+    }
+    var n = vec_len(profs);
+    if (vec_len(order) == n) { return order; }
+    vec_truncate(order, 0);
+    var i = 0;
+    while (i < n) {
+        vec_push(order, i);
+        i = i + 1;
+    }
+    i = n / 2 - 1;
+    while (i >= 0) {
+        _accel_sift(profs, order, i, n);
+        i = i - 1;
+    }
+    var end = n - 1;
+    while (end > 0) {
+        var top = vec_get(order, 0);
+        vec_set(order, 0, vec_get(order, end));
+        vec_set(order, end, top);
+        _accel_sift(profs, order, 0, end);
+        end = end - 1;
+    }
+    return order;
+}
+
 fn _accel_take(node, req, at): i64 {
     _accel_add_used(node, at, _accel_units(vec_get(NodeCapacity_accel_profiles(node), at), req));
     var holds = NodeCapacity_accel_holds(node);
@@ -629,26 +730,114 @@ fn _accel_take(node, req, at): i64 {
 # snapshot can hold four tasks on one GPU, and losing track of three would offer the
 # device again while they run (ADR-0013). Those are taken first, so a free profile
 # filled here is not taken twice. A requirement nothing here can serve holds nothing.
+#
+# Several devices are each whole, so their order is the rank order alone, and one walk
+# of it takes them all: picking them one by one cost a walk per device, which made a
+# restore quadratic in the devices a task held.
 fn _accel_hold(node, req): i64 {
     if (ResourceReq_accel_req(req) == REQ_NONE) { return 0; }
     var want = _req_devices(req);
     var free = _accel_free(node, req, want);
-    var more = 0;
-    var at = 0 - 1;
-    while (free + more < want) {
-        at = _accel_pick(node, req, 0, at);
-        if (at < 0) { break; }
-        _accel_take(node, req, at);
-        more = more + 1;
+    # A whole device goes by rank alone; only a share also asks what is in use.
+    if (_req_share(req) == SAMAY_ACCEL_WHOLE) { return _accel_hold_ranked(node, req, want, free); }
+    if (free == 0) {
+        var full = _accel_pick(node, req, 0);
+        if (full >= 0) { _accel_take(node, req, full); }
+        return 0;
     }
-    at = 0 - 1;
-    var i = 0;
-    while (i < free) {
-        at = _accel_pick(node, req, 1, at);
-        _accel_take(node, req, at);
-        i = i + 1;
+    _accel_take(node, req, _accel_pick(node, req, 1));
+    return 0;
+}
+
+# _accel_hold for whole devices: in rank order, those with no room first, then the free
+# ones, as many of each as it needs.
+fn _accel_hold_ranked(node, req, want, free): i64 {
+    var profs = NodeCapacity_accel_profiles(node);
+    var order = _accel_order(node);
+    var n = vec_len(order);
+    var ar = ResourceReq_accel_req(req);
+    var chips = ResourceReq_accel_min_chips(req);
+    var room = 0;
+    while (room < 2) {
+        var left = free;
+        if (room == 0) { left = want - free; }
+        var k = 0;
+        while (k < n) {
+            if (left == 0) { break; }
+            var i = vec_get(order, k);
+            var p = vec_get(profs, i);
+            if (requirement_satisfied(ar, chips, p) == 1) {
+                var fits = 1;
+                if (_accel_used_at(node, i) + _accel_units(p, req) > _accel_capacity(p)) { fits = 0; }
+                if (fits == room) {
+                    _accel_take(node, req, i);
+                    left = left - 1;
+                }
+            }
+            k = k + 1;
+        }
+        room = room + 1;
     }
     return 0;
+}
+
+# Take exactly the profiles in `list` for `req`, as a snapshot recorded them: 1 if
+# taken, or 0 with nothing taken if the list does not fit this node. It fits when each
+# index is a profile here that satisfies the request, none twice, and there are no more
+# than the request takes. Room is not asked: the record is what was held, past capacity
+# or not (ADR-0018).
+fn _accel_take_listed(node, req, list): i64 {
+    var profs = NodeCapacity_accel_profiles(node);
+    var n = vec_len(profs);
+    var k = vec_len(list);
+    # Nothing on record is no record: the devices are chosen as a reservation would.
+    if (k == 0) { return 0; }
+    if (k > _req_devices(req)) { return 0; }
+    var ar = ResourceReq_accel_req(req);
+    var chips = ResourceReq_accel_min_chips(req);
+    var i = 0;
+    while (i < k) {
+        var at = vec_get(list, i);
+        if (at < 0) { return 0; }
+        if (at >= n) { return 0; }
+        if (requirement_satisfied(ar, chips, vec_get(profs, at)) == 0) { return 0; }
+        var j = 0;
+        while (j < i) {
+            if (vec_get(list, j) == at) { return 0; }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while (i < k) {
+        _accel_take(node, req, vec_get(list, i));
+        i = i + 1;
+    }
+    return 1;
+}
+
+# Fill `list` with the profile indices this very ResourceReq holds here, lowest first,
+# so a snapshot writes them the same way whatever order the holds were made in.
+fn _accel_held_list(node, req, list): i64 {
+    vec_truncate(list, 0);
+    var holds = NodeCapacity_accel_holds(node);
+    var n = vec_len(holds);
+    var i = 0;
+    while (i < n) {
+        if (vec_get(holds, i) == req) {
+            var at = vec_get(holds, i + 1);
+            vec_push(list, at);
+            var j = vec_len(list) - 1;
+            while (j > 0) {
+                if (vec_get(list, j - 1) <= at) { break; }
+                vec_set(list, j, vec_get(list, j - 1));
+                j = j - 1;
+            }
+            vec_set(list, j, at);
+        }
+        i = i + 2;
+    }
+    return vec_len(list);
 }
 
 # 1 if a hold made for `h` would serve `req` alike: same devices, chips and share.
@@ -783,26 +972,75 @@ fn node_capacity_utilization(node): i64 {
     return f64_div(f64_add(cpu_util, mem_util), f64_from(2));
 }
 
-# Reserve resources for a task.
-fn node_capacity_reserve(node, req): i64 {
-    var used_cpu = f64_sub(NodeCapacity_available_cpu(node), ResourceReq_cpu_cores(req));
-    NodeCapacity_set_available_cpu(node, _f64_max(used_cpu, f64_from(0)));
-    var mem = NodeCapacity_available_memory_mb(node) - ResourceReq_memory_mb(req);
-    if (mem < 0) { mem = 0; }
+# The lowest an amount goes: far below anything real, and far enough above i64's floor
+# that adding to it or taking from it cannot wrap.
+var _CAPACITY_FLOOR = 0 - 4611686018427387904;
+
+# What is left once `held` is taken, below zero if the node is over-committed: a
+# replayed reservation takes what its task holds whether or not it fits. Through 1.5.0
+# this stopped at zero, so the next release gave back more than was there and the node
+# was sold twice (ADR-0007).
+fn _capacity_taken(available, held): i64 {
+    if (available >= 0) {
+        var left = available - held;
+        if (left < _CAPACITY_FLOOR) { return _CAPACITY_FLOOR; }
+        return left;
+    }
+    if (held > available - _CAPACITY_FLOOR) { return _CAPACITY_FLOOR; }
+    return available - held;
+}
+
+# The cores left once `held` is taken. A reservation that fits, as can_fit counts it,
+# leaves no less than zero, as through 1.5.0: f64 rounding can put it a hair below.
+# One that does not fit is a replayed over-commitment, and goes below zero. NaN is none.
+fn _cpu_taken(available, held): i64 {
+    var c = f64_sub(available, held);
+    if (f64_eq(c, c) == 0) { return f64_from(0); }
+    if (_cpu_short(available, held) == 0) {
+        if (f64_lt(c, f64_from(0)) == 1) { return f64_from(0); }
+    }
+    return c;
+}
+
+# Reserve a task's cores, memory and disk, and count it.
+fn _reserve_amounts(node, req): i64 {
+    NodeCapacity_set_available_cpu(node, _cpu_taken(NodeCapacity_available_cpu(node), ResourceReq_cpu_cores(req)));
+    var mem = _capacity_taken(NodeCapacity_available_memory_mb(node), ResourceReq_memory_mb(req));
     NodeCapacity_set_available_memory_mb(node, mem);
-    var disk = NodeCapacity_available_disk_mb(node) - ResourceReq_disk_mb(req);
-    if (disk < 0) { disk = 0; }
+    var disk = _capacity_taken(NodeCapacity_available_disk_mb(node), ResourceReq_disk_mb(req));
     NodeCapacity_set_available_disk_mb(node, disk);
     var rt = NodeCapacity_running_tasks(node);
     if (rt < 9223372036854775807) { NodeCapacity_set_running_tasks(node, rt + 1); }
+    return 0;
+}
+
+# Reserve resources for a task.
+fn node_capacity_reserve(node, req): i64 {
+    _reserve_amounts(node, req);
+    _accel_hold(node, req);
+    return 0;
+}
+
+# Reserve as a record says: the devices `list` names if they fit this node, else as
+# node_capacity_reserve picks them. 1 if the record was used (ADR-0018).
+fn _reserve_listed(node, req, list): i64 {
+    _reserve_amounts(node, req);
+    if (ResourceReq_accel_req(req) == REQ_NONE) { return 1; }
+    if (_accel_take_listed(node, req, list) == 1) { return 1; }
     _accel_hold(node, req);
     return 0;
 }
 
 # What is available once `held` comes back, capped at total. The cap is tested
 # before adding: a restored reservation can be any size up to i64 max, and the
-# plain sum wraps negative, which no `> total` check can catch.
+# plain sum wraps negative, which no `> total` check can catch. Below zero, the sum
+# cannot wrap (_capacity_taken keeps it above _CAPACITY_FLOOR).
 fn _capacity_returned(available, held, total): i64 {
+    if (available < 0) {
+        var back = available + held;
+        if (back > total) { return total; }
+        return back;
+    }
     if (held >= total - available) { return total; }
     return available + held;
 }
@@ -861,10 +1099,10 @@ struct SchedulingDecision {
 fn scheduling_decision_new(task_id, assigned_node, reason, score): i64 {
     var p = alloc(32);
     if (p == 0) { panic("samay: out of memory in scheduling_decision_new"); }
-    SchedulingDecision_set_task_id(p, _samay_own(task_id, "samay: out of memory in scheduling_decision_new"));
+    SchedulingDecision_set_task_id(p, _samay_own_req(task_id, "samay: out of memory in scheduling_decision_new"));
     SchedulingDecision_set_assigned_node(p,
-      _samay_own(assigned_node, "samay: out of memory in scheduling_decision_new"));
-    SchedulingDecision_set_reason(p, _samay_own(reason, "samay: out of memory in scheduling_decision_new"));
+      _samay_own_req(assigned_node, "samay: out of memory in scheduling_decision_new"));
+    SchedulingDecision_set_reason(p, _samay_own_req(reason, "samay: out of memory in scheduling_decision_new"));
     SchedulingDecision_set_score(p, score);
     return p;
 }
@@ -887,10 +1125,10 @@ fn preemption_action_new(preempted_task_id, preempting_task_id, reason): i64 {
     # that equality -- so they would PASS on an OOM. See ADR-0009.
     if (p == 0) { panic("samay: out of memory in preemption_action_new"); }
     PreemptionAction_set_preempted_task_id(p,
-      _samay_own(preempted_task_id, "samay: out of memory in preemption_action_new"));
+      _samay_own_req(preempted_task_id, "samay: out of memory in preemption_action_new"));
     PreemptionAction_set_preempting_task_id(p,
-      _samay_own(preempting_task_id, "samay: out of memory in preemption_action_new"));
-    PreemptionAction_set_reason(p, _samay_own(reason, "samay: out of memory in preemption_action_new"));
+      _samay_own_req(preempting_task_id, "samay: out of memory in preemption_action_new"));
+    PreemptionAction_set_reason(p, _samay_own_req(reason, "samay: out of memory in preemption_action_new"));
     return p;
 }
 

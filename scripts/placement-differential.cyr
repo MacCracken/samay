@@ -1,0 +1,481 @@
+# Placement differential: the same seeded scenarios through schedule_pending, every
+# decision, every log line and every node's state after each pass printed, so two
+# builds can be compared byte for byte. Only APIs 1.4.5 has. Run it through
+# scripts/placement-differential.sh, which fills in @FROM@, @TO@ and @UNITS@: the
+# thousandths a whole device counts in since 1.5.0, 1 before it.
+include "src/lib.cyr"
+
+var _rng = 0;
+var _loose = 0;
+
+fn rnd(n): i64 {
+    _rng = _rng * 6364136223846793005 + 1442695040888963407;
+    var x = (_rng >> 33) & 2147483647;
+    return x % n;
+}
+
+var _out = 0;
+var _lines = 0;
+
+fn out_flush(): i64 {
+    var s = str_builder_build(_out);
+    syscall(1, 1, str_data(s), str_len(s));
+    _out = str_builder_new();
+    return 0;
+}
+
+fn out_s(cs): i64 { str_builder_add_cstr(_out, cs); return 0; }
+fn out_str(s): i64 { str_builder_add(_out, s); return 0; }
+fn out_i(n): i64 { str_builder_add_int(_out, n); return 0; }
+fn out_nl(): i64 {
+    str_builder_add_cstr(_out, "\n");
+    _lines = _lines + 1;
+    if (_lines % 500 == 0) { out_flush(); }
+    return 0;
+}
+
+fn hook(ts, level, category, msg, msg_len, extra): i64 {
+    out_s("log ");
+    out_i(level);
+    out_s(" ");
+    var s = str_new(msg, msg_len);
+    out_str(s);
+    out_nl();
+    return 0;
+}
+
+fn mkid(prefix, a, b): i64 {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, prefix);
+    str_builder_add_int(sb, a);
+    str_builder_add_cstr(sb, "-");
+    str_builder_add_int(sb, b);
+    return str_builder_build(sb);
+}
+
+# cpu in quarters of a core, so sums round the way real ones do.
+fn rcpu(most): i64 {
+    return f64_div(f64_from(rnd(most * 4) + 1), f64_from(4));
+}
+
+fn make_node(seed, j, weird): i64 {
+    var id = mkid("n", seed, j);
+    var kind = rnd(10);
+    var cpu = rcpu(16);
+    if (rnd(5) == 0) { cpu = f64_div(f64_from(rnd(30) + 1), f64_from(10)); }
+    var n = node_capacity_new(id, cpu, 1024 * (rnd(32) + 1), 1000 * rnd(50), 0);
+    if (kind == 1) { node_capacity_add_accel(n, profile_cuda(0, 17179869184)); }
+    if (kind == 2) {
+        var g = 0;
+        var gn = rnd(4) + 1;
+        while (g < gn) { node_capacity_add_accel(n, profile_cuda(g, 8589934592 * (rnd(3) + 1))); g = g + 1; }
+    }
+    if (kind == 3) { node_capacity_add_accel(n, profile_tpu(0, 1 + rnd(8), TPU_V5P)); }
+    if (kind == 4) { node_capacity_add_accel(n, profile_gaudi(0, 2)); node_capacity_add_accel(n, profile_rocm(1, 17179869184)); }
+    if (weird == 1) {
+        var w = rnd(8);
+        if (w == 0) { NodeCapacity_set_available_cpu(n, f64_div(f64_from(0), f64_from(0))); }
+        if (w == 1) { NodeCapacity_set_available_cpu(n, f64_from(0 - 1)); }
+        if (w == 2) { NodeCapacity_set_available_memory_mb(n, 0 - 5); }
+        if (w == 3) { node_capacity_add_accel(n, profile_tpu(0, 0 - 3, TPU_V4)); }
+        if (w == 4) { NodeCapacity_set_available_cpu(n, f64_from(1000)); }
+        if (w == 5) { NodeCapacity_set_available_cpu(n, f64_sub(f64_from(0), f64_from(0))); }
+        if (w == 6) { NodeCapacity_set_available_cpu(n, f64_div(f64_from(0 - 1), f64_from(10000000000))); }
+        if (w == 7) { node_capacity_add_accel(n, profile_tpu(0, 0 - 1 - rnd(3), TPU_V4)); node_capacity_add_accel(n, profile_tpu(1, 1, TPU_V4)); }
+    }
+    return n;
+}
+
+# A palette, so shapes repeat as they do in real queues, and neighbours of it that
+# differ in one field, so a shape that is nearly a known one gets asked.
+fn make_req(palette, weird): i64 {
+    var c = rnd(8);
+    if (c < 4) { return resource_req_clone(vec_get(palette, rnd(vec_len(palette)))); }
+    if (c < 7) { return neighbour(vec_get(palette, rnd(vec_len(palette))), weird); }
+    return random_req(weird);
+}
+
+fn neighbour(p, weird): i64 {
+    var r = resource_req_clone(p);
+    var f = rnd(6);
+    if (f == 0) { ResourceReq_set_cpu_cores(r, f64_add(ResourceReq_cpu_cores(r), f64_div(f64_from(rnd(3) - 1), f64_from(4)))); }
+    if (f == 1) { ResourceReq_set_memory_mb(r, ResourceReq_memory_mb(r) + 256 * (rnd(3) - 1)); }
+    if (f == 2) { ResourceReq_set_disk_mb(r, ResourceReq_disk_mb(r) + 250 * (rnd(3) - 1)); }
+    if (f == 3) { ResourceReq_set_accel_req(r, rnd(7)); }
+    if (f == 4) { ResourceReq_set_accel_min_chips(r, ResourceReq_accel_min_chips(r) + rnd(3) - 1); }
+    if (f == 5) { ResourceReq_set_network(r, 1 - ResourceReq_network(r)); }
+    if (weird == 1) { grow(r); }
+    return r;
+}
+
+# Asks for less than nothing in one field, so placing it gives capacity back.
+fn grow(r): i64 {
+    var w = rnd(8);
+    if (w == 6) { ResourceReq_set_cpu_cores(r, f64_div(f64_from(1), f64_from(1000000000))); }
+    if (w == 7) { ResourceReq_set_cpu_cores(r, f64_from(0)); }
+    if (w == 0) { ResourceReq_set_memory_mb(r, 0 - 1024 * (rnd(64) + 1)); }
+    if (w == 1) { ResourceReq_set_cpu_cores(r, f64_from(0 - rnd(16) - 1)); }
+    if (w == 2) { ResourceReq_set_disk_mb(r, 0 - 1000 * (rnd(64) + 1)); }
+    if (w == 3) { ResourceReq_set_cpu_cores(r, f64_div(f64_from(0), f64_from(0))); }
+    if (w == 4) { ResourceReq_set_cpu_cores(r, f64_sub(f64_from(0), f64_from(0))); }
+    if (w == 5) { ResourceReq_set_accel_min_chips(r, 0 - rnd(3)); }
+    return 0;
+}
+
+fn random_req(weird): i64 {
+    var ar = REQ_NONE;
+    var chips = 0;
+    var a = rnd(12);
+    if (a == 1) { ar = REQ_GPU; }
+    if (a == 2) { ar = REQ_TPU; chips = rnd(10); }
+    if (a == 3) { ar = REQ_GPU_OR_TPU; chips = rnd(3); }
+    if (a == 4) { ar = REQ_ANY_ACCELERATOR; }
+    if (a == 5) { ar = REQ_GAUDI; }
+    if (a == 6) { ar = REQ_GPU_OR_TPU; chips = 2 + rnd(3); }
+    var r = resource_req_new(rcpu(20), 512 * rnd(70), ar, chips, rnd(2), 500 * rnd(40));
+    if (_loose == 1) { r = resource_req_new(rcpu(3), 256 * rnd(24), ar, chips, rnd(2), 250 * rnd(20)); }
+    if (weird == 1) { grow(r); }
+    return r;
+}
+
+# scheduled_task_new copies the requirement through its constructor, which clamps.
+# Put the raw fields back on the task's own copy.
+fn raw_req(t, r): i64 {
+    var own = ScheduledTask_resource_requirements(t);
+    ResourceReq_set_cpu_cores(own, ResourceReq_cpu_cores(r));
+    ResourceReq_set_memory_mb(own, ResourceReq_memory_mb(r));
+    ResourceReq_set_accel_req(own, ResourceReq_accel_req(r));
+    ResourceReq_set_accel_min_chips(own, ResourceReq_accel_min_chips(r));
+    ResourceReq_set_network(own, ResourceReq_network(r));
+    ResourceReq_set_disk_mb(own, ResourceReq_disk_mb(r));
+    return 0;
+}
+
+fn dump_nodes(s, seed, nn): i64 {
+    var j = 0;
+    while (j < nn) {
+        var n = map_get(TaskScheduler_nodes(s), mkid("n", seed, j));
+        if (n != 0) {
+            out_s("node ");
+            out_str(NodeCapacity_node_id(n));
+            out_s(" cpu=");
+            out_i(load64(n + 16));
+            out_s(" mem=");
+            out_i(NodeCapacity_available_memory_mb(n));
+            out_s(" disk=");
+            out_i(NodeCapacity_available_disk_mb(n));
+            out_s(" rt=");
+            out_i(NodeCapacity_running_tasks(n));
+            var used = NodeCapacity_accel_used(n);
+            var k = 0;
+            while (k < vec_len(used)) {
+                out_s(" u");
+                var uv = vec_get(used, k);
+                if (profile_accel_type(vec_get(NodeCapacity_accel_profiles(n), k)) != ACCEL_TPU) { uv = uv / @UNITS@; }
+                out_i(uv);
+                k = k + 1;
+            }
+            out_nl();
+        }
+        j = j + 1;
+    }
+    return 0;
+}
+
+fn scenario(seed): i64 {
+    _rng = seed * 2654435761 + 12345;
+    var weird = 0;
+    if (seed % 3 == 0) { weird = 1; }
+    _loose = seed % 2;
+    var s = task_scheduler_new();
+    var nn = rnd(40);
+    if (seed % 7 == 0) { nn = 0; }
+    var j = 0;
+    while (j < nn) {
+        var w = 0;
+        if (weird == 1) { if (rnd(4) == 0) { w = 1; } }
+        task_scheduler_register_node(s, make_node(seed, j, w));
+        j = j + 1;
+    }
+    var palette = vec_new();
+    var ps = 1 + rnd(6);
+    j = 0;
+    while (j < ps) { vec_push(palette, random_req(0)); j = j + 1; }
+    var nt = rnd(400);
+    var all = vec_new();
+    var name = str_from("t");
+    j = 0;
+    while (j < nt) {
+        var w = 0;
+        if (weird == 1) { if (rnd(5) == 0) { w = 1; } }
+        var mr = make_req(palette, w);
+        var t = scheduled_task_new(name, name, name, 1 + rnd(10), mr);
+        raw_req(t, mr);
+        ScheduledTask_set_task_id(t, mkid("t", seed, j));
+        ScheduledTask_set_created_at(t, 1000 + rnd(50));
+        if (nn > 0) { if (rnd(6) == 0) { ScheduledTask_set_requested_node(t, mkid("n", seed, rnd(nn + 2))); } }
+        task_scheduler_submit_task(s, t);
+        vec_push(all, t);
+        j = j + 1;
+    }
+    var pass = 0;
+    while (pass < 4) {
+        out_s("pass ");
+        out_i(seed);
+        out_s(" ");
+        out_i(pass);
+        out_nl();
+        var ds = task_scheduler_schedule_pending(s);
+        var k = 0;
+        while (k < vec_len(ds)) {
+            var d = vec_get(ds, k);
+            out_s("dec ");
+            out_str(SchedulingDecision_task_id(d));
+            out_s(" ");
+            out_str(SchedulingDecision_assigned_node(d));
+            out_s(" ");
+            out_str(SchedulingDecision_reason(d));
+            out_s(" ");
+            out_i(load64(d + 24));
+            out_nl();
+            k = k + 1;
+        }
+        dump_nodes(s, seed, nn);
+        # Finish, cancel or run some of what is placed, in task order.
+        k = 0;
+        while (k < vec_len(all)) {
+            var t = vec_get(all, k);
+            var st = ScheduledTask_status(t);
+            if (st == TASK_SCHEDULED) {
+                var c = rnd(5);
+                if (c == 0) { task_scheduler_complete_task(s, ScheduledTask_task_id(t), TASK_COMPLETED); }
+                if (c == 1) { task_scheduler_cancel_task(s, ScheduledTask_task_id(t)); }
+                if (c == 2) { scheduled_task_transition(t, TASK_RUNNING); }
+            } elif (st == TASK_RUNNING) {
+                if (rnd(3) == 0) { task_scheduler_complete_task(s, ScheduledTask_task_id(t), TASK_FAILED); }
+            }
+            k = k + 1;
+        }
+        if (nn > 0) {
+            if (rnd(3) == 0) {
+                var rj = rnd(nn);
+                out_s("rereg ");
+                out_i(seed);
+                out_s(" ");
+                out_i(rj);
+                out_nl();
+                task_scheduler_register_node(s, make_node(seed, rj, 0));
+            }
+        }
+        pass = pass + 1;
+    }
+    return 0;
+}
+
+
+# --- probes: one per way the skip could go wrong ---
+
+var _ps = 0;
+var _pk = 0;
+
+fn pnode(id, cpu, mem, disk): i64 {
+    var n = node_capacity_new(str_from(id), cpu, mem, disk, 0);
+    task_scheduler_register_node(_ps, n);
+    return n;
+}
+
+fn ptask(req, pref): i64 {
+    var t = scheduled_task_new(str_from("p"), str_from("p"), str_from("p"), 10, req);
+    raw_req(t, req);
+    ScheduledTask_set_task_id(t, mkid("p", _pk, 0));
+    _pk = _pk + 1;
+    ScheduledTask_set_priority(t, 11 - _pk);
+    ScheduledTask_set_created_at(t, 1000);
+    if (pref != 0) { ScheduledTask_set_requested_node(t, str_from(pref)); }
+    task_scheduler_submit_task(_ps, t);
+    return t;
+}
+
+fn rq(cpu, mem, disk): i64 { return resource_req_new(cpu, mem, REQ_NONE, 0, 0, disk); }
+fn quarter(n): i64 { return f64_div(f64_from(n), f64_from(4)); }
+
+fn probe_start(name): i64 {
+    _ps = task_scheduler_new();
+    _pk = 0;
+    out_s("probe ");
+    out_s(name);
+    out_nl();
+    return 0;
+}
+
+fn probe_end(): i64 {
+    var ds = task_scheduler_schedule_pending(_ps);
+    var k = 0;
+    while (k < vec_len(ds)) {
+        var d = vec_get(ds, k);
+        out_s("dec ");
+        out_str(SchedulingDecision_task_id(d));
+        out_s(" ");
+        out_str(SchedulingDecision_assigned_node(d));
+        out_s(" ");
+        out_i(load64(d + 24));
+        out_nl();
+        k = k + 1;
+    }
+    return 0;
+}
+
+fn probes(): i64 {
+    # A shape that passes every limit and fits nowhere, then one field less.
+    probe_start("mem");
+    pnode("a", f64_from(8), 1024, 10000);
+    pnode("b", f64_from(1), 8192, 10000);
+    ptask(rq(f64_from(4), 4096, 0), 0);
+    ptask(rq(f64_from(4), 1024, 0), 0);
+    probe_end();
+
+    probe_start("cpu");
+    pnode("a", f64_from(8), 1024, 10000);
+    pnode("b", f64_from(1), 8192, 10000);
+    ptask(rq(f64_from(4), 4096, 0), 0);
+    ptask(rq(quarter(2), 4096, 0), 0);
+    probe_end();
+
+    probe_start("disk");
+    pnode("a", f64_from(8), 1024, 1000);
+    pnode("b", f64_from(1), 8192, 9000);
+    ptask(rq(f64_from(4), 1024, 5000), 0);
+    ptask(rq(f64_from(4), 1024, 500), 0);
+    probe_end();
+
+    probe_start("chips");
+    node_capacity_add_accel(pnode("a", f64_from(8), 8192, 0), profile_tpu(0, 4, TPU_V5P));
+    node_capacity_add_accel(pnode("b", f64_from(8), 8192, 0), profile_cuda(0, 17179869184));
+    ptask(resource_req_new(f64_from(1), 1024, REQ_TPU, 8, 0, 0), 0);
+    ptask(resource_req_new(f64_from(1), 1024, REQ_TPU, 2, 0, 0), 0);
+    probe_end();
+
+    probe_start("accel");
+    node_capacity_add_accel(pnode("a", f64_from(8), 8192, 0), profile_cuda(0, 17179869184));
+    ptask(resource_req_new(f64_from(1), 1024, REQ_TPU, 0, 0, 0), 0);
+    ptask(resource_req_new(f64_from(1), 1024, REQ_GPU, 0, 0, 0), 0);
+    probe_end();
+
+    # A placement that gives capacity back, after a shape was refused: once through
+    # what was recorded, once through the limits.
+    probe_start("mem-grows-recorded");
+    pnode("a", f64_from(8), 1024, 0);
+    pnode("b", f64_from(0), 8192, 0);
+    ptask(rq(f64_from(1), 2048, 0), 0);
+    var g = rq(f64_from(1), 0, 0);
+    ResourceReq_set_memory_mb(g, 0 - 4096);
+    ptask(g, "a");
+    ptask(rq(f64_from(1), 2048, 0), 0);
+    probe_end();
+
+    probe_start("mem-grows-limit");
+    pnode("a", f64_from(8), 1024, 0);
+    ptask(rq(f64_from(1), 2048, 0), 0);
+    g = rq(f64_from(1), 0, 0);
+    ResourceReq_set_memory_mb(g, 0 - 4096);
+    ptask(g, "a");
+    ptask(rq(f64_from(1), 2048, 0), 0);
+    probe_end();
+
+    probe_start("cpu-grows-recorded");
+    pnode("a", f64_from(1), 8192, 0);
+    pnode("b", f64_from(8), 512, 0);
+    ptask(rq(f64_from(4), 1024, 0), 0);
+    g = rq(f64_from(0), 0, 0);
+    ResourceReq_set_cpu_cores(g, f64_from(0 - 8));
+    ptask(g, "a");
+    ptask(rq(f64_from(4), 1024, 0), 0);
+    probe_end();
+
+    probe_start("cpu-grows-limit");
+    pnode("a", f64_from(1), 8192, 0);
+    ptask(rq(f64_from(4), 1024, 0), 0);
+    g = rq(f64_from(0), 0, 0);
+    ResourceReq_set_cpu_cores(g, f64_from(0 - 8));
+    ptask(g, "a");
+    ptask(rq(f64_from(4), 1024, 0), 0);
+    probe_end();
+
+    probe_start("disk-grows-recorded");
+    pnode("a", f64_from(8), 8192, 1000);
+    pnode("b", f64_from(8), 512, 9000);
+    ptask(rq(f64_from(1), 1024, 5000), 0);
+    g = rq(f64_from(1), 0, 0);
+    ResourceReq_set_disk_mb(g, 0 - 9000);
+    ptask(g, "a");
+    ptask(rq(f64_from(1), 1024, 5000), 0);
+    probe_end();
+
+    probe_start("disk-grows-limit");
+    pnode("a", f64_from(8), 8192, 1000);
+    ptask(rq(f64_from(1), 1024, 5000), 0);
+    g = rq(f64_from(1), 0, 0);
+    ResourceReq_set_disk_mb(g, 0 - 9000);
+    ptask(g, "a");
+    ptask(rq(f64_from(1), 1024, 5000), 0);
+    probe_end();
+
+    # A pod with fewer than no chips: a GPU-or-TPU request for two takes -3 of it.
+    probe_start("devices-grow");
+    node_capacity_add_accel(pnode("a", f64_from(8), 8192, 0), profile_tpu(0, 0 - 3, TPU_V4));
+    ptask(resource_req_new(f64_from(1), 1024, REQ_GPU_OR_TPU, 0, 0, 0), 0);
+    ptask(resource_req_new(f64_from(1), 1024, REQ_GPU_OR_TPU, 2, 0, 0), 0);
+    ptask(resource_req_new(f64_from(1), 1024, REQ_GPU_OR_TPU, 2, 0, 0), 0);
+    ptask(resource_req_new(f64_from(1), 1024, REQ_GPU_OR_TPU, 0, 0, 0), 0);
+    probe_end();
+
+    # A node a hair below zero: placing nothing on it rounds it up to zero.
+    probe_start("cpu-rounds-up");
+    var a = pnode("a", f64_from(8), 8192, 0);
+    NodeCapacity_set_available_cpu(a, f64_div(f64_from(0 - 1), f64_from(10000000000)));
+    var nano = f64_div(f64_from(1), f64_from(1000000000));
+    ptask(rq(nano, 0, 0), 0);
+    ptask(rq(f64_from(0), 0, 0), 0);
+    ptask(rq(nano, 0, 0), 0);
+    probe_end();
+
+    probe_start("nan-node");
+    a = pnode("a", f64_from(8), 1024, 0);
+    NodeCapacity_set_available_cpu(a, f64_div(f64_from(0), f64_from(0)));
+    ptask(rq(f64_from(100), 512, 0), 0);
+    probe_end();
+
+    probe_start("exact");
+    pnode("a", f64_from(8), 1024, 700);
+    ptask(rq(f64_from(8), 1024, 700), 0);
+    probe_end();
+
+    # More shapes than the record keeps: 600 that fit nowhere, then each again.
+    probe_start("many");
+    pnode("a", f64_from(8), 4096, 0);
+    pnode("b", f64_from(1), 65536, 0);
+    var k = 0;
+    while (k < 1200) {
+        ptask(rq(f64_from(2), 8192 + k % 600, 0), 0);
+        k = k + 1;
+    }
+    probe_end();
+    return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+    _out = str_builder_new();
+    sakshi_set_emit_hook(&hook);
+    var seed = @FROM@;
+    while (seed < @TO@) {
+        scenario(seed);
+        seed = seed + 1;
+    }
+    if (@TO@ >= 300) { probes(); }
+    out_flush();
+    return 0;
+}
+
+var r = main();
+syscall(60, r);

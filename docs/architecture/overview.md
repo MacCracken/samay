@@ -44,7 +44,11 @@ preempt_if_needed ►  lowest-priority running task whose node would then fit it
 A reservation is held while a task is `Scheduled` or `Running`, and it holds any
 accelerator the task took as well as its CPU, memory and disk
 ([ADR-0013](../adr/0013-accelerators-are-reserved.md)): one hold per device, each whole or a share
-counted in thousandths ([ADR-0016](../adr/0016-several-devices-or-a-share-of-one.md)). `complete_task` and `cancel_task`
+counted in thousandths ([ADR-0016](../adr/0016-several-devices-or-a-share-of-one.md)). A snapshot records
+which devices each task holds, so a restore or a node re-registering with the same hardware puts every
+task back on its own devices ([ADR-0018](../adr/0018-a-task-records-its-devices.md)). A node smaller
+than what its tasks hold shows its free capacity below zero, so releases give back only what is there
+([ADR-0007](../adr/0007-reservation-lifecycle.md)). `complete_task` and `cancel_task`
 return it at once. A task finished through a raw transition returns it at the next
 `schedule_pending`: reconciliation runs at the head of every pass rather than hooking
 the transition, because `scheduled_task_transition` is public — a consumer can

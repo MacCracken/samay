@@ -1,6 +1,7 @@
 # 0014 — A document has a byte limit and a parse budget, and writers keep to both
 
-**Status**: Accepted
+**Status**: Accepted. **Amended** in v1.5.1: the budget counts bytes as `alloc()` takes them, and a
+restore's tree is freed once it has been read. See *Amendment (v1.5.1)* below.
 **Date**: 2026-11-02
 
 ## Context
@@ -73,10 +74,11 @@ times its size, and every writer refuses what a reader would refuse.**
 - **Negative** — A snapshot past 128 MiB was written and read through 1.4.4, up to bayan's 2 GiB. Now
   it is refused on both sides unless the consumer raises the limit. Nothing measured comes near it.
 - **Negative** — The budget is a measurement of bayan's tree, not a property of JSON. If bayan's nodes
-  grow, honest snapshots move towards the limit. `test_json_expansion_limit` restores the worst
-  shape samay writes with the limit at 8, so a change fails there first.
+  grow, honest snapshots move towards the limit. `test_json_expansion_limit` restores cron entries
+  with one-letter names, 6.5 times their text, with the limit at 8, so a change fails there first.
+  (Corrected in v1.5.1: this said the worst shape, which is 7.2.)
 - **Neutral** — Peak memory for a document that is read is what it was. The tree still lives on the
-  bump heap after a restore and is never freed, as before.
+  bump heap after a restore and is never freed, as before. *Superseded in v1.5.1: see below.*
 
 ## Alternatives considered
 
@@ -89,3 +91,26 @@ times its size, and every writer refuses what a reader would refuse.**
   [ADR-0008](0008-threading-contract.md), which lets separate schedulers live on separate threads.
 - **bayan's streaming parser.** It would never build the tree at all, but every reader in `json.cyr` is
   written against the tree, and it would be a rewrite of all of them.
+
+## Amendment (v1.5.1)
+
+**The budget counts bytes as `alloc()` takes them.** `alloc()` rounds every request up to 8, and the
+ratios in the table above were measured with `alloc_used()`, so they are rounded too. Through 1.5.0
+the budget counted the requests unrounded, which let a parse take a little more than ten times its
+document. It now counts what it measures.
+
+**A restore's tree is freed.** It is built in an anonymous mapping of its own, as large as the
+budget, which is only an address range until the tree touches it, and the mapping goes back to the
+system when the reader returns. That is safe because no reader keeps a pointer into the tree:
+constructors own every `Str` they keep (1.1.3), the task and node readers copy theirs, and
+ai-hwaccel's profile reader copies its own (2.5.5). The suite checks it: every restore test runs
+with its tree unmapped, and a pointer into it would fault. Where no mapping can be had (agnos and cx
+have no `mmap`), the tree goes on the heap as before. A writer's tree still stays on the heap.
+
+| Restore of 100,000 | Heap left behind, 1.5.0 | 1.5.1 |
+|---|---|---|
+| tasks (46 MB) | 282 MiB | 44 MiB |
+| nodes (20 MB) | 172 MiB | 69 MiB |
+| cron entries (40 MB) | 286 MiB | 43 MiB |
+
+Peak memory rises by about 1%, since the mapping is counted while the tree is read.

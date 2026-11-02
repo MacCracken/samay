@@ -4,6 +4,171 @@ All notable changes to Samay are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.5.1] — 2026-11-02
+
+**A P(-1) audit of everything to date, and restore's parse tree freed.** Four independent auditors
+worked on copies of 1.5.0: placement and the task lifecycle, cron, snapshots, and whether the tests
+and docs tell the truth. Each was told to run things, not read them, and no finding counted until its
+reproducer had been rerun here. Twenty findings are fixed, three are documented as limits, and fifteen
+tests that could not fail now can. **1,735 tests**, up 213. **⚠ Some calls answer
+differently:** see *Changed*.
+
+### Fixed — devices double-booked after a restore ([ADR-0018](docs/adr/0018-a-task-records-its-devices.md))
+
+Restore rebuilt device holds by replaying reservations in placement order, and a task that finished
+between two others changed the replay: on a node with a GPU and a Gaudi, the restored scheduler put two
+tasks on the GPU and offered the Gaudi that one of them was running on. Shares repacked the same way,
+and so did a node re-registering with the same hardware. Found by two auditors apart.
+
+- A task holding devices now writes their profile indices with it, `"held_profiles":[...]`, and a
+  restore takes exactly those where they fit the node, or chooses again and logs it.
+- Re-registering a node carries each task's devices over by index.
+- The auditors' random invariant checker failed 52 times in 1,500 steps on 1.5.0 and fails none in
+  32 runs of 3,000 steps now.
+
+### Fixed — a 1 MB snapshot took 87 seconds to restore ([ADR-0018](docs/adr/0018-a-task-records-its-devices.md))
+
+Holding several devices picked them one walk at a time, and nothing limited a node's profiles: one task
+holding 32,000 devices made restore quadratic. A node now has at most `SAMAY_MAX_NODE_DEVICES` (1,024)
+profiles, and whole devices are held in one walk of a rank order the node keeps. A thousand tasks each
+holding 1,024 devices restore in 0.17 s.
+
+### Fixed — restore's parse tree stayed on the heap ([ADR-0014](docs/adr/0014-what-a-document-may-cost.md))
+
+Every restore left its tree, about six times the document, allocated for good. The tree now goes in a
+mapping of its own, returned when the reader is done: no reader keeps a pointer into it, which the
+suite checks by running every restore with the tree unmapped. Where no mapping can be had (agnos, cx)
+it uses the heap as before. The parse budget now counts bytes as `alloc()` takes them, rounded to 8,
+which is what its ratios were measured in.
+
+| Restore of 100,000 | Heap left behind, 1.5.0 → 1.5.1 | Memory in use after | Time |
+|---|---|---|---|
+| tasks (46 MB) | 282 → 44 MiB | 329 → 93 MiB | 1.90 → 1.85 s |
+| nodes (20 MB) | 172 → 70 MiB | 195 → 91 MiB | 0.99 → 0.97 s |
+| cron entries (40 MB) | 286 → 45 MiB | 327 → 87 MiB | 1.81 → 1.83 s |
+
+Peak memory is within 1%: the tree is still read whole.
+
+### Fixed — over-commitment was forgotten ([ADR-0007](docs/adr/0007-reservation-lifecycle.md))
+
+- **A node smaller than what its tasks hold counted at zero**, after a re-registration or a restore,
+  and the next release gave back the whole amount: 12 cores held on an 8-core node, then 6 freed, sold 6
+  more. Cores, memory and disk now go below zero there, as devices already went past capacity. An
+  ordinary placement still stops at zero, so no ordinary decision changes.
+- **A node registered after a restore that lacked it** was charged nothing for the tasks holding it.
+- **`preempt_if_needed` counted released capacity as held** and stopped a second job where one sufficed.
+  It now reconciles first, as a pass does.
+
+### Fixed — cron ([ADR-0006](docs/adr/0006-cron-expression-model.md))
+
+- **One bad clock reading fired a burst.** A reading more than 3 hours behind re-anchored every
+  watermark, and the next correct one fired up to 1,000 duplicates an entry as catch-up. The watermark
+  before a reset is now kept, on the wire too, and what had fired does not fire again.
+- **A short wait flooded the log and the heap:** a line and about 320 bytes per entry per check, while
+  the clock was behind. It is said once per entry, and a held check costs what a quiet one does.
+- **Changing an entry's schedule fired the new one for time before it existed**, 209 tasks after an
+  outage, and gave up the old one's debt in silence. A changed schedule starts fresh and logs what the
+  old one gives up; the same schedule keeps its place as before.
+- **A disabled entry repeated "giving up" after every restart**, counting its downtime. `disabled_seen` is
+  on the wire.
+- **`CronEntry_set_enabled(e, 2)` left an entry dormant until a restore.** Only 0 is disabled now.
+- **Restore accepted masks that never match** (an empty field, Sunday as 7, minute 60), and the entry
+  never fired; and read missing star flags as 0, which fired `0 0 1 * *` daily. Dead masks are refused,
+  and missing flags are read from the masks.
+- **`cron_expr_next_after` wrapped negative** near the top of i64.
+
+### Fixed — readers and writers ([ADR-0005](docs/adr/0005-restore-input-validation.md))
+
+- **A requirement needs all six fields**, as ADR-0005 already claimed.
+- **An accelerator profile needs its type, device and memory.** `{}` profiles made a restore take 20
+  times its document.
+- **A score must be finite.** **A request's device keys are written as placement reads them**, so a 0
+  left by a setter writes 1.4.6's bytes.
+- **A null name, id or other required Str becomes empty** in every constructor. Kept as 0, one task
+  crashed every snapshot of its scheduler. `register_node` refuses a node with a null id.
+- **Names and ids cannot forge log lines:** a control byte prints as `?`.
+- **Three returned vectors had no out-of-memory guard** (ADR-0009). CI's allocation gate now covers
+  `vec_new` and `map_new_str` as well as `alloc`, and fails on 1.5.0.
+
+### Changed — what answers differently
+
+- **An over-committed node shows negative free cores, memory or disk**, in memory and in a snapshot.
+- **Replacing a cron entry with a different expression starts it fresh** and logs; 1.5.0 kept the watermark.
+- **`CronEntry_set_enabled` with any non-zero value enables.**
+- **`node_capacity_add_accel` past 1,024 profiles adds nothing**, and logs; a snapshot with such a node is
+  refused.
+- **Restore refuses** a requirement missing a field, a profile with no type, device or memory, a
+  decision with a non-finite score, a cron mask no expression produces, and a wrong-typed
+  `held_profiles`, `disabled_seen` or `reset_from`.
+- **Constructors store the empty Str for a null required Str.**
+
+### Wire
+
+- `"held_profiles":[...]` on a task holding devices, written by the scheduler's snapshot.
+- `"disabled_seen":1` on a disabled cron entry that has said what it gave up, and `"reset_from":N` on an
+  entry whose clock reset.
+- All three are written only when set, and readers before 1.5.1 ignore them. A snapshot without devices
+  or such entries is byte for byte what 1.5.0 writes.
+
+### Not changed — every other decision
+
+`scripts/placement-differential.sh` builds one harness against two releases and compares every
+decision, log line and node state. Against 1.5.0, over 3,000 seeded scenarios and 16 probes, 702
+scenarios differ, every one after a node re-registers, where 1.5.1 keeps devices and counts
+over-commitment; the probes are identical. The same script confirms the 1.4.6 claim: 1.4.5 and 1.4.6
+are identical.
+
+### Performance
+
+The bench rows moved by 1% or less, except two. `schedule_pending_stuck_2000` is 7.3% slower, 1.88 to
+2.01 ms: each stuck task's log line is now checked byte by byte for control characters. And
+`cron_expr_matches`, 3.8%, whose source did not change.
+
+### Tests
+
+- **Every fix above has a test**, among them the double-booking scenarios, the random invariant checker's
+  shapes, each cron fix through a snapshot, over-commitment through a re-registration and a restore,
+  and the ceiling.
+- **Fifteen weak tests closed**, each shown weak by an auditor's mutant that passed the whole suite:
+  restore's capacity check per axis, a SCHEDULED task's lost reservation, a refused completion,
+  preemption's victim status and priority classes, PREEMPTED tasks and statuses, re-registration's
+  answer, a training job's target, a negative cron watermark, the equal-copy release by type, the
+  documented constants, a copied share, two parser edges, and four log lines' details.
+- **Whole-source mutation**, run locally: 1,710 mutants, 1,498 killed, 204 survive, 8 do not compile.
+  The first run left 114 new survivors in 1.5.1's code. New tests kill 62: the rank order and what
+  whole-device requests take, checked on 40 nodes against an order written out plainly; every kind of
+  device record that does not fit; orphans wherever the missing node sorts; preemption beside a task
+  finished by its transition; a cron schedule changed in each field, and a reset at its exact instant
+  and under the burst budget; the names in log lines. Nine went with code no call could reach: an
+  argument of the share pick that every caller passed as -1, and three readers' checks for a tree
+  `_restore` never hands them. The other 43 are read and accepted: bounds whose edge gives the same
+  answer or never comes, three `0 - 1` sentinels becoming `0 - 2`, returns nothing reads, stores of
+  zero into fresh memory, the rank order's cache and a heap sort that also sifts its leaves, which
+  change speed and not answers, `_parse`'s check for a null text no caller passes, and `_restore`
+  clearing a refused tree that bayan already answers as 0.
+  `_MAPS_HELD` counts restore mappings so a test sees each one given back, and another sees the pages
+  go. Three accepted survivors from earlier releases are now killed.
+
+### Docs corrected
+
+- 1.5.0's "ADR-0017's check is 2.5 points" of the placing row is 1.7; the device rewrite is the other 2.2.
+- ADR-0014 and a test said the expansion test restores the worst shape samay writes; it restores one
+  at 6.5 times its text, the worst being 7.2.
+- The getting-started guide's fmt loop missed two of the file sets CI checks.
+- ADR-0013 claimed device counts stayed exact through a restore.
+
+### Known limits, documented
+
+- A cron clock at or before 1970 cannot anchor a watermark, and logs a step back.
+- A name with bytes that are not UTF-8 is written as it is: samay reads it back, but stricter JSON
+  readers refuse the file.
+- Changing a placed task's requirement through `ScheduledTask_resource_requirements` changes what its
+  release gives back. Change a request before it is placed.
+
+### Not verified
+
+- **No consumer was rebuilt.** kavach, daimon and stiva are still on 1.1.x.
+
 ## [1.5.0] — 2026-11-02
 
 **Several GPUs, or a share of one.** A request can ask for four devices on one node, or for half a
@@ -60,8 +225,9 @@ pinned CPU. Rows not listed moved by 1% or less.
 | `schedule_pending_place_500` | 18.1 ms | **18.8 ms (+4.0%)** |
 
 Whether a node fits now counts free devices and stops at enough, where 1.4.6 ranked every profile;
-only a hold ranks. Placing CPU work costs 4.0%, and ADR-0017's check is 2.5 points of it: with the
-check switched off the row reads 18.5 ms. New rows: `node_can_fit_4_gpus` 148 ns,
+only a hold ranks. Placing CPU work costs 4.0%: with ADR-0017's check switched off the row reads
+18.5 ms, so the check is about 1.7 points of it and the device rewrite the other 2.2. (Corrected in
+1.5.1: this said 2.5 points.) New rows: `node_can_fit_4_gpus` 148 ns,
 `node_can_fit_share` 61 ns, `best_fit_cpu_100_mixed` 7.8 µs.
 
 ### Not changed — decisions for a request that uses neither

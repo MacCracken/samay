@@ -16,15 +16,18 @@
 # then created_at asc, matching Rust's sort_by.
 # Requires: hashmap, vec, str, string, chrono, result + types.cyr.
 
+# orphans: restored tasks holding a node the snapshot did not have, which that node is
+# charged for when it registers (1.5.1).
 #derive(accessors)
 struct TaskScheduler {
     tasks: i64;
     nodes: i64;
     pending_scratch: i64;
+    orphans: i64;
 }
 
 fn task_scheduler_new(): i64 {
-    var s = alloc(24);
+    var s = alloc(32);
     if (s == 0) { panic("samay: out of memory in task_scheduler_new"); }
     # map_new_str returns 0 on OOM (lib/hashmap.cyr) WITHOUT aborting --
     # unlike map_set/_map_grow, which abort via _hm_die. The stdlib is
@@ -40,6 +43,7 @@ fn task_scheduler_new(): i64 {
     var scratch = vec_new();
     if (scratch == 0) { panic("samay: out of memory in task_scheduler_new (scratch)"); }
     TaskScheduler_set_pending_scratch(s, scratch);
+    TaskScheduler_set_orphans(s, 0);
     return s;
 }
 
@@ -115,27 +119,47 @@ fn _log_empty_node_id(): i64 {
 # refused here too (1.4.5). An id already known replaces its description, which is
 # what a node agent reconnecting does, so what its tasks hold is carried onto the new
 # one. Through 1.4.2 the replacement came up empty, and the same capacity was sold twice.
+# Each task keeps the devices it held, by index, where the new description still has
+# them; picking them again could put two tasks on one device (1.5.1, ADR-0018). A node
+# that restored tasks already hold, missing from their snapshot, is charged for them.
 fn task_scheduler_register_node(s, node): i64 {
     var nodes = TaskScheduler_nodes(s);
     var id = NodeCapacity_node_id(node);
+    if (id == 0) {
+        _log_empty_node_id();
+        return 1;
+    }
     if (str_len(id) == 0) {
         _log_empty_node_id();
         return 1;
     }
     var was = map_get(nodes, id);
     map_set(nodes, id, node);
-    if (was == 0) { return 0; }
     if (was == node) { return 0; }
+    if (was == 0) {
+        if (TaskScheduler_orphans(s) == 0) { return 0; }
+    }
     var held = _holding_tasks(s);
     var n = vec_len(held);
+    var list = vec_new();
+    if (list == 0) { panic("samay: out of memory in task_scheduler_register_node"); }
+    var found = 0;
     var i = 0;
     while (i < n) {
         var t = vec_get(held, i);
         if (str_eq(ScheduledTask_reserved_on(t), id) == 1) {
-            node_capacity_reserve(node, ScheduledTask_resource_requirements(t));
+            var req = ScheduledTask_resource_requirements(t);
+            if (was != 0) {
+                _accel_held_list(was, req, list);
+                _reserve_listed(node, req, list);
+            } else {
+                node_capacity_reserve(node, req);
+                found = found + 1;
+            }
         }
         i = i + 1;
     }
+    if (was == 0) { TaskScheduler_set_orphans(s, TaskScheduler_orphans(s) - found); }
     return 0;
 }
 
@@ -197,7 +221,10 @@ fn _reconcile_reservations(s): i64 {
                 var st = ScheduledTask_status(t);
                 if (st != TASK_SCHEDULED) {
                     if (st != TASK_RUNNING) {
-                        if (stale == 0) { stale = vec_new(); }
+                        if (stale == 0) {
+                            stale = vec_new();
+                            if (stale == 0) { panic("samay: out of memory in _reconcile_reservations"); }
+                        }
                         vec_push(stale, t);
                     }
                 }
@@ -259,7 +286,7 @@ fn task_scheduler_complete_task(s, id, final_status): i64 {
 fn _log_capacity_rebuilt(id): i64 {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "node '");
-    str_builder_add(sb, id);
+    _samay_log_add(sb, id, 128);
     str_builder_add_cstr(sb, "': snapshot capacity disagrees with its tasks; rebuilt from them");
     var msg = str_builder_build(sb);
     sakshi_warn(str_data(msg), str_len(msg));
@@ -273,10 +300,22 @@ fn _held_cmp(a, b): i64 {
     return _placement_cmp(a, b);
 }
 
+fn _log_devices_rechosen(id): i64 {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "node '");
+    _samay_log_add(sb, id, 128);
+    str_builder_add_cstr(sb, "': a task's recorded devices do not fit it; chosen again");
+    var msg = str_builder_build(sb);
+    sakshi_warn(str_data(msg), str_len(msg));
+    return 0;
+}
+
 # Replay held[from..to), all this node's, through reserve, which rebuilds its device
-# holds too. A node that agrees keeps the bits it came with, so a good snapshot writes
-# back byte for byte: f64 sums depend on order, and this is not the order they ran in.
-fn _settle_node(node, held, from, to): i64 {
+# holds too: as `recorded` lists them where a task's are on record (a map of task id to
+# profile indices, or 0), else picked in placement order (ADR-0018). A node that agrees
+# keeps the bits it came with, so a good snapshot writes back byte for byte: f64 sums
+# depend on order, and this is not the order they ran in.
+fn _settle_node(node, held, from, to, recorded): i64 {
     var cpu = NodeCapacity_available_cpu(node);
     var mem = NodeCapacity_available_memory_mb(node);
     var disk = NodeCapacity_available_disk_mb(node);
@@ -287,7 +326,15 @@ fn _settle_node(node, held, from, to): i64 {
     NodeCapacity_set_running_tasks(node, 0);
     var i = from;
     while (i < to) {
-        node_capacity_reserve(node, ScheduledTask_resource_requirements(vec_get(held, i)));
+        var t = vec_get(held, i);
+        var req = ScheduledTask_resource_requirements(t);
+        var list = 0;
+        if (recorded != 0) { list = map_get(recorded, ScheduledTask_task_id(t)); }
+        if (list == 0) {
+            node_capacity_reserve(node, req);
+        } elif (_reserve_listed(node, req, list) == 0) {
+            _log_devices_rechosen(NodeCapacity_node_id(node));
+        }
         i = i + 1;
     }
     var agree = 1;
@@ -309,8 +356,9 @@ fn _settle_node(node, held, from, to): i64 {
 var _CPU_SETTLE = 0x3EB0C6F7A0B5ED8D;
 
 # Bring every node into line with the tasks. A task placed and running that lost its
-# reservation still occupies its node, so it gets it back first.
-fn _settle_capacity(s): i64 {
+# reservation still occupies its node, so it gets it back first. `recorded` maps task
+# ids to the devices a snapshot says they hold, or is 0.
+fn _settle_capacity(s, recorded): i64 {
     var tasks = TaskScheduler_tasks(s);
     var cap = map_cap(tasks);
     var t = 0;
@@ -331,6 +379,8 @@ fn _settle_capacity(s): i64 {
     var nodes = map_values(TaskScheduler_nodes(s));
     vec_sort_by(nodes, &_node_id_cmp);
     var h = 0;
+    var matched = 0;
+    var orphans = 0;
     var i = 0;
     while (i < vec_len(nodes)) {
         var node = vec_get(nodes, i);
@@ -341,14 +391,18 @@ fn _settle_capacity(s): i64 {
             if (_samay_str_cmp(ScheduledTask_reserved_on(vec_get(held, h)), id) >= 0) { break; }
             h = h + 1;
         }
+        orphans = orphans + h - matched;
         var from = h;
         while (h < hn) {
             if (_samay_str_cmp(ScheduledTask_reserved_on(vec_get(held, h)), id) != 0) { break; }
             h = h + 1;
         }
-        _settle_node(node, held, from, h);
+        matched = h;
+        _settle_node(node, held, from, h, recorded);
         i = i + 1;
     }
+    # What is left holds a node the snapshot does not have; registering it charges them.
+    TaskScheduler_set_orphans(s, orphans + hn - matched);
     return 0;
 }
 
@@ -430,6 +484,7 @@ fn _collect_pending(s, out): i64 {
 # Pending (Queued) tasks, sorted by priority desc then created_at asc.
 fn task_scheduler_pending_tasks(s): i64 {
     var out = vec_new();
+    if (out == 0) { panic("samay: out of memory in task_scheduler_pending_tasks"); }
     _collect_pending(s, out);
     return out;
 }
@@ -441,6 +496,7 @@ fn task_scheduler_tasks_for_node(s, node_id): i64 {
     var tasks = TaskScheduler_tasks(s);
     var cap = map_cap(tasks);
     var out = vec_new();
+    if (out == 0) { panic("samay: out of memory in task_scheduler_tasks_for_node"); }
     var i = 0;
     while (i < cap) {
         var t = _map_slot(tasks, i);
@@ -548,6 +604,14 @@ fn _log_no_capacity(task_id): i64 {
     if (n > 128) { n = 128; }
     memcpy(&msg, "task '", 6);
     memcpy(&msg + 6, str_data(task_id), n);
+    # A control byte, a newline above all, is shown as '?' so it cannot start a line.
+    var i = 0;
+    while (i < n) {
+        var c = load8(&msg + 6 + i);
+        if (c < 32) { store8(&msg + 6 + i, 63); }
+        if (c == 127) { store8(&msg + 6 + i, 63); }
+        i = i + 1;
+    }
     memcpy(&msg + 6 + n, "': no node with sufficient capacity", 35);
     sakshi_warn(&msg, n + 41);
     return 0;
@@ -702,7 +766,9 @@ fn _reserve_grew(node, req): i64 {
 }
 
 fn task_scheduler_schedule_pending(s): i64 {
+    # Returned, and the caller's vec_len on a 0 faults a frame away (ADR-0009).
     var decisions = vec_new();
+    if (decisions == 0) { panic("samay: out of memory in task_scheduler_schedule_pending"); }
     _reconcile_reservations(s);
     var nodes = TaskScheduler_nodes(s);
     var pending = TaskScheduler_pending_scratch(s);
@@ -794,6 +860,9 @@ fn _preempt_helps(s, victim, req): i64 {
 # stopping several for one task is a plan, and samay does not make those.
 fn task_scheduler_preempt_if_needed(s, task): i64 {
     if (ScheduledTask_status(task) != TASK_QUEUED) { return 0; }
+    # What a pass would release first, so a victim already stopped, or a task already
+    # finished through its transition, is not counted as holding anything (1.5.1).
+    _reconcile_reservations(s);
     var req = ScheduledTask_resource_requirements(task);
     if (_best_fit_node(TaskScheduler_nodes(s), req) != 0) { return 0; }
     var new_prio = scheduled_task_priority_class(task);

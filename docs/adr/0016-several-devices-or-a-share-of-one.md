@@ -81,3 +81,9 @@ default, and only a request that uses either writes it.**
 - **New arguments to `resource_req_new`.** Every consumer's call would break.
 - **Write both keys always.** Every snapshot's bytes would change for requests that use neither, and
   the fixtures from earlier releases would no longer write back as they came.
+
+## Amendment (v1.5.1)
+
+Point 5 wrote the two keys from the struct as it stood, so a 0 left by a setter or the derive's decoder
+wrote both and lost them on the next restore. The writer now writes them as placement reads them, and
+leaves them out for one whole device whatever the struct holds.

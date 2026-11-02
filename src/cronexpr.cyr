@@ -367,11 +367,19 @@ fn _cron_day_total(expr): i64 {
 # included, so a day pattern that has not matched in that span never will, and -1
 # means never rather than "not soon". It steps by day, so that span costs about as
 # much as ten years did minute by minute.
+#
+# Near the top of i64 the minute after, or the end of the span, would not fit: those
+# wrapped negative through 1.5.0. The search stops a day short of the top instead, and
+# an instant past that has no next minute to give.
+var _CRON_LAST_SECS = 9223372036854689407;
+
 fn cron_expr_next_after(expr, epoch_secs): i64 {
     if (_cron_day_total(expr) == 0) { return 0 - 1; }
+    if (epoch_secs >= _CRON_LAST_SECS) { return 0 - 1; }
     var t = 0;
     if (epoch_secs >= 0) { t = (epoch_secs / 60) * 60 + 60; }
-    var limit = t + 146097 * 86400;
+    var limit = _CRON_LAST_SECS;
+    if (t < _CRON_LAST_SECS - 146097 * 86400) { limit = t + 146097 * 86400; }
     while (t < limit) {
         var next_day = t - t % 86400 + 86400;
         if (_cron_day_matches(expr, t) == 1) {

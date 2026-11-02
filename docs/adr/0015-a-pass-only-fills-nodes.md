@@ -89,3 +89,11 @@ log line and node state is the one a full walk gives.
   changes `TaskScheduler`'s layout.
 - **Stop logging a stuck task after the first pass.** It would make the remaining cost smaller, but the
   line is the one operational signal this loop gives, and that is a change in behaviour, not in cost.
+
+## Amendment (v1.5.1)
+
+The differential this ADR cites now lives in the repository: `scripts/placement-differential.sh OLD
+NEW` builds `scripts/placement-differential.cyr` against two tags, or a tag and the working tree, and
+compares their output byte for byte. Through 1.5.0 it lived outside the tree, and its figures could not
+be rerun. 1.5.1 also gave a reservation a second way to take capacity, over-committing below zero on
+replay, which only fills nodes as before.

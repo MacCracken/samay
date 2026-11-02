@@ -2,7 +2,8 @@
 
 **Status**: Accepted. Points 1 and 2 extended by [ADR-0016](0016-several-devices-or-a-share-of-one.md)
 (v1.5.0): a request can take several devices, or a share of one, and a device is counted in
-thousandths.
+thousandths. Point 5 superseded by [ADR-0018](0018-a-task-records-its-devices.md) (v1.5.1): replay in
+placement order double-booked devices, so a task's holds are on the wire after all.
 **Date**: 2026-11-01
 
 ## Context
@@ -73,7 +74,8 @@ only if stopping that victim places the task.**
 - **Negative** — Replay rebuilds which task holds which profile from placement order. After a release
   that order can differ from what happened: on a node whose profiles overlap, a restored scheduler may
   assign a later task to a different profile than the original would have. Counts stay exact, and the
-  same snapshot always restores to the same state. The decisions name nodes, not devices, so this only
+  same snapshot always restores to the same state. *Wrong, found in v1.5.1:* per-profile counts did not
+  stay exact, and a busy device was offered again. ADR-0018 records the holds. The decisions name nodes, not devices, so this only
   matters when one overlapping requirement could fit on one profile and not on the other.
 - **Neutral** — Device identity stays unexposed. A decision names a node, and which GPU to use is the
   executor's business.

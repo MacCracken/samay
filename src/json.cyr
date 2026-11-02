@@ -60,18 +60,27 @@ fn _over_byte_limit(n): i64 {
     return 1;
 }
 
-# An allocator that forwards to alloc() until `budget` bytes are spent, then answers 0,
-# which fails bayan's whole parse or build. State: { used, budget, refused }. A request
-# past ALLOC_MAX is refused the same way: plain alloc() answers 0 there too, and
-# bayan_json_v_build exits the process on it. Any other 0 from alloc() is the host out
-# of memory, so it panics rather than pass for a refused document (ADR-0009).
+# An allocator that hands out memory until `budget` bytes are spent, then answers 0,
+# which fails bayan's whole parse or build. State: { used, budget, refused, base, size }.
+# It counts each request as alloc() takes it, rounded up to 8, which is what ADR-0014's
+# ratios measured. A request past ALLOC_MAX is refused the same way: plain alloc()
+# answers 0 there too, and bayan_json_v_build exits the process on it.
+#
+# With a mapping (base not 0) it hands out the mapping in order, 8-aligned as alloc()
+# is; the budget fits inside it, so it never runs past the end. Without one it forwards
+# to alloc(), and any 0 from that is the host out of memory, so it panics rather than
+# pass for a refused document (ADR-0009).
 fn _budget_alloc(st, size): i64 {
-    var used = load64(st) + size;
+    var need = (size + 7) & (0 - 8);
+    var used = load64(st) + need;
     if (size > ALLOC_MAX || used > load64(st + 8)) {
         store64(st + 16, 1);
         return 0;
     }
+    var base = load64(st + 24);
+    var at = load64(st);
     store64(st, used);
+    if (base != 0) { return base + at; }
     var p = alloc(size);
     if (p == 0) { panic("samay: out of memory in _budget_alloc"); }
     return p;
@@ -83,19 +92,55 @@ fn _budget_realloc(st, old_ptr, old_size, new_size): i64 { return 0; }
 fn _budget_free(st, ptr): i64 { return 0; }
 fn _budget_reset(st): i64 { return 0; }
 
-# An allocator for `budget` bytes, and its state.
+# An allocator for `budget` bytes on the heap, and its state.
 fn _budget(budget): i64 {
-    var st = alloc(24);
+    var st = alloc(40);
     if (st == 0) { panic("samay: out of memory in _budget"); }
     store64(st, 0);
     store64(st + 8, budget);
     store64(st + 16, 0);
+    store64(st + 24, 0);
+    store64(st + 32, 0);
     var al = allocator_new(&_budget_alloc, &_budget_realloc, &_budget_free, &_budget_reset, st);
     if (al == 0) { panic("samay: out of memory in _budget"); }
     return al;
 }
 
 fn _budget_refused(al): i64 { return load64(allocator_state(al) + 16); }
+
+# 1 to give a restore's tree a mapping of its own; tests set 0 to take the heap path.
+var _RESTORE_MAPPED = 1;
+
+# Mappings _budget_mapped has made and _budget_unmap not yet given back: 0 between
+# restores. Kept so a test can see that every restore lets its tree go.
+var _MAPS_HELD = 0;
+
+# An allocator for `budget` bytes in a mapping of its own, which _budget_unmap gives
+# back. The mapping is only an address range until the tree touches it. Where none can
+# be had (agnos and cx have no mmap), the allocator uses the heap, as through 1.5.0.
+fn _budget_mapped(budget): i64 {
+    var al = _budget(budget);
+    if (_RESTORE_MAPPED == 0) { return al; }
+    var size = (budget + 4095) & (0 - 4096);
+    var base = mmap_anon(size);
+    if (base != 0) {
+        var st = allocator_state(al);
+        store64(st + 24, base);
+        store64(st + 32, size);
+        _MAPS_HELD = _MAPS_HELD + 1;
+    }
+    return al;
+}
+
+fn _budget_unmap(al): i64 {
+    var st = allocator_state(al);
+    var base = load64(st + 24);
+    if (base == 0) { return 0; }
+    cyr_munmap(base, load64(st + 32));
+    store64(st + 24, 0);
+    _MAPS_HELD = _MAPS_HELD - 1;
+    return 0;
+}
 
 fn _log_build_refused(): i64 {
     var sb = str_builder_new();
@@ -119,9 +164,11 @@ fn _log_parse_refused(n): i64 {
     return 0;
 }
 
-# Parse a Str of JSON into a value tree, or 0 if it is malformed or past a limit. Calls
-# the explicit buf+len entry (bayan_json_v_parse_buf_a): `_str` is a Cyrius dispatch
-# suffix, and the 1-arg bayan_json_v_parse form trips a spurious linter arity warning.
+# Parse a Str of JSON into a value tree on the heap, or 0 if it is malformed or past a
+# limit. Only a writer uses it now, for a tree that becomes part of the document it is
+# building; a reader goes through _restore. Calls the explicit buf+len entry
+# (bayan_json_v_parse_buf_a): `_str` is a Cyrius dispatch suffix, and the 1-arg
+# bayan_json_v_parse form trips a spurious linter arity warning.
 fn _parse(s): i64 {
     # A writer past a limit answers 0, and a caller may hand that straight here.
     if (s == 0) { return 0; }
@@ -136,6 +183,35 @@ fn _parse(s): i64 {
         return 0;
     }
     return v;
+}
+
+# --- a restore's tree is let go (1.5.1) ---
+#
+# Once a reader has built its objects the tree is garbage, and alloc() never frees, so
+# through 1.5.0 every restore left about six times its document on the heap for good.
+# Now the tree goes in a mapping of its own and the mapping goes back when the reader
+# returns. That is safe because no reader keeps a pointer into the tree: constructors
+# own every Str they keep (1.1.3), the task and node readers copy theirs, and
+# ai-hwaccel's profile reader copies its own (2.5.5).
+
+# Parse `s`, give the tree to `reader`, and let the tree go. Malformed, past a limit or
+# refused, the answer is 0, as the reader gives for no tree.
+fn _restore(s, reader): i64 {
+    if (s == 0) { return 0; }
+    var n = str_len(s);
+    if (_over_byte_limit(n) == 1) { return 0; }
+    var al = _budget_mapped(n * SAMAY_JSON_MAX_EXPANSION + 4096);
+    var v = bayan_json_v_parse_buf_a(al, str_data(s), n);
+    # A parse that ran out of budget is refused whatever bayan answered: a partial tree
+    # must not pass for the document.
+    if (_budget_refused(al) == 1) {
+        _log_parse_refused(n);
+        v = 0;
+    }
+    var out = 0;
+    if (v != 0) { out = fncall1(reader, v); }
+    _budget_unmap(al);
+    return out;
 }
 
 # Nullable Str -> json value (null if 0, else string).
@@ -305,7 +381,7 @@ fn _log_duplicate_key(what, key): i64 {
     str_builder_add_cstr(sb, "snapshot refused: two ");
     str_builder_add_cstr(sb, what);
     str_builder_add_cstr(sb, " named '");
-    str_builder_add(sb, key);
+    _samay_log_add(sb, key, 128);
     str_builder_add_cstr(sb, "'");
     var msg = str_builder_build(sb);
     sakshi_error(str_data(msg), str_len(msg));
@@ -327,8 +403,47 @@ fn _jv_uint(obj, key, dflt): i64 {
 fn _log_profile_skip(node_id): i64 {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "node '");
-    str_builder_add(sb, node_id);
+    _samay_log_add(sb, node_id, 128);
     str_builder_add_cstr(sb, "': accelerator profile omitted from snapshot (unserializable field)");
+    var msg = str_builder_build(sb);
+    sakshi_warn(str_data(msg), str_len(msg));
+    return 0;
+}
+
+# 1 if a node record has more profiles than SAMAY_MAX_NODE_DEVICES, and says so. The
+# node is refused, as node_capacity_add_accel refuses the profile past it (ADR-0018).
+fn _over_device_ceiling(v, nid): i64 {
+    var arr = bayan_json_v_obj_get_by_cstr(v, "accel_profiles");
+    if (arr == 0) { return 0; }
+    if (bayan_json_v_arr_len(arr) <= SAMAY_MAX_NODE_DEVICES) { return 0; }
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "node '");
+    _samay_log_add(sb, nid, 128);
+    str_builder_add_cstr(sb, "' refused: more accelerator profiles than ");
+    str_builder_add_int(sb, SAMAY_MAX_NODE_DEVICES);
+    var msg = str_builder_build(sb);
+    sakshi_error(str_data(msg), str_len(msg));
+    return 1;
+}
+
+# A profile samay could not have written: ai-hwaccel's writer always gives its type,
+# device and memory, and has since before 1.0.2. Without them a `{}` restored into a
+# 184-byte profile, so 3 bytes of text bought 60 of heap, past anything ADR-0014 counted.
+fn _profile_shaped(el): i64 {
+    if (bayan_json_v_is_obj(el) == 0) { return 0; }
+    if (bayan_json_v_obj_get_by_cstr(el, "accel_type_id") == 0) { return 0; }
+    if (bayan_json_v_obj_get_by_cstr(el, "device_id") == 0) { return 0; }
+    if (bayan_json_v_obj_get_by_cstr(el, "memory_bytes") == 0) { return 0; }
+    var bad = _jv_not_num(el, "accel_type_id") + _jv_not_num(el, "device_id") + _jv_not_num(el, "memory_bytes");
+    if (bad != 0) { return 0; }
+    return 1;
+}
+
+fn _log_profile_unshaped(node_id): i64 {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "node '");
+    _samay_log_add(sb, node_id, 128);
+    str_builder_add_cstr(sb, "': accelerator profile refused on restore (no type, device or memory); capacity lost");
     var msg = str_builder_build(sb);
     sakshi_warn(str_data(msg), str_len(msg));
     return 0;
@@ -339,7 +454,7 @@ fn _log_profile_skip(node_id): i64 {
 fn _log_profile_refused(node_id): i64 {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "node '");
-    str_builder_add(sb, node_id);
+    _samay_log_add(sb, node_id, 128);
     str_builder_add_cstr(sb, "': accelerator profile refused on restore (out of range); capacity lost");
     var msg = str_builder_build(sb);
     sakshi_warn(str_data(msg), str_len(msg));
@@ -367,14 +482,18 @@ fn _rr_node(req): i64 {
     bayan_json_v_obj_set(o, str_from("network"), bayan_json_v_int_new(ResourceReq_network(req)));
     bayan_json_v_obj_set(o, str_from("disk_mb"), bayan_json_v_int_new(ResourceReq_disk_mb(req)));
     # Only a request that is not one whole device writes these, so a snapshot that
-    # uses neither is what 1.4.6 wrote (ADR-0016). The derive writes them always.
+    # uses neither is what 1.4.6 wrote (ADR-0016). They go as placement reads them: a 0
+    # left by a setter or the derive's decoder is one whole device, and wrote its keys
+    # through 1.5.0, which the next restore then dropped. The derive writes them always.
+    var devices = _req_devices(req);
+    var share = _req_share(req);
     var whole_one = 0;
-    if (ResourceReq_accel_devices(req) == 1) {
-        if (ResourceReq_accel_share(req) == SAMAY_ACCEL_WHOLE) { whole_one = 1; }
+    if (devices == 1) {
+        if (share == SAMAY_ACCEL_WHOLE) { whole_one = 1; }
     }
     if (whole_one == 0) {
-        bayan_json_v_obj_set(o, str_from("accel_devices"), bayan_json_v_int_new(ResourceReq_accel_devices(req)));
-        bayan_json_v_obj_set(o, str_from("accel_share"), bayan_json_v_int_new(ResourceReq_accel_share(req)));
+        bayan_json_v_obj_set(o, str_from("accel_devices"), bayan_json_v_int_new(devices));
+        bayan_json_v_obj_set(o, str_from("accel_share"), bayan_json_v_int_new(share));
     }
     return o;
 }
@@ -397,8 +516,15 @@ fn _rr_from(obj, key): i64 {
 fn _rr_read(el): i64 {
     if (el == 0) { return 0; }
     if (bayan_json_v_is_obj(el) == 0) { return 0; }
-    # Require a mandatory key, so a wrong-shaped object is rejected too.
+    # Every field the derive writes, each of which every release since 1.0.2 has written,
+    # so a wrong-shaped object is refused too (ADR-0005). Through 1.5.0 only cpu_cores
+    # was required, and `{"cpu_cores":1}` read as a request for nothing else.
     if (bayan_json_v_obj_get_by_cstr(el, "cpu_cores") == 0) { return 0; }
+    if (bayan_json_v_obj_get_by_cstr(el, "memory_mb") == 0) { return 0; }
+    if (bayan_json_v_obj_get_by_cstr(el, "accel_req") == 0) { return 0; }
+    if (bayan_json_v_obj_get_by_cstr(el, "accel_min_chips") == 0) { return 0; }
+    if (bayan_json_v_obj_get_by_cstr(el, "network") == 0) { return 0; }
+    if (bayan_json_v_obj_get_by_cstr(el, "disk_mb") == 0) { return 0; }
     var bad = _jv_not_num(el, "cpu_cores") + _jv_not_num(el, "memory_mb") + _jv_not_num(el, "accel_req")
     + _jv_not_num(el, "accel_min_chips") + _jv_not_flag(el, "network") + _jv_not_num(el, "disk_mb")
     + _jv_not_num(el, "accel_devices") + _jv_not_num(el, "accel_share");
@@ -434,10 +560,25 @@ fn _ce_node(expr): i64 {
     return o;
 }
 
-fn _ce_mask_ok(el, key): i64 {
+# 1 if `key` is a number with at least one bit set and none outside `valid`: the
+# values its field can take. An empty mask, or one with only bits no expression sets
+# (Sunday as 7, minute 60), restored into an entry that never fired, with no log line.
+fn _ce_mask_ok(el, key, valid): i64 {
     if (bayan_json_v_obj_get_by_cstr(el, key) == 0) { return 0; }
     if (_jv_not_num(el, key) == 1) { return 0; }
+    var m = _jv_int(el, key, 0);
+    if (m == 0) { return 0; }
+    if ((m & valid) != m) { return 0; }
     return 1;
+}
+
+# A star flag, or, absent, what the mask says: a whole field is a star. 1.0.2 wrote no
+# flags, and reading one as 0 put an expression such as `0 0 1 * *` under the OR rule,
+# firing daily instead of monthly.
+fn _ce_star(el, key, mask, whole): i64 {
+    if (bayan_json_v_obj_get_by_cstr(el, key) != 0) { return _jv_bool01(el, key, 0); }
+    if (mask == whole) { return 1; }
+    return 0;
 }
 
 # json node (at key) -> CronExpr, or 0 if absent / not an object / not
@@ -451,12 +592,14 @@ fn _ce_from(obj, key): i64 {
 fn _ce_read(el): i64 {
     if (el == 0) { return 0; }
     if (bayan_json_v_is_obj(el) == 0) { return 0; }
-    # Every mask, and each a number: a missing one reads as 0, which matches nothing.
-    if (_ce_mask_ok(el, "minute_mask") == 0) { return 0; }
-    if (_ce_mask_ok(el, "hour_mask") == 0) { return 0; }
-    if (_ce_mask_ok(el, "dom_mask") == 0) { return 0; }
-    if (_ce_mask_ok(el, "month_mask") == 0) { return 0; }
-    if (_ce_mask_ok(el, "dow_mask") == 0) { return 0; }
+    # Every mask, a number, and one an expression could produce: a missing one reads as
+    # 0, which matches nothing. Minutes 0-59, hours 0-23, days 1-31, months 1-12, days of
+    # the week 0-6 (the parser folds 7 to 0).
+    if (_ce_mask_ok(el, "minute_mask", (1 << 60) - 1) == 0) { return 0; }
+    if (_ce_mask_ok(el, "hour_mask", (1 << 24) - 1) == 0) { return 0; }
+    if (_ce_mask_ok(el, "dom_mask", (1 << 32) - 2) == 0) { return 0; }
+    if (_ce_mask_ok(el, "month_mask", (1 << 13) - 2) == 0) { return 0; }
+    if (_ce_mask_ok(el, "dow_mask", (1 << 7) - 1) == 0) { return 0; }
     if (_jv_not_flag(el, "dom_star") + _jv_not_flag(el, "dow_star") != 0) { return 0; }
     var p = alloc(56);   # 7 fields * 8 — mirrors cron_expr_parse
     # NOT `return 0`: this function already returns 0 for ADR-0005's "absent or
@@ -471,8 +614,8 @@ fn _ce_read(el): i64 {
     CronExpr_set_dow_mask(p, _jv_int(el, "dow_mask", 0));
     # The star flags drive the Vixie AND/OR branch and are compared with
     # `== 1`, so they must be exactly 0 or 1.
-    CronExpr_set_dom_star(p, _jv_bool01(el, "dom_star", 0));
-    CronExpr_set_dow_star(p, _jv_bool01(el, "dow_star", 0));
+    CronExpr_set_dom_star(p, _ce_star(el, "dom_star", CronExpr_dom_mask(p), (1 << 32) - 2));
+    CronExpr_set_dow_star(p, _ce_star(el, "dow_star", CronExpr_dow_mask(p), (1 << 7) - 1));
     return p;
 }
 
@@ -484,9 +627,9 @@ fn _ce_read(el): i64 {
 # the derive writes, and answer 0 for one missing or of the wrong type (ADR-0005). A
 # ResourceReq and a CronExpr read as they do nested in a snapshot.
 
-fn resource_req_from_json_str(s): i64 { return _rr_read(_parse(s)); }
+fn resource_req_from_json_str(s): i64 { return _restore(s, &_rr_read); }
 
-fn cron_expr_from_json_str(s): i64 { return _ce_read(_parse(s)); }
+fn cron_expr_from_json_str(s): i64 { return _restore(s, &_ce_read); }
 
 # 1 if `key` is present and a number.
 fn _jv_has_num(v, key): i64 {
@@ -494,9 +637,9 @@ fn _jv_has_num(v, key): i64 {
     return 1 - _jv_not_num(v, key);
 }
 
-fn scheduling_decision_from_json_str(s): i64 {
-    var v = _parse(s);
-    if (v == 0) { return 0; }
+fn scheduling_decision_from_json_str(s): i64 { return _restore(s, &_sd_read); }
+
+fn _sd_read(v): i64 {
     if (bayan_json_v_is_obj(v) == 0) { return 0; }
     var tid = _jv_str(v, "task_id");
     var node = _jv_str(v, "assigned_node");
@@ -505,12 +648,16 @@ fn scheduling_decision_from_json_str(s): i64 {
     if (node == 0) { return 0; }
     if (reason == 0) { return 0; }
     if (_jv_has_num(v, "score") == 0) { return 0; }
-    return scheduling_decision_new(tid, node, reason, _jv_f64(v, "score", f64_from(0)));
+    # A score past what a writer can carry (1e400 reads as +Inf) wrote back as null, and
+    # did not read back (1.5.1).
+    var score = _jv_f64(v, "score", f64_from(0));
+    if (_f64_is_finite(score) == 0) { return 0; }
+    return scheduling_decision_new(tid, node, reason, score);
 }
 
-fn preemption_action_from_json_str(s): i64 {
-    var v = _parse(s);
-    if (v == 0) { return 0; }
+fn preemption_action_from_json_str(s): i64 { return _restore(s, &_pa_read); }
+
+fn _pa_read(v): i64 {
     if (bayan_json_v_is_obj(v) == 0) { return 0; }
     var victim = _jv_str(v, "preempted_task_id");
     var by = _jv_str(v, "preempting_task_id");
@@ -521,9 +668,9 @@ fn preemption_action_from_json_str(s): i64 {
     return preemption_action_new(victim, by, reason);
 }
 
-fn scheduler_stats_from_json_str(s): i64 {
-    var v = _parse(s);
-    if (v == 0) { return 0; }
+fn scheduler_stats_from_json_str(s): i64 { return _restore(s, &_ss_read); }
+
+fn _ss_read(v): i64 {
     if (bayan_json_v_is_obj(v) == 0) { return 0; }
     var have = _jv_has_num(v, "total_tasks") + _jv_has_num(v, "queued") + _jv_has_num(v, "running")
     + _jv_has_num(v, "completed") + _jv_has_num(v, "failed") + _jv_has_num(v, "average_wait_time_ms")
@@ -579,7 +726,7 @@ fn training_job_template_from_jsonv(v): i64 {
 }
 
 fn training_job_template_to_json_str(t): i64 { return _build_or_0(training_job_template_to_jsonv(t)); }
-fn training_job_template_from_json_str(s): i64 { return training_job_template_from_jsonv(_parse(s)); }
+fn training_job_template_from_json_str(s): i64 { return _restore(s, &training_job_template_from_jsonv); }
 
 # ---------------------------------------------------------------------------
 # CronTaskTemplate — scalar/Str + nested ResourceReq
@@ -614,7 +761,7 @@ fn cron_task_template_from_jsonv(v): i64 {
 }
 
 fn cron_task_template_to_json_str(t): i64 { return _build_or_0(cron_task_template_to_jsonv(t)); }
-fn cron_task_template_from_json_str(s): i64 { return cron_task_template_from_jsonv(_parse(s)); }
+fn cron_task_template_from_json_str(s): i64 { return _restore(s, &cron_task_template_from_jsonv); }
 
 # ---------------------------------------------------------------------------
 # ScheduledTask — nested ResourceReq + nullable fail_reason and node fields
@@ -727,7 +874,7 @@ fn scheduled_task_to_jsonv(t): i64 {
 }
 
 fn scheduled_task_to_json_str(t): i64 { return _build_or_0(scheduled_task_to_jsonv(t)); }
-fn scheduled_task_from_json_str(s): i64 { return scheduled_task_from_jsonv(_parse(s)); }
+fn scheduled_task_from_json_str(s): i64 { return _restore(s, &scheduled_task_from_jsonv); }
 
 # ---------------------------------------------------------------------------
 # NodeCapacity — f64 fields + a vec of ai-hwaccel accelerator profiles
@@ -785,26 +932,35 @@ fn node_capacity_from_jsonv(v): i64 {
     + _jv_not_num(v, "available_disk_mb") + _jv_not_num(v, "running_tasks");
     if (bad != 0) { return 0; }
     if (_jv_list_ok(v, "accel_profiles") == 0) { return 0; }
-    var p = alloc(88);   # 11 fields * 8 — MUST track node_capacity_new
+    if (_over_device_ceiling(v, nid) == 1) { return 0; }
+    var p = alloc(96);   # 12 fields * 8 — MUST track node_capacity_new
     if (p == 0) { panic("samay: out of memory in node_capacity_from_jsonv"); }
     NodeCapacity_set_node_id(p, _samay_own(nid, "samay: out of memory in node_capacity_from_jsonv"));
     _node_init_holds(p);
-    # Enforce `0 <= available <= total` on all three axes. Without it a
+    # Enforce `available <= total` on all three axes. Without it a
     # snapshot carrying available_cpu=1e18 against total_cpu=1.0 gives a
     # hugely negative utilization, and that node then wins every
     # _best_fit_node argmin forever. Cores take node_capacity_new's domain.
+    # Available can be below zero: an over-committed node writes that, and the
+    # tasks settle every node anyway (1.5.1, ADR-0007).
     var tcpu = _req_cpu(_jv_f64(v, "total_cpu", f64_from(0)));
-    var acpu = _req_cpu(_jv_f64(v, "available_cpu", f64_from(0)));
+    var acpu = _jv_f64(v, "available_cpu", f64_from(0));
+    if (f64_eq(acpu, acpu) == 0) { acpu = f64_from(0); }
+    if (f64_lt(acpu, f64_sub(f64_from(0), f64_from(1000000000000000000))) == 1) {
+        acpu = f64_sub(f64_from(0), f64_from(1000000000000000000));
+    }
     if (f64_gt(acpu, tcpu) == 1) { acpu = tcpu; }
     NodeCapacity_set_total_cpu(p, tcpu);
     NodeCapacity_set_available_cpu(p, acpu);
     var tmem = _jv_uint(v, "total_memory_mb", 0);
-    var amem = _jv_uint(v, "available_memory_mb", 0);
+    var amem = _jv_int(v, "available_memory_mb", 0);
+    if (amem < _CAPACITY_FLOOR) { amem = _CAPACITY_FLOOR; }
     if (amem > tmem) { amem = tmem; }
     NodeCapacity_set_total_memory_mb(p, tmem);
     NodeCapacity_set_available_memory_mb(p, amem);
     var tdisk = _jv_uint(v, "total_disk_mb", 0);
-    var adisk = _jv_uint(v, "available_disk_mb", 0);
+    var adisk = _jv_int(v, "available_disk_mb", 0);
+    if (adisk < _CAPACITY_FLOOR) { adisk = _CAPACITY_FLOOR; }
     if (adisk > tdisk) { adisk = tdisk; }
     NodeCapacity_set_total_disk_mb(p, tdisk);
     NodeCapacity_set_available_disk_mb(p, adisk);
@@ -824,11 +980,16 @@ fn node_capacity_from_jsonv(v): i64 {
             # 16 TiB of device memory. The node stays, without that profile, so
             # this is a real capacity loss and it is logged (samay never
             # silently drops).
-            var prof = profile_from_json(bayan_json_v_arr_get(arr, i));
-            if (prof != 0) {
-                vec_push(profs, prof);
+            var el = bayan_json_v_arr_get(arr, i);
+            if (_profile_shaped(el) == 0) {
+                _log_profile_unshaped(nid);
             } else {
-                _log_profile_refused(nid);
+                var prof = profile_from_json(el);
+                if (prof != 0) {
+                    vec_push(profs, prof);
+                } else {
+                    _log_profile_refused(nid);
+                }
             }
             i = i + 1;
         }
@@ -838,7 +999,7 @@ fn node_capacity_from_jsonv(v): i64 {
 }
 
 fn node_capacity_to_json_str(node): i64 { return _build_or_0(node_capacity_to_jsonv(node)); }
-fn node_capacity_from_json_str(s): i64 { return node_capacity_from_jsonv(_parse(s)); }
+fn node_capacity_from_json_str(s): i64 { return _restore(s, &node_capacity_from_jsonv); }
 
 # ---------------------------------------------------------------------------
 # CronEntry — nested CronExpr + nested CronTaskTemplate
@@ -852,6 +1013,17 @@ fn cron_entry_to_jsonv(e): i64 {
     bayan_json_v_obj_set(o, str_from("enabled"), bayan_json_v_int_new(CronEntry_enabled(e)));
     bayan_json_v_obj_set(o, str_from("last_fired"), bayan_json_v_int_new(CronEntry_last_fired(e)));
     bayan_json_v_obj_set(o, str_from("missed_policy"), bayan_json_v_int_new(CronEntry_missed_policy(e)));
+    # Written only when set, so an entry that needs neither keeps 1.5.0's bytes. Without
+    # the first, a restored disabled entry said again that it gave up time it never owed;
+    # without the second, a clock reset could not be undone across a restore (ADR-0006).
+    if (CronEntry_enabled(e) == 0) {
+        if (CronEntry_disabled_seen(e) == 1) {
+            bayan_json_v_obj_set(o, str_from("disabled_seen"), bayan_json_v_int_new(1));
+        }
+    }
+    if (CronEntry_reset_from(e) != 0) {
+        bayan_json_v_obj_set(o, str_from("reset_from"), bayan_json_v_int_new(CronEntry_reset_from(e)));
+    }
     return o;
 }
 
@@ -867,7 +1039,8 @@ fn cron_entry_from_jsonv(v): i64 {
     # Both public add paths reject an empty name (src/cron.cyr); restore
     # writes the map directly, so it has to enforce the same invariant.
     if (str_len(name) == 0) { return 0; }
-    var bad = _jv_not_flag(v, "enabled") + _jv_not_num(v, "last_fired") + _jv_not_num(v, "missed_policy");
+    var bad = _jv_not_flag(v, "enabled") + _jv_not_num(v, "last_fired") + _jv_not_num(v, "missed_policy")
+    + _jv_not_flag(v, "disabled_seen") + _jv_not_num(v, "reset_from");
     if (bad != 0) { return 0; }
     var mp = _jv_int(v, "missed_policy", CRON_CATCHUP);
     if (mp != CRON_SKIP) { mp = CRON_CATCHUP; }
@@ -875,11 +1048,13 @@ fn cron_entry_from_jsonv(v): i64 {
     # leave the entry permanently dormant while reporting as enabled.
     var e = cron_entry_new(name, expr, tmpl, _jv_bool01(v, "enabled", 1), mp);
     CronEntry_set_last_fired(e, _jv_uint(v, "last_fired", 0));
+    if (CronEntry_enabled(e) == 0) { CronEntry_set_disabled_seen(e, _jv_bool01(v, "disabled_seen", 0)); }
+    CronEntry_set_reset_from(e, _jv_uint(v, "reset_from", 0));
     return e;
 }
 
 fn cron_entry_to_json_str(e): i64 { return _build_or_0(cron_entry_to_jsonv(e)); }
-fn cron_entry_from_json_str(s): i64 { return cron_entry_from_jsonv(_parse(s)); }
+fn cron_entry_from_json_str(s): i64 { return _restore(s, &cron_entry_from_jsonv); }
 
 # ---------------------------------------------------------------------------
 # CronScheduler — map of CronEntry keyed by name
@@ -933,7 +1108,7 @@ fn cron_scheduler_from_jsonv(v): i64 {
 }
 
 fn cron_scheduler_to_json_str(c): i64 { return _build_or_0(cron_scheduler_to_jsonv(c)); }
-fn cron_scheduler_from_json_str(s): i64 { return cron_scheduler_from_jsonv(_parse(s)); }
+fn cron_scheduler_from_json_str(s): i64 { return _restore(s, &cron_scheduler_from_jsonv); }
 
 # ---------------------------------------------------------------------------
 # TaskScheduler — tasks map + nodes map (the top-level snapshot)
@@ -948,9 +1123,14 @@ fn task_scheduler_to_jsonv(s): i64 {
     var tarr = bayan_json_v_arr_new();
     vec_sort_by(tvals, &_task_id_cmp);
     var tn = vec_len(tvals);
+    var list = vec_new();
+    if (list == 0) { panic("samay: out of memory in task_scheduler_to_jsonv"); }
     var ti = 0;
     while (ti < tn) {
-        bayan_json_v_arr_push(tarr, scheduled_task_to_jsonv(vec_get(tvals, ti)));
+        var t = vec_get(tvals, ti);
+        var tj = scheduled_task_to_jsonv(t);
+        _held_profiles_node(s, t, tj, list);
+        bayan_json_v_arr_push(tarr, tj);
         ti = ti + 1;
     }
     bayan_json_v_obj_set(o, str_from("tasks"), tarr);
@@ -968,22 +1148,70 @@ fn task_scheduler_to_jsonv(s): i64 {
     return o;
 }
 
+# A task holding devices records which, as profile indices on its node, so a restore
+# takes exactly those. Rebuilt by replay in placement order, they double-booked a device
+# once a task between them had finished (1.5.1, ADR-0018). Written only for a task that
+# holds a device, so a snapshot without any is what 1.5.0 wrote.
+fn _held_profiles_node(s, t, tj, list): i64 {
+    var ron = ScheduledTask_reserved_on(t);
+    if (ron == 0) { return 0; }
+    var node = map_get(TaskScheduler_nodes(s), ron);
+    if (node == 0) { return 0; }
+    if (_accel_held_list(node, ScheduledTask_resource_requirements(t), list) == 0) { return 0; }
+    var arr = bayan_json_v_arr_new();
+    var n = vec_len(list);
+    var i = 0;
+    while (i < n) {
+        bayan_json_v_arr_push(arr, bayan_json_v_int_new(vec_get(list, i)));
+        i = i + 1;
+    }
+    bayan_json_v_obj_set(tj, str_from("held_profiles"), arr);
+    return 0;
+}
+
+# A task's recorded profile indices as a vec, 0 if it has none, or -1 if the key is not a
+# list of whole numbers no longer than SAMAY_MAX_NODE_DEVICES, which refuses the task.
+fn _held_profiles_read(el): i64 {
+    var arr = bayan_json_v_obj_get_by_cstr(el, "held_profiles");
+    if (arr == 0) { return 0; }
+    if (bayan_json_v_is_arr(arr) == 0) { return 0 - 1; }
+    var n = bayan_json_v_arr_len(arr);
+    if (n > SAMAY_MAX_NODE_DEVICES) { return 0 - 1; }
+    var list = vec_new();
+    if (list == 0) { panic("samay: out of memory in _held_profiles_read"); }
+    var i = 0;
+    while (i < n) {
+        var x = bayan_json_v_arr_get(arr, i);
+        if (bayan_json_v_is_int(x) == 0) { return 0 - 1; }
+        vec_push(list, bayan_json_v_int(x));
+        i = i + 1;
+    }
+    return list;
+}
+
 fn task_scheduler_from_jsonv(v): i64 {
     if (v == 0) { return 0; }
     if (bayan_json_v_is_obj(v) == 0) { return 0; }
     if (_jv_list_ok(v, "tasks") == 0) { return 0; }
     if (_jv_list_ok(v, "nodes") == 0) { return 0; }
     var s = task_scheduler_new();
+    var recorded = map_new_str();
+    if (recorded == 0) { panic("samay: out of memory in task_scheduler_from_jsonv"); }
     var dropped = 0;
     var tarr = bayan_json_v_obj_get_by_cstr(v, "tasks");
     if (tarr != 0) {
         var tn = bayan_json_v_arr_len(tarr);
         var ti = 0;
         while (ti < tn) {
-            var t = scheduled_task_from_jsonv(bayan_json_v_arr_get(tarr, ti));
+            var tel = bayan_json_v_arr_get(tarr, ti);
+            var t = scheduled_task_from_jsonv(tel);
+            var held = 0;
+            if (t != 0) { held = _held_profiles_read(tel); }
+            if (held < 0) { t = 0; }
             if (t == 0) {
                 dropped = dropped + 1;
             } else {
+                if (held != 0) { map_set(recorded, ScheduledTask_task_id(t), held); }
                 if (map_has(TaskScheduler_tasks(s), ScheduledTask_task_id(t)) == 1) {
                     _log_duplicate_key("tasks", ScheduledTask_task_id(t));
                     return 0;
@@ -1005,6 +1233,7 @@ fn task_scheduler_from_jsonv(v): i64 {
             # write side. Skipping it would lose a whole node and report success.
             if (bayan_json_v_is_obj(el) == 1) {
                 if (_jv_list_ok(el, "accel_profiles") == 0) { return 0; }
+                if (_over_device_ceiling(el, _jv_str(el, "node_id")) == 1) { return 0; }
             }
             var node = node_capacity_from_jsonv(el);
             if (node == 0) {
@@ -1020,9 +1249,9 @@ fn task_scheduler_from_jsonv(v): i64 {
         }
     }
     _log_records_dropped(dropped, "nodes");
-    _settle_capacity(s);
+    _settle_capacity(s, recorded);
     return s;
 }
 
 fn task_scheduler_to_json_str(s): i64 { return _build_or_0(task_scheduler_to_jsonv(s)); }
-fn task_scheduler_from_json_str(s): i64 { return task_scheduler_from_jsonv(_parse(s)); }
+fn task_scheduler_from_json_str(s): i64 { return _restore(s, &task_scheduler_from_jsonv); }

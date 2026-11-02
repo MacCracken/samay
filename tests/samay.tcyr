@@ -3082,7 +3082,8 @@ fn test_sec_identity_and_flags() {
     # `enabled` is compared with `== 1`, so a truthy non-1 value would leave
     # the entry dormant while reporting as enabled.
     var tmpl = "{\"name\":\"c\",\"description\":\"d\",\"agent_id\":\"a\",\"priority\":5,\"resource_requirements\":{\"cpu_cores\":1.0,\"memory_mb\":256,\"accel_req\":0,\"accel_min_chips\":0,\"network\":0,\"disk_mb\":0}}";
-    var ce = "{\"minute_mask\":1,\"hour_mask\":1,\"dom_mask\":1,\"month_mask\":1,\"dow_mask\":1,\"dom_star\":7,\"dow_star\":0}";
+    # Day 1 of January: masks an expression can produce, which restore requires (1.5.1).
+    var ce = "{\"minute_mask\":1,\"hour_mask\":1,\"dom_mask\":2,\"month_mask\":2,\"dow_mask\":1,\"dom_star\":7,\"dow_star\":0}";
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"name\":\"e\",\"expr\":");
     str_builder_add_cstr(sb, ce);
@@ -3233,8 +3234,12 @@ fn test_ownership_retained_strs() {
 
     # 0 is the None sentinel for optional Str fields and must pass through
     # UNCLONED — not crash in str_len(0), and not panic as if it were an OOM.
+    var tnone = training_job_template_new(str_from("m"), TM_LORA, str_from("d"), 0, 60, 0);
+    assert_eq(TrainingJobTemplate_target_node(tnone), 0, "None (0) passes through, not cloned");
+    # A field that is never None takes the empty Str instead (1.5.1): a null one was
+    # kept, and crashed the first writer that met it.
     var none = preemption_action_new(str_from("a"), str_from("b"), 0);
-    assert_eq(PreemptionAction_reason(none), 0, "None (0) passes through, not cloned");
+    assert_eq(str_len(PreemptionAction_reason(none)), 0, "a null reason is the empty Str");
     return 0;
 }
 
@@ -3695,10 +3700,20 @@ fn _req_derive_text(r) {
     return str_builder_build(sb);
 }
 
-# The derive's text as a snapshot writes it: one whole device leaves out the two keys
-# 1.5.0 added, so the bytes are 1.4.6's (ADR-0016).
+# The derive's text as a snapshot writes it: devices and share as placement reads them
+# (1.5.1), and one whole device leaves out the two keys 1.5.0 added, so the bytes are
+# 1.4.6's (ADR-0016).
 fn _req_wire_text(r) {
-    var text = _req_derive_text(r);
+    var w = resource_req_new(f64_from(0), 0, 0, 0, 0, 0);
+    ResourceReq_set_cpu_cores(w, ResourceReq_cpu_cores(r));
+    ResourceReq_set_memory_mb(w, ResourceReq_memory_mb(r));
+    ResourceReq_set_accel_req(w, ResourceReq_accel_req(r));
+    ResourceReq_set_accel_min_chips(w, ResourceReq_accel_min_chips(r));
+    ResourceReq_set_network(w, ResourceReq_network(r));
+    ResourceReq_set_disk_mb(w, ResourceReq_disk_mb(r));
+    ResourceReq_set_accel_devices(w, _req_devices(r));
+    ResourceReq_set_accel_share(w, _req_share(r));
+    var text = _req_derive_text(w);
     var tail = str_from(",\"accel_devices\":1,\"accel_share\":1000}");
     if (str_ends_with(text, tail) == 0) { return text; }
     var sb = str_builder_new();
@@ -5139,10 +5154,13 @@ fn test_restore_settles_capacity() {
     var g3 = _snap(ghosts, _snap_node("7.0", 8192, 1));
     assert_eq(_cpu_milli(map_get(TaskScheduler_nodes(g3), str_from("n"))), 7000, "the real hold is found");
 
-    # Over-committed, it floors at zero rather than going negative.
+    # Over-committed, it counts below zero (1.5.1, ADR-0007). Through 1.5.0 it stopped at
+    # zero, so one task's release gave back 6 cores where 2 were free.
     var over = _snap(_v2(_snap_task("a", TASK_RUNNING, 6, "n", "n"), _snap_task("b", TASK_RUNNING, 6, "n", "n")), _snap_node("0.0", 8192, 2));
     var on = map_get(TaskScheduler_nodes(over), str_from("n"));
-    assert_eq(_cpu_milli(on), 0, "floors at zero");
+    assert_eq(_cpu_milli(on), 0 - 4000, "12 cores held on 8 leaves -4");
+    task_scheduler_complete_task(over, str_from("a"), TASK_COMPLETED);
+    assert_eq(_cpu_milli(on), 2000, "and one task's release leaves 2 free, not 6");
     return 0;
 }
 
@@ -5294,6 +5312,9 @@ fn test_restore_refuses_wrong_types() {
 
     # Inside the requirement. Each reaches a task that would otherwise fit any node.
     var rr = _pairs("cpu_cores", "1.0", "memory_mb", "1", "accel_req", "0", "accel_min_chips", "0", "network", "0");
+    # Every field is required since 1.5.1, disk_mb too.
+    vec_push(rr, "disk_mb");
+    vec_push(rr, "0");
     assert_eq(scheduled_task_from_json_str(_task_wrapping(str_cstr(_doc_with(rr, "", "")))) != 0, 1, "the requirement is valid to begin with");
     var keys = _keys("cpu_cores", "memory_mb", "accel_req", "accel_min_chips", "network", "disk_mb", 0);
     var i = 0;
@@ -5306,7 +5327,6 @@ fn test_restore_refuses_wrong_types() {
             if (streq(vec_get(rr, k), vec_get(keys, i)) == 1) { vec_push(v, "\"8\""); } else { vec_push(v, vec_get(rr, k + 1)); }
             k = k + 2;
         }
-        if (streq(vec_get(keys, i), "disk_mb") == 1) { vec_push(v, "disk_mb"); vec_push(v, "\"8\""); }
         if (scheduled_task_from_json_str(_task_wrapping(str_cstr(_doc_with(v, "", "")))) != 0) { wrong = wrong + 1; }
         i = i + 1;
     }
@@ -5352,7 +5372,9 @@ fn test_restore_reads_json_booleans() {
     assert_eq(CronEntry_enabled(cron_entry_from_json_str(_doc_with(on, "", ""))), 1, "true is on");
     var off = _pairs("name", "\"e\"", "expr", _expr_text(), "task_template", str_cstr(doc), "enabled", "false", 0, 0);
     assert_eq(CronEntry_enabled(cron_entry_from_json_str(_doc_with(off, "", ""))), 0, "false is off");
-    var net = _pairs("cpu_cores", "1.0", "network", "true", 0, 0, 0, 0, 0, 0);
+    var net = _pairs("cpu_cores", "1.0", "memory_mb", "1", "accel_req", "0", "accel_min_chips", "0", "network", "true");
+    vec_push(net, "disk_mb");
+    vec_push(net, "0");
     var t = scheduled_task_from_json_str(_task_wrapping(str_cstr(_doc_with(net, "", ""))));
     assert_eq(ResourceReq_network(ScheduledTask_resource_requirements(t)), 1, "network true is 1");
     return 0;
@@ -5439,7 +5461,8 @@ fn test_restore_no_easier_to_place() {
     assert_eq(node_capacity_can_fit(node, ScheduledTask_resource_requirements(a2)), 0, "too big after");
     assert_eq(node_capacity_can_fit(node, ScheduledTask_resource_requirements(b2)), 0, "+Inf after");
     # A negative requirement in a snapshot still clamps, and 1e400 cannot become 0.
-    var wire = scheduled_task_from_json_str(_task_wrapping("{\"cpu_cores\":1e400}"));
+    var wire = scheduled_task_from_json_str(_task_wrapping(
+        "{\"cpu_cores\":1e400,\"memory_mb\":1,\"accel_req\":0,\"accel_min_chips\":0,\"network\":0,\"disk_mb\":0}"));
     assert_eq(node_capacity_can_fit(node, ScheduledTask_resource_requirements(wire)), 0, "an overflowing number stays too big");
     return 0;
 }
@@ -5597,16 +5620,16 @@ fn test_accel_pick_order() {
     node_capacity_add_accel(n, profile_cuda(1, big));
     node_capacity_add_accel(n, profile_cuda(2, small));
     var gpu = resource_req_new(f64_from(1), 1, REQ_GPU, 0, 0, 0);
-    assert_eq(_accel_pick(n, gpu, 1, 0 - 1), 1, "most memory first");
+    assert_eq(_accel_pick(n, gpu, 1), 1, "most memory first");
     var req = resource_req_new(f64_from(1), 1, REQ_GPU, 0, 0, 0);
     node_capacity_reserve(n, req);
     assert_eq(_accel_used_at(n, 1), SAMAY_ACCEL_WHOLE, "and that is the one taken");
-    assert_eq(_accel_pick(n, gpu, 1, 0 - 1), 0, "then the first of the equals");
+    assert_eq(_accel_pick(n, gpu, 1), 0, "then the first of the equals");
     node_capacity_reserve(n, resource_req_new(f64_from(1), 1, REQ_GPU, 0, 0, 0));
-    assert_eq(_accel_pick(n, gpu, 1, 0 - 1), 2, "then the last free one");
+    assert_eq(_accel_pick(n, gpu, 1), 2, "then the last free one");
     node_capacity_reserve(n, resource_req_new(f64_from(1), 1, REQ_GPU, 0, 0, 0));
-    assert_eq(_accel_pick(n, gpu, 1, 0 - 1), 0 - 1, "none free");
-    assert_eq(_accel_pick(n, gpu, 0, 0 - 1), 1, "among the full ones, the same order");
+    assert_eq(_accel_pick(n, gpu, 1), 0 - 1, "none free");
+    assert_eq(_accel_pick(n, gpu, 0), 1, "among the full ones, the same order");
     # Rank beats memory, in either listing order.
     var m = make_node("m", f64_from(64), 524288);
     node_capacity_add_accel(m, profile_tpu(0, 8, TPU_V5P));
@@ -5614,11 +5637,11 @@ fn test_accel_pick_order() {
     var want = 0;
     if (profile_rank(vec_get(NodeCapacity_accel_profiles(m), 1)) > profile_rank(vec_get(NodeCapacity_accel_profiles(m), 0))) { want = 1; }
     var any = resource_req_new(f64_from(1), 1, REQ_ANY_ACCELERATOR, 1, 0, 0);
-    assert_eq(_accel_pick(m, any, 1, 0 - 1), want, "the better rank");
+    assert_eq(_accel_pick(m, any, 1), want, "the better rank");
     var r = make_node("r", f64_from(64), 524288);
     node_capacity_add_accel(r, profile_cuda(0, big));
     node_capacity_add_accel(r, profile_tpu(0, 8, TPU_V5P));
-    assert_eq(_accel_pick(r, any, 1, 0 - 1), 1 - want, "whichever is listed first");
+    assert_eq(_accel_pick(r, any, 1), 1 - want, "whichever is listed first");
     # A chip count of 0 still takes a chip, and a pod of 0 chips offers none.
     var pod = make_node("p", f64_from(64), 524288);
     node_capacity_add_accel(pod, profile_tpu(0, 2, TPU_V5P));
@@ -5626,7 +5649,7 @@ fn test_accel_pick_order() {
     assert_eq(_accel_used_at(pod, 0), 1, "no chip count means one chip");
     node_capacity_reserve(pod, resource_req_new(f64_from(1), 1, REQ_TPU, 1, 0, 0));
     assert_eq(_accel_used_at(pod, 0), 2, "and exactly the last one fits");
-    assert_eq(_accel_pick(pod, resource_req_new(f64_from(1), 1, REQ_TPU, 1, 0, 0), 1, 0 - 1), 0 - 1, "then the pod is full");
+    assert_eq(_accel_pick(pod, resource_req_new(f64_from(1), 1, REQ_TPU, 1, 0, 0), 1), 0 - 1, "then the pod is full");
     assert_eq(vec_len(NodeCapacity_accel_profiles(node_capacity_with_tpu(make_node("t", f64_from(8), 8192), 0))), 0, "no chips, no profile");
     assert_eq(vec_len(NodeCapacity_accel_profiles(node_capacity_with_tpu(make_node("t", f64_from(8), 8192), 1))), 1, "one chip is a profile");
     return 0;
@@ -5986,6 +6009,10 @@ fn test_json_byte_limit() {
     assert_eq(cron_scheduler_to_json_str(cs), 0, "cron scheduler");
     assert_eq(scheduled_task_to_json_str(make_task("t", 5)), 0, "task");
     assert_eq(node_capacity_to_json_str(make_node("n", f64_from(8), 8192)), 0, "node");
+    _logs_start();
+    assert_eq(node_capacity_to_json_str(_gpu_node("g", 1)), 0, "node with a device");
+    _logs_stop();
+    assert_eq(_logged("node 'g': accelerator profile omitted"), 1, "its profile's text is past the limit too");
     assert_eq(cron_entry_to_json_str(entry), 0, "entry");
     assert_eq(cron_task_template_to_json_str(tmpl), 0, "template");
     assert_eq(training_job_template_to_json_str(training_job_template_new(str_from("m"), TM_LORA, str_from("d"), 0, 0, 0)), 0, "training job");
@@ -6022,7 +6049,8 @@ fn test_json_expansion_limit() {
     assert_eq(task_scheduler_from_json_str(js), 0, "the limit is enforced: 5 times is too few");
     SAMAY_JSON_MAX_EXPANSION = 8;
     assert_eq(task_scheduler_from_json_str(js) != 0, 1, "8 is enough");
-    # The worst shape samay writes: one-letter names, short numbers. 7.2 times, measured.
+    # Close to the worst shape samay writes: one-letter names, short numbers. This document
+    # measures 6.5 times its text; the worst measured, with zeroed numbers, 7.2.
     var c = cron_scheduler_new();
     var e = 0;
     while (e < 300) {
@@ -6040,12 +6068,18 @@ fn test_json_expansion_limit() {
 
 fn test_json_budget_allocator() {
     test_group("json_budget_allocator");
-    var al = _budget(100);
+    # Counted as alloc() takes it, rounded up to 8 (1.5.1): 36 is 40.
+    var al = _budget(104);
     assert_eq(alloc_via(al, 64) != 0, 1, "within the budget");
     assert_eq(alloc_via(al, 36) != 0, 1, "up to it exactly");
     assert_eq(_budget_refused(al), 0, "nothing refused yet");
     assert_eq(alloc_via(al, 8), 0, "one past it is refused");
     assert_eq(_budget_refused(al), 1, "and remembered");
+    var tiny = _budget(16);
+    alloc_via(tiny, 1);
+    alloc_via(tiny, 1);
+    assert_eq(_budget_refused(tiny), 0, "two single bytes take 16");
+    assert_eq(alloc_via(tiny, 1), 0, "and a third does not fit");
     # Past ALLOC_MAX plain alloc() answers 0 too, and bayan_json_v_build exits on it.
     # Here it is a refusal: the writer answers 0 and the process lives.
     var big = _budget(ALLOC_MAX * 4);
@@ -6056,6 +6090,68 @@ fn test_json_budget_allocator() {
     assert_eq(_budget_free(st, 0), 0, "free does nothing");
     assert_eq(_budget_reset(st), 0, "reset does nothing");
     assert_eq(_budget_refused(al), 1, "and leaves the refusal standing");
+    return 0;
+}
+
+# --- v1.5.1: a restore's tree is let go ---
+
+fn test_restore_tree_mapped() {
+    test_group("restore_tree_mapped");
+    # The mapped allocator hands out its mapping in order, 8-aligned, within the budget.
+    var held = _MAPS_HELD;
+    var al = _budget_mapped(4096);
+    var st = allocator_state(al);
+    var base = load64(st + 24);
+    assert_eq(base != 0, 1, "a mapping");
+    assert_eq(_MAPS_HELD, held + 1, "counted while it is held");
+    assert_eq(load64(st + 32), 4096, "of the budget, rounded to a page");
+    var p = alloc_via(al, 5);
+    var q = alloc_via(al, 8);
+    assert_eq(p, base, "the first block at its start");
+    assert_eq(q, base + 8, "the next 8-aligned after it");
+    store64(q, 77);
+    assert_eq(load64(q), 77, "and it is writable");
+    assert_eq(alloc_via(al, 4096), 0, "past the budget is refused");
+    var there = cyr_mprotect(base, 4096, 3);
+    _budget_unmap(al);
+    var gone = cyr_mprotect(base, 4096, 3);
+    assert_eq(there, 0, "its pages are there while mapped");
+    assert_eq(gone < 0, 1, "and gone once it is unmapped");
+    assert_eq(load64(st + 24), 0, "unmapped once");
+    assert_eq(_budget_unmap(al), 0, "and a second unmap does nothing");
+    assert_eq(_MAPS_HELD, held, "so it is counted back once");
+    var odd = _budget_mapped(5000);
+    assert_eq(load64(allocator_state(odd) + 32), 8192, "a budget past a page takes two");
+    _budget_unmap(odd);
+
+    # A restore on the heap path and on the mapped path build the same scheduler.
+    var s = task_scheduler_new();
+    task_scheduler_register_node(s, _gpu_node("g", 2));
+    var i = 0;
+    while (i < 200) {
+        task_scheduler_submit_task(s, make_task("t", 1 + i % 10));
+        i = i + 1;
+    }
+    task_scheduler_schedule_pending(s);
+    var doc = task_scheduler_to_json_str(s);
+    _RESTORE_MAPPED = 0;
+    var before = alloc_used();
+    var heap = task_scheduler_from_json_str(doc);
+    var grew_heap = alloc_used() - before;
+    _RESTORE_MAPPED = 1;
+    before = alloc_used();
+    var mapped = task_scheduler_from_json_str(doc);
+    var grew_mapped = alloc_used() - before;
+    assert_eq(str_eq(task_scheduler_to_json_str(heap), doc), 1, "the heap path writes back what it read");
+    assert_eq(str_eq(task_scheduler_to_json_str(mapped), doc), 1, "and so does the mapped one, its tree gone");
+    # The tree was about six times the document; what stays is the scheduler.
+    assert_eq(grew_heap > 5 * str_len(doc), 1, "on the heap the tree stays");
+    assert_eq(grew_mapped < 2 * str_len(doc), 1, "mapped, only what was restored stays");
+    # Every reader goes the same way, and a refused parse gives its mapping back too.
+    assert_eq(task_scheduler_from_json_str(str_from("[[[[")), 0, "malformed is refused");
+    assert_eq(scheduled_task_from_json_str(str_from("{}")), 0, "a record without its fields is refused");
+    assert_eq(task_scheduler_from_json_str(0), 0, "and no text at all is no scheduler");
+    assert_eq(_MAPS_HELD, 0, "no restore keeps its mapping, read or refused");
     return 0;
 }
 
@@ -7136,6 +7232,1068 @@ fn test_known_shapes_count_devices() {
     return 0;
 }
 
+# --- v1.5.1: the P(-1) audit ---
+
+# A node record with every axis given, for restores that disagree on one at a time.
+fn _snap_node_axes(cpu, mem, disk, rt) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"node_id\":\"n\",\"total_cpu\":8.0,\"available_cpu\":");
+    str_builder_add_cstr(sb, cpu);
+    str_builder_add_cstr(sb, ",\"total_memory_mb\":8192,\"available_memory_mb\":");
+    str_builder_add_int(sb, mem);
+    str_builder_add_cstr(sb, ",\"total_disk_mb\":1000,\"available_disk_mb\":");
+    str_builder_add_int(sb, disk);
+    str_builder_add_cstr(sb, ",\"running_tasks\":");
+    str_builder_add_int(sb, rt);
+    str_builder_add_cstr(sb, ",\"accel_profiles\":[]}");
+    return str_builder_build(sb);
+}
+
+# A task on "n" asking for `cores`, `mem` and `disk`, in `status`, holding n or not.
+fn _snap_task_axes(id, status, cores, mem, disk, held) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"task_id\":\"");
+    str_builder_add_cstr(sb, id);
+    str_builder_add_cstr(sb, "\",\"name\":\"t\",\"description\":\"d\",\"agent_id\":\"a\",\"priority\":5,\"resource_requirements\":{\"cpu_cores\":");
+    str_builder_add_int(sb, cores);
+    str_builder_add_cstr(sb, ".0,\"memory_mb\":");
+    str_builder_add_int(sb, mem);
+    str_builder_add_cstr(sb, ",\"accel_req\":0,\"accel_min_chips\":0,\"network\":0,\"disk_mb\":");
+    str_builder_add_int(sb, disk);
+    str_builder_add_cstr(sb, "},\"status\":");
+    str_builder_add_int(sb, status);
+    str_builder_add_cstr(sb, ",\"created_at\":1,\"scheduled_at\":2,\"reserved_on\":");
+    if (held == 1) { str_builder_add_cstr(sb, "\"n\""); } else { str_builder_add_cstr(sb, "null"); }
+    str_builder_add_cstr(sb, ",\"assigned_node\":\"n\"}");
+    return str_builder_build(sb);
+}
+
+fn _one(a) { var v = vec_new(); vec_push(v, a); return v; }
+
+fn test_audit_restore_axes() {
+    test_group("audit_restore_axes");
+    # Each axis disagreeing alone is rebuilt from the tasks, and said so.
+    _logs_start();
+    var rt = _snap(_one(_snap_task_axes("a", TASK_RUNNING, 4, 0, 0, 1)), _snap_node_axes("4.0", 8192, 1000, 0));
+    _logs_stop();
+    var n = map_get(TaskScheduler_nodes(rt), str_from("n"));
+    assert_eq(NodeCapacity_running_tasks(n), 1, "a wrong running count alone is rebuilt");
+    assert_eq(_logged("snapshot capacity disagrees"), 1, "and logged");
+    _logs_start();
+    var mem = _snap(_one(_snap_task_axes("a", TASK_RUNNING, 0, 1024, 0, 1)), _snap_node_axes("8.0", 8192, 1000, 1));
+    _logs_stop();
+    assert_eq(NodeCapacity_available_memory_mb(map_get(TaskScheduler_nodes(mem), str_from("n"))), 7168, "wrong memory alone is rebuilt");
+    assert_eq(_logged("snapshot capacity disagrees"), 1, "and logged");
+    _logs_start();
+    var disk = _snap(_one(_snap_task_axes("a", TASK_RUNNING, 0, 0, 100, 1)), _snap_node_axes("8.0", 8192, 1000, 1));
+    _logs_stop();
+    assert_eq(NodeCapacity_available_disk_mb(map_get(TaskScheduler_nodes(disk), str_from("n"))), 900, "wrong disk alone is rebuilt");
+    assert_eq(_logged("snapshot capacity disagrees"), 1, "and logged");
+    _logs_start();
+    var hi = _snap(_one(_snap_task_axes("a", TASK_RUNNING, 4, 0, 0, 1)), _snap_node_axes("8.0", 8192, 1000, 1));
+    _logs_stop();
+    var hn = map_get(TaskScheduler_nodes(hi), str_from("n"));
+    assert_eq(_cpu_milli(hn), 4000, "cores claimed free that a task holds are taken back");
+    assert_eq(_logged("snapshot capacity disagrees"), 1, "and logged");
+    task_scheduler_submit_task(hi, scheduled_task_new(str_from("c"), str_from("d"), str_from("a"), 5, make_req(f64_from(8), 0)));
+    assert_eq(vec_len(task_scheduler_schedule_pending(hi)), 0, "so eight cores are not sold");
+    _logs_start();
+    var off = _snap(_one(_snap_task_axes("a", TASK_RUNNING, 4, 0, 0, 1)), _snap_node_axes("3.9999", 8192, 1000, 1));
+    _logs_stop();
+    assert_eq(_cpu_milli(map_get(TaskScheduler_nodes(off), str_from("n"))), 4000, "a ten-thousandth of a core off is rebuilt");
+    assert_eq(_logged("snapshot capacity disagrees"), 1, "and logged");
+    _logs_start();
+    var near = _snap(_one(_snap_task_axes("a", TASK_RUNNING, 4, 0, 0, 1)), _snap_node_axes("3.9999999999", 8192, 1000, 1));
+    _logs_stop();
+    assert_eq(_logged("snapshot capacity disagrees"), 0, "a rounding error is not a disagreement");
+    assert_eq(f64_eq(NodeCapacity_available_cpu(map_get(TaskScheduler_nodes(near), str_from("n"))), f64_from(4)), 0,
+      "and keeps the bits it came with");
+    # A placed task that lost its reservation still occupies its node, SCHEDULED as RUNNING.
+    var sch = _snap(_one(_snap_task_axes("a", TASK_SCHEDULED, 4, 0, 0, 0)), _snap_node_axes("8.0", 8192, 1000, 0));
+    var sn = map_get(TaskScheduler_nodes(sch), str_from("n"));
+    assert_eq(_cpu_milli(sn) + NodeCapacity_running_tasks(sn), 4001, "a SCHEDULED task gets its reservation back");
+    return 0;
+}
+
+fn test_audit_lifecycle_pins() {
+    test_group("audit_lifecycle_pins");
+    # A refused completion keeps what the task holds.
+    var s = task_scheduler_new();
+    task_scheduler_register_node(s, make_node("n", f64_from(4), 8192));
+    var t1 = scheduled_task_new(str_from("a"), str_from("d"), str_from("a"), 5, make_req(f64_from(4), 1));
+    task_scheduler_submit_task(s, t1);
+    task_scheduler_schedule_pending(s);
+    var r_t, r_v = task_scheduler_complete_task(s, ScheduledTask_task_id(t1), TASK_COMPLETED);
+    assert_eq(is_err_result(r_t), 1, "a SCHEDULED task cannot complete");
+    task_scheduler_submit_task(s, scheduled_task_new(str_from("b"), str_from("d"), str_from("a"), 5, make_req(f64_from(4), 1)));
+    assert_eq(vec_len(task_scheduler_schedule_pending(s)), 0, "and the refusal gave nothing back");
+
+    # Only a RUNNING task is a victim, and only of a higher class.
+    var p = task_scheduler_new();
+    task_scheduler_register_node(p, make_node("n", f64_from(4), 8192));
+    var low = scheduled_task_new(str_from("low"), str_from("d"), str_from("a"), 1, make_req(f64_from(4), 1));
+    task_scheduler_submit_task(p, low);
+    task_scheduler_schedule_pending(p);
+    var high = scheduled_task_new(str_from("high"), str_from("d"), str_from("a"), 10, make_req(f64_from(4), 1));
+    task_scheduler_submit_task(p, high);
+    assert_eq(task_scheduler_preempt_if_needed(p, high), 0, "a SCHEDULED holder is not a victim");
+    scheduled_task_transition(low, TASK_RUNNING);
+    assert_eq(task_scheduler_preempt_if_needed(p, high) != 0, 1, "a RUNNING one is");
+    scheduled_task_transition(low, TASK_COMPLETED);
+    assert_eq(task_scheduler_preempt_if_needed(p, high), 0, "and one finished by its transition is not, nor needed");
+    var c = task_scheduler_new();
+    task_scheduler_register_node(c, make_node("n", f64_from(4), 8192));
+    var four = scheduled_task_new(str_from("p4"), str_from("d"), str_from("a"), 4, make_req(f64_from(4), 1));
+    task_scheduler_submit_task(c, four);
+    task_scheduler_schedule_pending(c);
+    scheduled_task_transition(four, TASK_RUNNING);
+    var six = scheduled_task_new(str_from("p6"), str_from("d"), str_from("a"), 6, make_req(f64_from(4), 1));
+    task_scheduler_submit_task(c, six);
+    assert_eq(task_scheduler_preempt_if_needed(c, six), 0, "priority 6 does not stop 4: one class");
+
+    # A PREEMPTED task waits for its owner to queue it again, and a pass leaves it.
+    var q = task_scheduler_new();
+    task_scheduler_register_node(q, make_node("n", f64_from(8), 8192));
+    var pre = scheduled_task_new(str_from("pre"), str_from("d"), str_from("a"), 5, make_req(f64_from(1), 1));
+    task_scheduler_submit_task(q, pre);
+    task_scheduler_schedule_pending(q);
+    scheduled_task_transition(pre, TASK_RUNNING);
+    scheduled_task_transition(pre, TASK_PREEMPTED);
+    assert_eq(vec_len(task_scheduler_pending_tasks(q)), 0, "a PREEMPTED task is not pending");
+    assert_eq(vec_len(task_scheduler_schedule_pending(q)), 0, "and a pass places nothing");
+
+    # Restore keeps a PREEMPTED status and clamps one it cannot know.
+    var keep = _snap(_one(_snap_task_axes("a", TASK_PREEMPTED, 1, 0, 0, 0)), _snap_node_axes("8.0", 8192, 1000, 0));
+    assert_eq(ScheduledTask_status(task_scheduler_get_task(keep, str_from("a"))), TASK_PREEMPTED, "PREEMPTED restores as PREEMPTED");
+    var neg = _snap(_one(_snap_task_axes("a", 0 - 1, 1, 0, 0, 0)), _snap_node_axes("8.0", 8192, 1000, 0));
+    assert_eq(ScheduledTask_status(task_scheduler_get_task(neg, str_from("a"))), TASK_QUEUED, "a status below the range is QUEUED");
+    var big = _snap(_one(_snap_task_axes("a", 99, 1, 0, 0, 0)), _snap_node_axes("8.0", 8192, 1000, 0));
+    assert_eq(ScheduledTask_status(task_scheduler_get_task(big, str_from("a"))), TASK_QUEUED, "and one above it");
+
+    # Registering answers 0 for the same node again, and for a reconnect.
+    var g = task_scheduler_new();
+    var node = make_node("g", f64_from(8), 8192);
+    assert_eq(task_scheduler_register_node(g, node), 0, "a new node");
+    assert_eq(task_scheduler_register_node(g, node), 0, "the same node again");
+    assert_eq(task_scheduler_register_node(g, make_node("g", f64_from(8), 8192)), 0, "a reconnect");
+
+    # A training job's target is a request: it is placed there, and the reason says so.
+    var tr = task_scheduler_new();
+    task_scheduler_register_node(tr, _gpu_node("a-gpu", 1));
+    task_scheduler_register_node(tr, _gpu_node("z-gpu", 1));
+    var job = training_job_template_new(str_from("m"), TM_LORA, str_from("data"), str_from("z-gpu"), 60, 0);
+    var jt = training_job_to_scheduled_task(job, str_from("agent"));
+    assert_eq(str_eq(ScheduledTask_requested_node(jt), str_from("z-gpu")), 1, "the target is requested");
+    assert_eq(ScheduledTask_assigned_node(jt), 0, "not assigned");
+    var jr = ScheduledTask_resource_requirements(jt);
+    assert_eq(f64_eq(ResourceReq_cpu_cores(jr), f64_from(2)), 1, "two cores");
+    assert_eq(ResourceReq_disk_mb(jr), 10000, "10,000 MB of disk");
+    assert_eq(str_eq(ScheduledTask_description(jt), str_from("Training job: lora on m")), 1, "its description");
+    task_scheduler_submit_task(tr, jt);
+    var ds = task_scheduler_schedule_pending(tr);
+    assert_eq(_went(jt, "z-gpu"), 1, "placed on its target");
+    assert_eq(str_eq(SchedulingDecision_reason(vec_get(ds, 0)), str_from("preferred node")), 1, "as the preferred node");
+
+    # A negative watermark restores as never, so the first check fires one minute.
+    var cs = cron_scheduler_from_json_str(str_from(
+        "{\"entries\":[{\"name\":\"e\",\"expr\":{\"minute_mask\":1152921504606846975,\"hour_mask\":16777215,\"dom_mask\":4294967294,\"month_mask\":8190,\"dow_mask\":127,\"dom_star\":1,\"dow_star\":1},\"task_template\":{\"name\":\"t\",\"description\":\"d\",\"agent_id\":\"a\",\"priority\":5,\"resource_requirements\":{\"cpu_cores\":1.0,\"memory_mb\":1,\"accel_req\":0,\"accel_min_chips\":0,\"network\":0,\"disk_mb\":0}},\"enabled\":1,\"last_fired\":-1,\"missed_policy\":1}]}"));
+    assert_eq(CronEntry_last_fired(vec_get(cron_scheduler_list_entries(cs), 0)), 0, "a negative watermark is never");
+    assert_eq(vec_len(cron_scheduler_check_due_at(cs, 1798804800000000000)), 1, "so the first check fires one minute");
+    return 0;
+}
+
+fn test_audit_pins() {
+    test_group("audit_pins");
+    # A caller's copy releases only an equal hold, the requirement type included.
+    var n = _gpu_node("g", 1);
+    node_capacity_reserve(n, _gpu_req(1));
+    node_capacity_release(n, resource_req_new(f64_from(1), 1, REQ_ANY_ACCELERATOR, 0, 0, 0));
+    assert_eq(node_capacity_can_fit(n, _gpu_req(1)), 0, "an any-accelerator copy does not free a GPU hold");
+    # The documented numbers.
+    assert_eq(SAMAY_JSON_MAX_BYTES, 134217728, "128 MiB");
+    assert_eq(SAMAY_JSON_MAX_ITEMS, 100000, "100,000 items");
+    assert_eq(SAMAY_JSON_MAX_EXPANSION, 10, "ten times the text");
+    assert_eq(CRON_CLOCK_RESET_SECS, 10800, "three hours");
+    assert_eq(CRON_CATCHUP_CAP, 1000, "1,000 fires per entry");
+    assert_eq(CRON_BURST_BUDGET, 10000, "10,000 per check");
+    assert_eq(SAMAY_MAX_NODE_DEVICES, 1024, "1,024 devices a node");
+    # A copy settles a share a setter zeroed, so its task writes 1.4.6's bytes.
+    var z = _gpu_req(1);
+    ResourceReq_set_accel_share(z, 0);
+    var t = scheduled_task_new(str_from("t"), str_from("d"), str_from("a"), 5, z);
+    assert_eq(ResourceReq_accel_share(ScheduledTask_resource_requirements(t)), SAMAY_ACCEL_WHOLE, "a zeroed share copies as whole");
+    assert_eq(str_contains(scheduled_task_to_json_str(t), str_from("accel_share")), 0, "and writes no share");
+    # The parser: nine digits at most, and a tab before a shortcut.
+    var a_t, a_v = cron_expr_parse(str_from("0000000005 * * * *"));
+    assert_eq(is_err_result(a_t), 1, "ten digits are refused");
+    var b_t, b_v = cron_expr_parse(str_from("\t@daily"));
+    assert_eq(is_err_result(b_t), 0, "a tab before @daily is trimmed");
+    # Log lines say what they refused, with the number.
+    var i = 0;
+    var saved = SAMAY_JSON_MAX_ITEMS;
+    SAMAY_JSON_MAX_ITEMS = 1;
+    var two = task_scheduler_new();
+    task_scheduler_submit_task(two, make_task("a", 5));
+    task_scheduler_submit_task(two, make_task("b", 5));
+    _logs_start();
+    task_scheduler_to_json_str(two);
+    _logs_stop();
+    SAMAY_JSON_MAX_ITEMS = saved;
+    assert_eq(_logged("snapshot refused: 2 tasks, past the restore limit of 1"), 1, "the item limit names the collection and its count");
+    # 1,000 empty arrays in 3,001 bytes, with no budget past the first 4 KiB.
+    var arrays = str_builder_new();
+    str_builder_add_cstr(arrays, "[");
+    i = 0;
+    while (i < 1000) {
+        if (i > 0) { str_builder_add_cstr(arrays, ","); }
+        str_builder_add_cstr(arrays, "[]");
+        i = i + 1;
+    }
+    str_builder_add_cstr(arrays, "]");
+    var saved_x = SAMAY_JSON_MAX_EXPANSION;
+    SAMAY_JSON_MAX_EXPANSION = 0;
+    _logs_start();
+    task_scheduler_from_json_str(str_builder_build(arrays));
+    _logs_stop();
+    SAMAY_JSON_MAX_EXPANSION = saved_x;
+    assert_eq(_logged("parsing its 3001 bytes takes more than 0 times that"), 1, "a refused parse says how long its text was");
+    var long = str_builder_new();
+    i = 0;
+    while (i < 70) {
+        str_builder_add_cstr(long, "x");
+        i = i + 1;
+    }
+    var c = cron_scheduler_new();
+    var tmpl = cron_task_template_new(str_from("t"), str_from("d"), str_from("a"), 5, resource_req_default());
+    cron_scheduler_add(c, str_builder_build(long), str_from("* * * * *"), tmpl, 1, CRON_CATCHUP);
+    cron_scheduler_check_due_at(c, 1798804800000000000);
+    _logs_start();
+    cron_scheduler_check_due_at(c, 1798805100000000000);
+    _logs_stop();
+    var cut = str_builder_new();
+    str_builder_add_cstr(cut, "cron '");
+    i = 0;
+    while (i < 64) {
+        str_builder_add_cstr(cut, "x");
+        i = i + 1;
+    }
+    str_builder_add_cstr(cut, "': ");
+    assert_eq(_logged(str_cstr(str_builder_build(cut))), 1, "a cron name is cut at exactly 64");
+    var hs = task_scheduler_new();
+    task_scheduler_register_node(hs, make_node("n", f64_from(4), 8192));
+    var lo = scheduled_task_new(str_from("lo"), str_from("d"), str_from("a"), 1, make_req(f64_from(4), 1));
+    task_scheduler_submit_task(hs, lo);
+    task_scheduler_schedule_pending(hs);
+    scheduled_task_transition(lo, TASK_RUNNING);
+    var hi = scheduled_task_new(str_from("hi"), str_from("d"), str_from("a"), 10, make_req(f64_from(4), 1));
+    task_scheduler_submit_task(hs, hi);
+    var act = task_scheduler_preempt_if_needed(hs, hi);
+    assert_eq(str_eq(PreemptionAction_reason(act), str_from("priority 10 preempts priority 1 task")), 1, "the reason names both priorities in order");
+    return 0;
+}
+
+# `s` with the first `from` replaced by `to`, both C strings.
+fn _replace_once(s, from, to) {
+    var at = str_index_of_cstr(s, from);
+    if (at < 0) { return s; }
+    var sb = str_builder_new();
+    str_builder_add(sb, str_sub(s, 0, at));
+    str_builder_add_cstr(sb, to);
+    var past = at + strlen(from);
+    str_builder_add(sb, str_sub(s, past, str_len(s) - past));
+    return str_builder_build(sb);
+}
+
+var NOON = 1798804800000000000;
+var MIN_NS = 60000000000;
+
+fn _cron_with(name, expr, policy) {
+    var c = cron_scheduler_new();
+    var tmpl = cron_task_template_new(str_from("t"), str_from("d"), str_from("a"), 5, resource_req_default());
+    cron_scheduler_add(c, str_from(name), str_from(expr), tmpl, 1, policy);
+    return c;
+}
+
+fn _entry_of(c, name) { return map_get(CronScheduler_entries(c), str_from(name)); }
+
+fn test_audit_cron_clock() {
+    test_group("audit_cron_clock");
+    # One reading far behind, then the right time: what had fired does not fire again.
+    var c = _cron_with("hourly", "0 * * * *", CRON_CATCHUP);
+    cron_scheduler_check_due_at(c, NOON);
+    cron_scheduler_check_due_at(c, 946684800000000000);
+    assert_eq(CronEntry_reset_from(_entry_of(c, "hourly")), NOON, "a reset keeps how far it had got");
+    _logs_start();
+    var back = vec_len(cron_scheduler_check_due_at(c, NOON + 5 * MIN_NS));
+    _logs_stop();
+    assert_eq(back, 0, "back past it, nothing fires twice");
+    assert_eq(_logged("catch-up"), 0, "and nothing is called missed");
+    assert_eq(CronEntry_reset_from(_entry_of(c, "hourly")), 0, "and the reset is over");
+    assert_eq(vec_len(cron_scheduler_check_due_at(c, NOON + 60 * MIN_NS)), 1, "the next hour fires once");
+    # The same through a snapshot taken between the two readings.
+    var s = _cron_with("hourly", "0 * * * *", CRON_CATCHUP);
+    cron_scheduler_check_due_at(s, NOON);
+    cron_scheduler_check_due_at(s, 946684800000000000);
+    var text = cron_scheduler_to_json_str(s);
+    assert_eq(str_contains(text, str_from("\"reset_from\":1798804800000000000")), 1, "a reset is written");
+    var r = cron_scheduler_from_json_str(text);
+    assert_eq(str_eq(cron_scheduler_to_json_str(r), text), 1, "and reads back as written");
+    assert_eq(vec_len(cron_scheduler_check_due_at(r, NOON + 5 * MIN_NS)), 0, "and still fires nothing twice");
+    assert_eq(str_contains(cron_scheduler_to_json_str(_cron_with("e", "* * * * *", CRON_SKIP)), str_from("reset_from")), 0,
+      "an entry with no reset writes no key");
+    # A real step back keeps time as it passes again, until it is back past the mark.
+    var real = _cron_with("minutely", "* * * * *", CRON_CATCHUP);
+    cron_scheduler_check_due_at(real, NOON);
+    cron_scheduler_check_due_at(real, NOON - 240 * MIN_NS);
+    assert_eq(vec_len(cron_scheduler_check_due_at(real, NOON - 239 * MIN_NS)), 1, "a real step back fires as time passes");
+    # A small step back waits, and says so once, not on every check.
+    var w = _cron_with("a", "* * * * *", CRON_CATCHUP);
+    cron_scheduler_add(w, str_from("b"), str_from("* * * * *"),
+      cron_task_template_new(str_from("t"), str_from("d"), str_from("a"), 5, resource_req_default()), 1, CRON_CATCHUP);
+    cron_scheduler_check_due_at(w, NOON);
+    _logs_start();
+    var used = alloc_used();
+    var k = 0;
+    while (k < 50) {
+        cron_scheduler_check_due_at(w, NOON - 60 * MIN_NS + k * 1000000000);
+        k = k + 1;
+    }
+    var per = (alloc_used() - used) / 50;
+    _logs_stop();
+    assert_eq(_logged("watermark held"), 2, "once per entry, not once per check");
+    assert_eq(per < 400, 1, "and a held check costs about what a quiet one does");
+    assert_eq(vec_len(cron_scheduler_check_due_at(w, NOON + MIN_NS)), 2, "then each fires its next minute");
+    _logs_start();
+    cron_scheduler_check_due_at(w, NOON);
+    _logs_stop();
+    assert_eq(_logged("watermark held"), 2, "a later step back is said again");
+    # The top of i64 has no next minute, and the day before it still does.
+    var _e_t, _e_v = cron_expr_parse(str_from("* * * * *"));
+    var every = result_unwrap(_e_t, _e_v);
+    assert_eq(cron_expr_next_after(every, 9223372036854775807), 0 - 1, "no minute after the top");
+    var near = 9223372036854689407 - 86400 * 2;
+    assert_eq(cron_expr_next_after(every, near) > near, 1, "two days below the top, the next minute");
+    var _y_t, _y_v = cron_expr_parse(str_from("0 0 1 1 *"));
+    var yearly = result_unwrap(_y_t, _y_v);
+    var far = 9223372036820215807;
+    var nx = cron_expr_next_after(yearly, far);
+    assert_eq(nx == 0 - 1 || nx > far, 1, "never a value at or before the instant");
+    return 0;
+}
+
+fn test_audit_cron_edits() {
+    test_group("audit_cron_edits");
+    var tmpl = cron_task_template_new(str_from("t"), str_from("d"), str_from("a"), 5, resource_req_default());
+    # A changed schedule starts fresh, and says what the old one gives up.
+    var c = _cron_with("job", "0 * * * *", CRON_CATCHUP);
+    cron_scheduler_check_due_at(c, NOON);
+    _logs_start();
+    cron_scheduler_add(c, str_from("job"), str_from("* * * * *"), tmpl, 1, CRON_CATCHUP);
+    _logs_stop();
+    assert_eq(_logged("schedule changed; what the old one owed since its last check is given up"), 1, "a changed schedule says so");
+    assert_eq(CronEntry_last_fired(_entry_of(c, "job")), 0, "and starts fresh");
+    assert_eq(vec_len(cron_scheduler_check_due_at(c, NOON + 210 * MIN_NS)), 1, "so it fires the current minute, not 210");
+    # The same schedule keeps its place, and its reset.
+    var same = _cron_with("job", "0 * * * *", CRON_CATCHUP);
+    cron_scheduler_check_due_at(same, NOON);
+    _logs_start();
+    cron_scheduler_add(same, str_from("job"), str_from("0 * * * *"), tmpl, 1, CRON_CATCHUP);
+    _logs_stop();
+    assert_eq(_logged("schedule changed"), 0, "the same schedule says nothing");
+    assert_eq(CronEntry_last_fired(_entry_of(same, "job")), NOON, "and keeps its watermark");
+    # A disabled entry says what it gave up once, through a snapshot and a replace.
+    var d = _cron_with("h", "0 * * * *", CRON_CATCHUP);
+    cron_scheduler_check_due_at(d, NOON);
+    CronEntry_set_enabled(_entry_of(d, "h"), 0);
+    cron_scheduler_check_due_at(d, NOON + MIN_NS);
+    var dtext = cron_scheduler_to_json_str(d);
+    assert_eq(str_contains(dtext, str_from("\"disabled_seen\":1")), 1, "a disabled entry that has spoken writes so");
+    var dr = cron_scheduler_from_json_str(dtext);
+    _logs_start();
+    cron_scheduler_check_due_at(dr, NOON + 24 * 60 * MIN_NS);
+    _logs_stop();
+    assert_eq(_logged("giving up"), 0, "and does not speak again after a restore");
+    _logs_start();
+    cron_scheduler_add(d, str_from("h"), str_from("0 * * * *"), tmpl, 0, CRON_CATCHUP);
+    cron_scheduler_check_due_at(d, NOON + 24 * 60 * MIN_NS);
+    _logs_stop();
+    assert_eq(_logged("giving up"), 0, "nor after a replace while disabled");
+    assert_eq(str_contains(cron_scheduler_to_json_str(_cron_with("e", "* * * * *", CRON_SKIP)), str_from("disabled_seen")), 0,
+      "an enabled entry writes no key");
+    # Only 0 is disabled, before a restore and after.
+    var two = _cron_with("job", "* * * * *", CRON_SKIP);
+    cron_scheduler_check_due_at(two, NOON);
+    CronEntry_set_enabled(_entry_of(two, "job"), 2);
+    assert_eq(vec_len(cron_scheduler_check_due_at(two, NOON + MIN_NS)), 1, "enabled set to 2 fires");
+    var tr = cron_scheduler_from_json_str(cron_scheduler_to_json_str(two));
+    assert_eq(vec_len(cron_scheduler_check_due_at(tr, NOON + 2 * MIN_NS)), 1, "and still fires after a restore");
+    # A name's newline cannot start a log line of its own.
+    var nl = _cron_with("x\n[0] [ERROR] forged", "* * * * *", CRON_CATCHUP);
+    cron_scheduler_check_due_at(nl, NOON);
+    _logs_start();
+    cron_scheduler_check_due_at(nl, NOON + 3 * MIN_NS);
+    _logs_stop();
+    assert_eq(_logged("cron 'x?[0] [ERROR] forged': catch-up"), 1, "a newline in a name is shown as ?");
+    return 0;
+}
+
+fn _expr_doc(minute, hour, dom, month, dow, stars) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"minute_mask\":");
+    str_builder_add_int(sb, minute);
+    str_builder_add_cstr(sb, ",\"hour_mask\":");
+    str_builder_add_int(sb, hour);
+    str_builder_add_cstr(sb, ",\"dom_mask\":");
+    str_builder_add_int(sb, dom);
+    str_builder_add_cstr(sb, ",\"month_mask\":");
+    str_builder_add_int(sb, month);
+    str_builder_add_cstr(sb, ",\"dow_mask\":");
+    str_builder_add_int(sb, dow);
+    if (stars == 1) { str_builder_add_cstr(sb, ",\"dom_star\":0,\"dow_star\":1"); }
+    str_builder_add_cstr(sb, "}");
+    return str_builder_build(sb);
+}
+
+fn test_audit_cron_masks() {
+    test_group("audit_cron_masks");
+    var good = cron_expr_from_json_str(_expr_doc(1, 1, 2, 8190, 127, 1));
+    assert_eq(good != 0, 1, "an expression the parser makes reads");
+    assert_eq(cron_expr_from_json_str(_expr_doc(0, 1, 2, 8190, 127, 1)), 0, "an empty minute mask is refused");
+    assert_eq(cron_expr_from_json_str(_expr_doc(1 << 60, 1, 2, 8190, 127, 1)), 0, "minute 60 alone is refused");
+    assert_eq(cron_expr_from_json_str(_expr_doc(1, 1 << 24, 2, 8190, 127, 1)), 0, "hour 24 alone is refused");
+    assert_eq(cron_expr_from_json_str(_expr_doc(1, 1, 1, 8190, 127, 1)), 0, "day 0 alone is refused");
+    assert_eq(cron_expr_from_json_str(_expr_doc(1, 1, 2, 1, 127, 1)), 0, "month 0 alone is refused");
+    assert_eq(cron_expr_from_json_str(_expr_doc(1, 1, 2, 1 << 13, 127, 1)), 0, "month 13 alone is refused");
+    assert_eq(cron_expr_from_json_str(_expr_doc(1, 1, 2, 8190, 128, 1)), 0, "Sunday as 7 alone is refused");
+    assert_eq(cron_expr_from_json_str(_expr_doc(1, 1, 2, 8190, 129, 1)), 0, "a stray bit beside a good one is refused");
+    # Without its star flags, a whole field reads as a star: 0 0 1 * * stays monthly.
+    var old = cron_expr_from_json_str(_expr_doc(1, 1, 2, 8190, 127, 0));
+    assert_eq(CronExpr_dow_star(old), 1, "a whole week is a star");
+    assert_eq(CronExpr_dom_star(old), 0, "and day 1 is not");
+    var whole = cron_expr_from_json_str(_expr_doc(1, 1, 4294967294, 8190, 2, 0));
+    assert_eq(CronExpr_dom_star(whole), 1, "a whole month of days is a star");
+    assert_eq(CronExpr_dow_star(whole), 0, "and Monday alone is not");
+    var fired = 0;
+    var t = 1798761600;
+    var k = 0;
+    while (k < 30 * 1440) {
+        fired = fired + cron_expr_matches(old, t + k * 60);
+        k = k + 1;
+    }
+    assert_eq(fired, 1, "so it matches once in thirty days");
+    return 0;
+}
+
+fn _profile_text() {
+    var sb = str_builder_new();
+    profile_to_json(sb, profile_cuda(0, 17179869184));
+    return str_builder_build(sb);
+}
+
+fn _node_doc(profiles) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"node_id\":\"g\",\"total_cpu\":8.0,\"available_cpu\":8.0,\"total_memory_mb\":8192,\"available_memory_mb\":8192,\"total_disk_mb\":0,\"available_disk_mb\":0,\"running_tasks\":0,\"accel_profiles\":[");
+    str_builder_add_cstr(sb, profiles);
+    str_builder_add_cstr(sb, "]}");
+    return str_builder_build(sb);
+}
+
+fn test_audit_restore_records() {
+    test_group("audit_restore_records");
+    # A profile samay could not have written is refused, and said so; a real one reads.
+    _logs_start();
+    var bare = node_capacity_from_json_str(_node_doc("{}"));
+    _logs_stop();
+    assert_eq(vec_len(NodeCapacity_accel_profiles(bare)), 0, "a profile with no type, device or memory is refused");
+    assert_eq(_logged("node 'g': accelerator profile refused on restore (no type, device or memory)"), 1, "and logged, with the node");
+    assert_eq(vec_len(NodeCapacity_accel_profiles(node_capacity_from_json_str(_node_doc(str_cstr(_profile_text()))))), 1,
+      "a profile ai-hwaccel wrote reads");
+    # Each of the three missing, or not a number, refuses it too; so does a profile that
+    # is not an object.
+    var pt = _profile_text();
+    var shapes = vec_new();
+    vec_push(shapes, _replace_once(pt, "\"device_id\"", "\"device\""));
+    vec_push(shapes, _replace_once(pt, "\"memory_bytes\"", "\"memory\""));
+    vec_push(shapes, _replace_once(pt, "\"device_id\":0", "\"device_id\":\"0\""));
+    vec_push(shapes, str_from("5"));
+    var refused = 0;
+    var si = 0;
+    _logs_start();
+    while (si < vec_len(shapes)) {
+        var one = node_capacity_from_json_str(_node_doc(str_cstr(vec_get(shapes, si))));
+        if (vec_len(NodeCapacity_accel_profiles(one)) == 0) { refused = refused + 1; }
+        si = si + 1;
+    }
+    _logs_stop();
+    assert_eq(refused, 4, "each shape samay could not have written is refused");
+    assert_eq(_logged("node 'g': accelerator profile refused on restore (no type, device or memory)"), 4, "each as unshaped");
+    # A shaped profile ai-hwaccel refuses is said to be out of range instead.
+    _logs_start();
+    var neg = node_capacity_from_json_str(_node_doc(str_cstr(_replace_once(pt, "\"device_id\":0", "\"device_id\":-1"))));
+    _logs_stop();
+    assert_eq(vec_len(NodeCapacity_accel_profiles(neg)), 0, "a device id below zero is refused");
+    assert_eq(_logged("node 'g': accelerator profile refused on restore (out of range)"), 1, "by ai-hwaccel, and said so");
+    # Cores below any real over-commitment stop at -1e18.
+    var deep = node_capacity_from_json_str(_replace_once(_node_doc(""), "\"available_cpu\":8.0", "\"available_cpu\":-1e300"));
+    assert_eq(f64_eq(NodeCapacity_available_cpu(deep), f64_sub(f64_from(0), f64_from(1000000000000000000))), 1,
+      "available cores far below zero stop at -1e18");
+    # A score no writer can carry is refused.
+    assert_eq(scheduling_decision_from_json_str(str_from("{\"task_id\":\"x\",\"assigned_node\":\"y\",\"reason\":\"z\",\"score\":1e400}")), 0,
+      "an infinite score is refused");
+    # A requirement needs every field.
+    var fields = _keys("cpu_cores", "memory_mb", "accel_req", "accel_min_chips", "network", "disk_mb", 0);
+    var kept = 0;
+    var i = 0;
+    while (i < vec_len(fields)) {
+        var sb = str_builder_new();
+        str_builder_add_cstr(sb, "{");
+        var first = 1;
+        var j = 0;
+        while (j < vec_len(fields)) {
+            if (j != i) {
+                if (first == 0) { str_builder_add_cstr(sb, ","); }
+                first = 0;
+                str_builder_add_cstr(sb, "\"");
+                str_builder_add_cstr(sb, vec_get(fields, j));
+                str_builder_add_cstr(sb, "\":0");
+            }
+            j = j + 1;
+        }
+        str_builder_add_cstr(sb, "}");
+        if (resource_req_from_json_str(str_builder_build(sb)) != 0) { kept = kept + 1; }
+        i = i + 1;
+    }
+    assert_eq(kept, 0, "a requirement missing any one field is refused");
+    # Null Strs where a value is required become empty, and write.
+    var nt = scheduled_task_new(0, 0, 0, 5, make_req(f64_from(1), 1));
+    assert_eq(str_len(ScheduledTask_name(nt)) + str_len(ScheduledTask_description(nt)) + str_len(ScheduledTask_agent_id(nt)), 0,
+      "a task's null Strs are empty");
+    var ns = task_scheduler_new();
+    task_scheduler_submit_task(ns, nt);
+    assert_eq(task_scheduler_to_json_str(ns) != 0, 1, "and the snapshot writes");
+    assert_eq(task_scheduler_register_node(ns, node_capacity_new(0, f64_from(8), 8192, 0, 0)), 1, "a node with a null id is refused");
+    var bad = make_node("b", f64_from(8), 8192);
+    NodeCapacity_set_node_id(bad, 0);
+    assert_eq(task_scheduler_register_node(ns, bad), 1, "even one nulled after building");
+    return 0;
+}
+
+# The device a node's holds put on `i`, for comparing restored and live.
+fn _used(n, i) { return _accel_used_at(n, i); }
+
+fn test_audit_held_devices() {
+    test_group("audit_held_devices");
+    # x takes the GPU, f any accelerator (the Gaudi), x finishes, y takes the GPU. Replay
+    # in placement order put f on the GPU and y on top of it.
+    var s = task_scheduler_new();
+    var node = make_node("n", f64_from(64), 524288);
+    node_capacity_add_accel(node, profile_cuda(0, 17179869184));
+    node_capacity_add_accel(node, profile_gaudi(0, 2));
+    task_scheduler_register_node(s, node);
+    var x = _req_task("x", 9, _gpu_req(1));
+    task_scheduler_submit_task(s, x);
+    task_scheduler_schedule_pending(s);
+    var f = _req_task("f", 9, resource_req_new(f64_from(1), 1, REQ_ANY_ACCELERATOR, 0, 0, 0));
+    task_scheduler_submit_task(s, f);
+    task_scheduler_schedule_pending(s);
+    scheduled_task_transition(x, TASK_RUNNING);
+    task_scheduler_complete_task(s, ScheduledTask_task_id(x), TASK_COMPLETED);
+    var y = _req_task("y", 9, _gpu_req(1));
+    task_scheduler_submit_task(s, y);
+    task_scheduler_schedule_pending(s);
+    assert_eq(_used(node, 0) * 10 + _used(node, 1) / 1000, 10001, "live: the GPU and the Gaudi, one each");
+    var text = task_scheduler_to_json_str(s);
+    assert_eq(str_contains(text, str_from("\"held_profiles\":[1]")), 1, "the Gaudi's holder records it");
+    var r = task_scheduler_from_json_str(text);
+    var rn = map_get(TaskScheduler_nodes(r), str_from("n"));
+    assert_eq(_used(rn, 0) * 10 + _used(rn, 1) / 1000, 10001, "restored: the same, not the GPU twice");
+    assert_eq(str_eq(task_scheduler_to_json_str(r), text), 1, "and writes back byte for byte");
+    var z = _req_task("z", 9, resource_req_new(f64_from(1), 1, REQ_GAUDI, 0, 0, 0));
+    task_scheduler_submit_task(r, z);
+    assert_eq(vec_len(task_scheduler_schedule_pending(r)), 0, "so the busy Gaudi is not offered");
+    # The same node registered again keeps each task on its device.
+    var again = make_node("n", f64_from(64), 524288);
+    node_capacity_add_accel(again, profile_cuda(0, 17179869184));
+    node_capacity_add_accel(again, profile_gaudi(0, 2));
+    task_scheduler_register_node(s, again);
+    assert_eq(_used(again, 0) * 10 + _used(again, 1) / 1000, 10001, "re-registered: the same");
+    # A record that does not fit the node is chosen again, and said so.
+    var moved = _replace_once(text, "\"held_profiles\":[1]", "\"held_profiles\":[7]");
+    _logs_start();
+    var m = task_scheduler_from_json_str(moved);
+    _logs_stop();
+    assert_eq(m != 0, 1, "a record past the node's profiles still restores");
+    assert_eq(_logged("recorded devices do not fit it; chosen again"), 1, "and says the devices were chosen again");
+    # A record of the wrong type refuses its task.
+    var wrong = _replace_once(text, "\"held_profiles\":[1]", "\"held_profiles\":\"1\"");
+    var w = task_scheduler_from_json_str(wrong);
+    assert_eq(task_scheduler_get_task(w, ScheduledTask_task_id(f)), 0, "a recorded list that is not a list refuses the task");
+    var neg = _replace_once(text, "\"held_profiles\":[1]", "\"held_profiles\":[1.5]");
+    assert_eq(task_scheduler_get_task(task_scheduler_from_json_str(neg), ScheduledTask_task_id(f)), 0, "and so does one of fractions");
+    # Without a record, as 1.5.0 wrote, the devices are chosen as they were.
+    var plain = _replace_once(text, ",\"held_profiles\":[1]", "");
+    assert_eq(task_scheduler_from_json_str(plain) != 0, 1, "a snapshot without records restores");
+    assert_eq(str_contains(task_scheduler_to_json_str(task_scheduler_new()), str_from("held_profiles")), 0, "and none is written without devices");
+    return 0;
+}
+
+fn test_audit_over_commit() {
+    test_group("audit_over_commit");
+    # A node re-registered smaller than its tasks hold counts below zero.
+    var s = task_scheduler_new();
+    task_scheduler_register_node(s, make_node("n", f64_from(16), 16384));
+    var a = scheduled_task_new(str_from("a"), str_from("d"), str_from("a"), 5, make_req(f64_from(6), 6000));
+    var b = scheduled_task_new(str_from("b"), str_from("d"), str_from("a"), 5, make_req(f64_from(6), 6000));
+    task_scheduler_submit_task(s, a);
+    task_scheduler_submit_task(s, b);
+    task_scheduler_schedule_pending(s);
+    var small = make_node("n", f64_from(8), 8192);
+    task_scheduler_register_node(s, small);
+    assert_eq(_cpu_milli(small), 0 - 4000, "12 cores on 8 leaves -4");
+    assert_eq(NodeCapacity_available_memory_mb(small), 0 - 3808, "and 12,000 MB on 8,192 leaves -3,808");
+    scheduled_task_transition(a, TASK_RUNNING);
+    task_scheduler_complete_task(s, ScheduledTask_task_id(a), TASK_COMPLETED);
+    assert_eq(_cpu_milli(small), 2000, "one task's release leaves 2 cores, not 6");
+    assert_eq(NodeCapacity_available_memory_mb(small), 2192, "and 2,192 MB, not 6,000");
+    task_scheduler_submit_task(s, scheduled_task_new(str_from("c"), str_from("d"), str_from("a"), 5, make_req(f64_from(6), 6000)));
+    assert_eq(vec_len(task_scheduler_schedule_pending(s)), 0, "so a third task is not sold what b uses");
+    # And it writes and reads back below zero, without calling that a disagreement.
+    task_scheduler_register_node(s, make_node("n", f64_from(4), 4096));
+    var text = task_scheduler_to_json_str(s);
+    _logs_start();
+    var r = task_scheduler_from_json_str(text);
+    _logs_stop();
+    assert_eq(NodeCapacity_available_memory_mb(map_get(TaskScheduler_nodes(r), str_from("n"))), 0 - 1904, "restored below zero");
+    assert_eq(_logged("disagrees"), 0, "as written, so nothing disagrees");
+    # Huge holds stop at a floor rather than wrap.
+    assert_eq(_capacity_taken(0, 9223372036854775807), _CAPACITY_FLOOR, "taking the most there is stops at the floor");
+    assert_eq(_capacity_taken(_CAPACITY_FLOOR, 9223372036854775807), _CAPACITY_FLOOR, "and stays there");
+    assert_eq(_capacity_taken(9223372036854775807, 1), 9223372036854775806, "a huge node takes as usual");
+    assert_eq(_capacity_returned(0 - 100, 300, 1000), 200, "below zero, a release adds");
+    assert_eq(_capacity_returned(0 - 100, 3000, 1000), 1000, "up to the total");
+    return 0;
+}
+
+fn test_audit_orphans_and_ceiling() {
+    test_group("audit_orphans_and_ceiling");
+    # Tasks restored without their node charge it when it registers.
+    var s = task_scheduler_new();
+    var g = _gpu_node("g", 1);
+    task_scheduler_register_node(s, g);
+    var t = _req_task("t", 5, make_req(f64_from(6), 6000));
+    ResourceReq_set_accel_req(ScheduledTask_resource_requirements(t), REQ_GPU);
+    task_scheduler_submit_task(s, t);
+    task_scheduler_schedule_pending(s);
+    scheduled_task_transition(t, TASK_RUNNING);
+    var only = task_scheduler_new();
+    task_scheduler_submit_task(only, t);
+    var r = task_scheduler_from_json_str(task_scheduler_to_json_str(only));
+    assert_eq(TaskScheduler_orphans(r), 1, "a task held a node the snapshot lacks");
+    var late = _gpu_node("g", 1);
+    task_scheduler_register_node(r, late);
+    assert_eq(NodeCapacity_running_tasks(late) * 10000 + _used(late, 0), 11000, "registering it charges the task and its GPU");
+    assert_eq(TaskScheduler_orphans(r), 0, "and nothing is left over");
+    task_scheduler_submit_task(r, _req_task("u", 5, _gpu_req(1)));
+    assert_eq(vec_len(task_scheduler_schedule_pending(r)), 0, "so its GPU is not sold");
+    var other = make_node("other", f64_from(8), 8192);
+    task_scheduler_register_node(r, other);
+    assert_eq(NodeCapacity_running_tasks(other), 0, "and a node no task holds is charged nothing");
+    # Past the device ceiling a profile is not added, and a snapshot is refused.
+    var saved = SAMAY_MAX_NODE_DEVICES;
+    SAMAY_MAX_NODE_DEVICES = 2;
+    _logs_start();
+    var n = _gpu_node("n", 3);
+    _logs_stop();
+    assert_eq(vec_len(NodeCapacity_accel_profiles(n)), 2, "the third profile is not added");
+    assert_eq(_logged("node 'n': accelerator profile not added, past 2"), 1, "and that is logged, with the node");
+    var three = str_builder_new();
+    str_builder_add_cstr(three, "{\"nodes\":[");
+    str_builder_add(three, _node_doc(str_cstr(_profile_text())));
+    str_builder_add_cstr(three, "]}");
+    var one = task_scheduler_from_json_str(str_builder_build(three));
+    assert_eq(one != 0, 1, "a node within it restores");
+    var pt = str_cstr(_profile_text());
+    var list = str_builder_new();
+    str_builder_add_cstr(list, pt);
+    str_builder_add_cstr(list, ",");
+    str_builder_add_cstr(list, pt);
+    str_builder_add_cstr(list, ",");
+    str_builder_add_cstr(list, pt);
+    var over = str_builder_new();
+    str_builder_add_cstr(over, "{\"nodes\":[");
+    str_builder_add(over, _node_doc(str_cstr(str_builder_build(list))));
+    str_builder_add_cstr(over, "]}");
+    _logs_start();
+    var refused = task_scheduler_from_json_str(str_builder_build(over));
+    _logs_stop();
+    SAMAY_MAX_NODE_DEVICES = saved;
+    assert_eq(refused, 0, "a node past it refuses its scheduler");
+    assert_eq(_logged("node 'g' refused: more accelerator profiles than 2"), 1, "and says which and why");
+    # The rank order of a node's profiles, sorted once: biggest memory first, then index.
+    var mixed = make_node("m", f64_from(8), 8192);
+    node_capacity_add_accel(mixed, profile_cuda(0, 8589934592));
+    node_capacity_add_accel(mixed, profile_cuda(1, 34359738368));
+    node_capacity_add_accel(mixed, profile_cuda(2, 17179869184));
+    node_capacity_add_accel(mixed, profile_cuda(3, 34359738368));
+    var order = _accel_order(mixed);
+    assert_eq(vec_get(order, 0) * 1000 + vec_get(order, 1) * 100 + vec_get(order, 2) * 10 + vec_get(order, 3), 1320,
+      "32 GB first, lower index on a tie, then 16, then 8");
+    node_capacity_add_accel(mixed, profile_cuda(4, 68719476736));
+    assert_eq(vec_get(_accel_order(mixed), 0), 4, "and sorted again when a profile is added");
+    return 0;
+}
+
+# The rank order written out plainly, to check the heap sort against: the better rank,
+# then more memory, then the lower index.
+fn _rank_first(profs, a, b) {
+    var pa = vec_get(profs, a);
+    var pb = vec_get(profs, b);
+    if (profile_rank(pa) != profile_rank(pb)) { return profile_rank(pa) > profile_rank(pb); }
+    if (profile_memory_bytes(pa) != profile_memory_bytes(pb)) { return profile_memory_bytes(pa) > profile_memory_bytes(pb); }
+    return a < b;
+}
+
+fn _rank_expected(node) {
+    var profs = NodeCapacity_accel_profiles(node);
+    var out = vec_new();
+    var i = 0;
+    while (i < vec_len(profs)) {
+        vec_push(out, i);
+        var j = i;
+        while (j > 0) {
+            if (_rank_first(profs, vec_get(out, j - 1), i) == 1) { break; }
+            vec_set(out, j, vec_get(out, j - 1));
+            j = j - 1;
+        }
+        vec_set(out, j, i);
+        i = i + 1;
+    }
+    return out;
+}
+
+# Entries [from, from + k) of `v`, lowest first.
+fn _slice_sorted(v, from, k) {
+    var out = vec_new();
+    var i = 0;
+    while (i < k) {
+        var at = vec_get(v, from + i);
+        vec_push(out, at);
+        var j = i;
+        while (j > 0) {
+            if (vec_get(out, j - 1) < at) { break; }
+            vec_set(out, j, vec_get(out, j - 1));
+            j = j - 1;
+        }
+        vec_set(out, j, at);
+        i = i + 1;
+    }
+    return out;
+}
+
+fn _same_vec(a, b) {
+    if (vec_len(a) != vec_len(b)) { return 0; }
+    var i = 0;
+    while (i < vec_len(a)) {
+        if (vec_get(a, i) != vec_get(b, i)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn _held_by(node, req) {
+    var list = vec_new();
+    _accel_held_list(node, req, list);
+    return list;
+}
+
+fn _devices_req(n) { return resource_req_with_devices(_gpu_req(1), n); }
+
+fn test_device_rank_oracle() {
+    test_group("device_rank_oracle");
+    # Nodes of 1 to 40 GPUs of two ranks and three sizes, many of them equal: the sort,
+    # and what whole-device requests take by it, against the order written out plainly.
+    var seed = 12345;
+    var order_wrong = 0;
+    var holds_wrong = 0;
+    var n = 1;
+    while (n <= 40) {
+        var node = make_node("r", f64_from(1024), 1048576);
+        var i = 0;
+        while (i < n) {
+            seed = (seed * 1103515245 + 12345) & 2147483647;
+            var mem = 8589934592 << ((seed >> 8) % 3);
+            if ((seed >> 4) % 2 == 0) {
+                node_capacity_add_accel(node, profile_cuda(i, mem));
+            } else {
+                node_capacity_add_accel(node, profile_rocm(i, mem));
+            }
+            i = i + 1;
+        }
+        var want = _rank_expected(node);
+        if (_same_vec(_accel_order(node), want) == 0) { order_wrong = order_wrong + 1; }
+        # The best k, then the rest, then, with none free, the best full ones again.
+        var k = n / 2 + 1;
+        var first = _devices_req(k);
+        node_capacity_reserve(node, first);
+        if (_same_vec(_held_by(node, first), _slice_sorted(want, 0, k)) == 0) { holds_wrong = holds_wrong + 1; }
+        if (n > k) {
+            var rest = _devices_req(n - k);
+            node_capacity_reserve(node, rest);
+            if (_same_vec(_held_by(node, rest), _slice_sorted(want, k, n - k)) == 0) { holds_wrong = holds_wrong + 1; }
+        }
+        var over = 3;
+        if (n < 3) { over = n; }
+        var past = _devices_req(over);
+        node_capacity_reserve(node, past);
+        if (_same_vec(_held_by(node, past), _slice_sorted(want, 0, over)) == 0) { holds_wrong = holds_wrong + 1; }
+        n = n + 1;
+    }
+    assert_eq(order_wrong, 0, "every node's profiles sort in rank order");
+    assert_eq(holds_wrong, 0, "and requests take the best first, full ones first when none is free");
+    # A share with no device free is counted on the best full one, the first included.
+    var g = _gpu_node("g", 1);
+    node_capacity_reserve(g, _gpu_req(1));
+    var half = resource_req_with_share(_gpu_req(1), 500);
+    node_capacity_reserve(g, half);
+    assert_eq(_used(g, 0), 1500, "a share past a full device is counted on it");
+    assert_eq(vec_len(_held_by(g, half)), 1, "and held");
+    return 0;
+}
+
+# Profile indices as decimal digits, each plus one, so [] is 0 and [2,3] is 34.
+fn _digits(v) {
+    var code = 0;
+    var i = 0;
+    while (i < vec_len(v)) {
+        code = code * 10 + vec_get(v, i) + 1;
+        i = i + 1;
+    }
+    return code;
+}
+
+fn _list3(a, b, c, k) {
+    var v = vec_new();
+    if (k > 0) { vec_push(v, a); }
+    if (k > 1) { vec_push(v, b); }
+    if (k > 2) { vec_push(v, c); }
+    return v;
+}
+
+# What a record taken on four free GPUs answers, times 1000, plus the devices held.
+fn _listed_on_four(devices, list) {
+    var node = _gpu_node("n", 4);
+    var req = _devices_req(devices);
+    var used = _reserve_listed(node, req, list);
+    return used * 1000 + _digits(_held_by(node, req));
+}
+
+fn test_device_records_checked() {
+    test_group("device_records_checked");
+    # A record that fits is taken as it stands; one that does not is chosen again.
+    assert_eq(_listed_on_four(2, _list3(2, 3, 0, 2)), 1034, "a record that fits is taken");
+    assert_eq(_listed_on_four(2, vec_new()), 12, "an empty record is no record: the best two");
+    assert_eq(_listed_on_four(2, _list3(0, 1, 2, 3)), 12, "more devices than the request takes");
+    assert_eq(_listed_on_four(2, _list3(0 - 1, 2, 0, 2)), 12, "an index below zero");
+    assert_eq(_listed_on_four(2, _list3(2, 4, 0, 2)), 12, "an index past the node's profiles");
+    assert_eq(_listed_on_four(3, _list3(0, 3, 3, 3)), 123, "the same device twice");
+    var mixed = make_node("m", f64_from(64), 524288);
+    node_capacity_add_accel(mixed, profile_cuda(0, 17179869184));
+    node_capacity_add_accel(mixed, profile_gaudi(0, 2));
+    var gpu = _gpu_req(1);
+    assert_eq(_reserve_listed(mixed, gpu, _one(1)), 0, "a device that does not serve the request");
+    assert_eq(_digits(_held_by(mixed, gpu)), 1, "so the GPU is chosen");
+    var cpu = make_req(f64_from(1), 1);
+    assert_eq(_reserve_listed(mixed, cpu, _one(0)), 1, "a request for no device has nothing to choose");
+    assert_eq(vec_len(_held_by(mixed, cpu)), 0, "and holds nothing");
+    # A restore that takes every record as written says nothing about devices.
+    var s = task_scheduler_new();
+    task_scheduler_register_node(s, _gpu_node("n", 2));
+    task_scheduler_submit_task(s, _req_task("t", 5, _gpu_req(1)));
+    task_scheduler_schedule_pending(s);
+    var text = task_scheduler_to_json_str(s);
+    _logs_start();
+    task_scheduler_from_json_str(text);
+    _logs_stop();
+    assert_eq(_logged("chosen again"), 0, "a record that fits is not chosen again");
+    _logs_start();
+    task_scheduler_from_json_str(_replace_once(text, "\"held_profiles\":[0]", "\"held_profiles\":[5]"));
+    _logs_stop();
+    assert_eq(_logged("node 'n': a task's recorded devices do not fit it"), 1, "one that does not names its node");
+    _logs_start();
+    task_scheduler_from_json_str(_replace_once(text, "\"running_tasks\":1", "\"running_tasks\":0"));
+    _logs_stop();
+    assert_eq(_logged("node 'n': snapshot capacity disagrees with its tasks"), 1, "and so does a rebuilt node");
+    # At the device ceiling exactly, a node and a record of every device both restore.
+    var saved = SAMAY_MAX_NODE_DEVICES;
+    SAMAY_MAX_NODE_DEVICES = 2;
+    var two = task_scheduler_new();
+    task_scheduler_register_node(two, _gpu_node("n", 2));
+    var both = _req_task("both", 5, _devices_req(2));
+    task_scheduler_submit_task(two, both);
+    task_scheduler_schedule_pending(two);
+    var ttext = task_scheduler_to_json_str(two);
+    assert_eq(str_contains(ttext, str_from("\"held_profiles\":[0,1]")), 1, "a task records both devices");
+    var back = task_scheduler_from_json_str(ttext);
+    assert_eq(back != 0, 1, "a node of exactly the ceiling restores");
+    assert_eq(task_scheduler_get_task(back, ScheduledTask_task_id(both)) != 0, 1, "and so does a record that long");
+    var pt = str_cstr(_profile_text());
+    var three = str_builder_new();
+    str_builder_add_cstr(three, pt);
+    str_builder_add_cstr(three, ",");
+    str_builder_add_cstr(three, pt);
+    str_builder_add_cstr(three, ",");
+    str_builder_add_cstr(three, pt);
+    assert_eq(node_capacity_from_json_str(_node_doc(str_cstr(str_builder_build(three)))), 0, "a node past it is refused alone too");
+    SAMAY_MAX_NODE_DEVICES = saved;
+    return 0;
+}
+
+fn test_restore_counts_orphans() {
+    test_group("restore_counts_orphans");
+    # One task on each of a, b and c, and a snapshot that has only b: two are orphans,
+    # wherever the missing nodes sort.
+    var s = task_scheduler_new();
+    var b = make_node("b", f64_from(1), 8192);
+    task_scheduler_register_node(s, make_node("a", f64_from(1), 8192));
+    task_scheduler_register_node(s, b);
+    task_scheduler_register_node(s, make_node("c", f64_from(1), 8192));
+    var only = task_scheduler_new();
+    task_scheduler_register_node(only, b);
+    var i = 0;
+    while (i < 3) {
+        var t = _req_task(str_cstr(_numbered("t", i)), 5, make_req(f64_from(1), 1));
+        task_scheduler_submit_task(s, t);
+        task_scheduler_submit_task(only, t);
+        i = i + 1;
+    }
+    assert_eq(vec_len(task_scheduler_schedule_pending(s)), 3, "one task on each node");
+    var r = task_scheduler_from_json_str(task_scheduler_to_json_str(only));
+    assert_eq(TaskScheduler_orphans(r), 2, "the tasks on a and c are orphans, the one on b is not");
+    var whole = task_scheduler_from_json_str(task_scheduler_to_json_str(s));
+    assert_eq(TaskScheduler_orphans(whole), 0, "with every node there, none is");
+    return 0;
+}
+
+fn test_preempt_counts_finished() {
+    test_group("preempt_counts_finished");
+    # A task finished through its transition still holds its node until a pass, and a
+    # running task beside it is no victim for what that room can take.
+    var s = task_scheduler_new();
+    task_scheduler_register_node(s, make_node("n", f64_from(8), 8192));
+    var low = scheduled_task_new(str_from("low"), str_from("d"), str_from("a"), 1, make_req(f64_from(4), 1));
+    var done = scheduled_task_new(str_from("done"), str_from("d"), str_from("a"), 1, make_req(f64_from(4), 1));
+    task_scheduler_submit_task(s, low);
+    task_scheduler_submit_task(s, done);
+    task_scheduler_schedule_pending(s);
+    scheduled_task_transition(low, TASK_RUNNING);
+    scheduled_task_transition(done, TASK_RUNNING);
+    scheduled_task_transition(done, TASK_COMPLETED);
+    var high = scheduled_task_new(str_from("high"), str_from("d"), str_from("a"), 10, make_req(f64_from(4), 1));
+    task_scheduler_submit_task(s, high);
+    assert_eq(task_scheduler_preempt_if_needed(s, high), 0, "the finished task's room is enough");
+    assert_eq(ScheduledTask_status(low), TASK_RUNNING, "so the running one keeps going");
+    return 0;
+}
+
+fn test_cron_replace_and_reset() {
+    test_group("cron_replace_and_reset");
+    var tmpl = cron_task_template_new(str_from("t"), str_from("d"), str_from("a"), 5, resource_req_default());
+    # A schedule changed in any one field starts fresh: hour, day, month, weekday, and
+    # a day or weekday written out in full rather than as a star.
+    var from = vec_new();
+    var to = vec_new();
+    vec_push(from, "0 1 * * *");
+    vec_push(to, "0 2 * * *");
+    vec_push(from, "0 0 1 * *");
+    vec_push(to, "0 0 2 * *");
+    vec_push(from, "0 0 * 1 *");
+    vec_push(to, "0 0 * 2 *");
+    vec_push(from, "0 0 * * 1");
+    vec_push(to, "0 0 * * 2");
+    vec_push(from, "0 0 * * 1");
+    vec_push(to, "0 0 1-31 * 1");
+    vec_push(from, "0 0 1 * *");
+    vec_push(to, "0 0 1 * 0-6");
+    var fresh = 0;
+    var i = 0;
+    while (i < vec_len(from)) {
+        var c = _cron_with("job", vec_get(from, i), CRON_CATCHUP);
+        cron_scheduler_check_due_at(c, NOON);
+        cron_scheduler_add(c, str_from("job"), str_from(vec_get(to, i)), tmpl, 1, CRON_CATCHUP);
+        if (CronEntry_last_fired(_entry_of(c, "job")) == 0) { fresh = fresh + 1; }
+        i = i + 1;
+    }
+    assert_eq(fresh, 6, "each changed field starts fresh");
+    # The same schedule replaced during a reset keeps the reset.
+    var r = _cron_with("job", "0 * * * *", CRON_CATCHUP);
+    cron_scheduler_check_due_at(r, NOON);
+    cron_scheduler_check_due_at(r, 946684800000000000);
+    cron_scheduler_add(r, str_from("job"), str_from("0 * * * *"), tmpl, 1, CRON_CATCHUP);
+    assert_eq(CronEntry_reset_from(_entry_of(r, "job")), NOON, "a replace keeps how far it had got");
+    assert_eq(vec_len(cron_scheduler_check_due_at(r, NOON + 5 * MIN_NS)), 0, "so nothing fires twice");
+    # Back at exactly the mark, nothing fires twice either.
+    var at = _cron_with("job", "0 * * * *", CRON_CATCHUP);
+    cron_scheduler_check_due_at(at, NOON);
+    cron_scheduler_check_due_at(at, 946684800000000000);
+    assert_eq(vec_len(cron_scheduler_check_due_at(at, NOON)), 0, "the very instant it had got to fires nothing");
+    # An entry held by the burst budget as its reset ends keeps the mark, not the reset.
+    var h = _cron_with("a", "* * * * *", CRON_CATCHUP);
+    cron_scheduler_add(h, str_from("b"), str_from("* * * * *"), tmpl, 1, CRON_CATCHUP);
+    cron_scheduler_check_due_at(h, NOON);
+    cron_scheduler_check_due_at(h, 946684800000000000);
+    var keep = CRON_BURST_BUDGET;
+    CRON_BURST_BUDGET = 4;
+    assert_eq(vec_len(cron_scheduler_check_due_at(h, NOON + 3 * MIN_NS)), 3, "one entry's three minutes fit the budget");
+    CRON_BURST_BUDGET = keep;
+    assert_eq(vec_len(cron_scheduler_check_due_at(h, NOON + 3 * MIN_NS)), 3, "the held one fires its three, not the reset");
+    return 0;
+}
+
+fn test_log_lines_name() {
+    test_group("log_lines_name");
+    # A stuck task's id: control bytes are shown as '?', a space as itself.
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "a b");
+    str_builder_putc(sb, 10);
+    str_builder_putc(sb, 1);
+    str_builder_putc(sb, 99);
+    str_builder_putc(sb, 127);
+    _logs_start();
+    _log_no_capacity(str_builder_build(sb));
+    _logs_stop();
+    assert_eq(_logged("task 'a b??c?': no node with sufficient capacity"), 1, "every control byte, and only those");
+    # An empty id is refused, and said so, both ways it can be empty.
+    var s = task_scheduler_new();
+    var none = make_node("z", f64_from(1), 1);
+    NodeCapacity_set_node_id(none, 0);
+    _logs_start();
+    assert_eq(task_scheduler_register_node(s, make_node("", f64_from(1), 1)), 1, "an empty id is refused");
+    assert_eq(task_scheduler_register_node(s, none), 1, "and so is none");
+    _logs_stop();
+    assert_eq(_logged("node refused: an empty id"), 2, "each said so");
+    # A clamped training deadline names its model.
+    _logs_start();
+    training_job_to_scheduled_task(training_job_template_new(str_from("m"), TM_LORA, str_from("d"), 0, 9223372036854775807, 0),
+      str_from("agent"));
+    _logs_stop();
+    assert_eq(_logged("training 'm': max_duration_secs"), 1, "a clamp names the model");
+    # A profile whose text parses past its budget is left out of the node's snapshot.
+    var g = make_node("g", f64_from(8), 8192);
+    var p = profile_cuda(0, 17179869184);
+    profile_set_device_name(p, str_cstr(_chars("x", 5000)));
+    node_capacity_add_accel(g, p);
+    var keep = SAMAY_JSON_MAX_EXPANSION;
+    SAMAY_JSON_MAX_EXPANSION = 0;
+    _logs_start();
+    var text = node_capacity_to_json_str(g);
+    _logs_stop();
+    SAMAY_JSON_MAX_EXPANSION = keep;
+    assert_eq(text != 0, 1, "the node is written");
+    assert_eq(_logged("takes more than 0 times that"), 1, "without the profile, and the parse says why");
+    assert_eq(_logged("node 'g': accelerator profile omitted"), 1, "and the node says what it lost");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_uuid_format();
@@ -7363,6 +8521,7 @@ fn main() {
     test_json_expansion_limit();
     test_json_budget_allocator();
     test_leaf_decoders_check();
+    test_restore_tree_mapped();
     test_known_shapes();
     test_known_record();
     test_reserve_grew();
@@ -7375,6 +8534,22 @@ fn main() {
     test_cpu_work_avoids_accel_nodes();
     test_accel_hold_edges();
     test_known_shapes_count_devices();
+    test_audit_restore_axes();
+    test_audit_lifecycle_pins();
+    test_audit_pins();
+    test_audit_cron_clock();
+    test_audit_cron_edits();
+    test_audit_cron_masks();
+    test_audit_restore_records();
+    test_audit_held_devices();
+    test_audit_over_commit();
+    test_audit_orphans_and_ceiling();
+    test_device_rank_oracle();
+    test_device_records_checked();
+    test_restore_counts_orphans();
+    test_preempt_counts_finished();
+    test_cron_replace_and_reset();
+    test_log_lines_name();
     return assert_summary();
 }
 

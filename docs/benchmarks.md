@@ -14,6 +14,61 @@ pre-warm off every hot path, and re-measured within noise of the table below
 | `samay_uuid_v4`         | 606 ns   | 613 ns   | getrandom(2) syscall-bound         |
 | `scheduled_task_new`    | 2.07 µs  | 2.06 µs  | alloc + uuid + `dt_now`            |
 
+## v1.5.1 — what the audit fixes cost
+
+Measured on cyrius 6.7.18 (2026-11-02), pinned to one CPU, 1.5.0 against 1.5.1.
+
+**Restore, five interleaved runs, medians.** The harness restores a file and reads its own memory
+from `/proc/self/status` and `alloc_used()`. The documents hold 100,000 records each, unplaced.
+
+| Document | Time | Heap left behind | Memory in use after | Peak |
+|---|---|---|---|---|
+| tasks (46 MB) | 1.90 → 1.85 s | 282 → 44 MiB | 329 → 93 MiB | 329 → 332 MiB |
+| nodes (20 MB) | 0.99 → 0.97 s | 172 → 70 MiB | 195 → 91 MiB | 195 → 196 MiB |
+| cron entries (40 MB) | 1.81 → 1.83 s | 286 → 45 MiB | 327 → 87 MiB | 327 → 331 MiB |
+
+The tree goes back when it has been read ([ADR-0014](adr/0014-what-a-document-may-cost.md)); the peak
+is unchanged because it still has to be read whole.
+
+**Restore at the device ceiling** ([ADR-0018](adr/0018-a-task-records-its-devices.md)), with real
+CUDA profiles and no recorded holds, as a hostile document would come:
+
+| Document | Size | Restore |
+|---|---|---|
+| 1 node of 1,024 GPUs, 100 tasks each holding all of them | 163 KB | 32 ms |
+| the same, 1,000 tasks | 542 KB | 171 ms |
+| 1 node of 1,024 GPUs, 20,000 one-GPU tasks over-committed | 7.8 MB | 1.1 s |
+| the same, 100,000 tasks | 38.6 MB | 5.4 s |
+
+Through 1.5.0, one task holding 32,000 devices in a 1 MB document took 87 s.
+
+**`tests/samay.bcyr`**, 1.5.0's bench file built against each `src/`, seven rounds interleaved and
+shuffled. Medians:
+
+| Op | 1.5.0 | 1.5.1 | Δ |
+|---|---|---|---|
+| `node_can_fit` | 14.84 ns | 14.87 ns | +0.2% |
+| `priority_from_numeric` | 4.30 ns | 4.31 ns | +0.2% |
+| `samay_uuid_v4` | 662 ns | 660 ns | -0.3% |
+| `scheduled_task_new` | 2.38 µs | 2.40 µs | +1.0% |
+| `cron_expr_matches` | 17.94 ns | 18.63 ns | +3.8% |
+| `pending_tasks_2000` | 345 µs | 350 µs | +1.3% |
+| `cron_count_window` | 24.4 µs | 24.8 µs | +1.8% |
+| `scheduled_task_to_jsonv` | 2.50 µs | 2.52 µs | +0.4% |
+| `cron_entry_to_jsonv` | 2.61 µs | 2.63 µs | +0.8% |
+| `node_can_fit_gpu` | 58.5 ns | 57.8 ns | -1.2% |
+| `best_fit_tpu_100_nodes` | 13.5 µs | 13.7 µs | +1.1% |
+| `schedule_pending_stuck_2000` | 1.88 ms | 2.01 ms | **+7.3%** |
+| `schedule_pending_place_500` | 19.0 ms | 19.1 ms | +0.2% |
+| `node_can_fit_4_gpus` | 149 ns | 147 ns | -1.3% |
+| `node_can_fit_share` | 61.4 ns | 59.6 ns | -3.0% |
+| `best_fit_cpu_100_mixed` | 8.46 µs | 8.41 µs | -0.6% |
+
+- **`schedule_pending_stuck_2000`**: each stuck task's log line is checked byte by byte, so a task id
+  with a control character cannot forge a line. That is 0.13 ms on a pass of 2,000 stuck tasks.
+- **`cron_expr_matches`** did not change, and `cron_count_window` only by where code sits: the same
+  shift 1.4.6 measured.
+
 ## v1.5.0 — several devices, a share of one, and CPU work last
 
 [ADR-0016](adr/0016-several-devices-or-a-share-of-one.md),
@@ -40,9 +95,10 @@ Medians:
 - **`node_can_fit_gpu`**: whether a node fits now counts free matching devices and stops at enough.
   1.4.6 ranked every profile to pick one, and only a hold needs the ranking.
 - **`schedule_pending_place_500`**, 500 CPU tasks on 500 CPU nodes, costs 4.0%, and the runs do not
-  overlap (18.1 to 18.2 ms against 18.8 to 18.9). ADR-0017's check is 2.5 points of it: built with the
-  check switched off, the row reads 18.4 to 18.6 ms. The check is looked up only for a node that would
-  win on utilization, and is about 2 ns a node.
+  overlap (18.1 to 18.2 ms against 18.8 to 18.9). Built with ADR-0017's check switched off, the row
+  reads 18.4 to 18.6 ms, so the check is about 1.7 points of it and the device rewrite the other 2.2.
+  (Corrected in 1.5.1: this said 2.5 points.) The check is looked up only for a node that would win on
+  utilization.
 
 New rows, 1.5.0 only:
 

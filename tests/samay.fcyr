@@ -209,19 +209,51 @@ fn _fz_fail(round, what) {
     return 0;
 }
 
-# Capacity stays within [0, total] on every axis.
+# What the tasks holding node `id` hold, on one axis: 0 cores, 1 memory, 2 disk. Cores come
+# back as thousandths, since they only need comparing.
+fn _fz_held(s, id, axis) {
+    var all = map_values(TaskScheduler_tasks(s));
+    var sum = 0;
+    var i = 0;
+    while (i < vec_len(all)) {
+        var t = vec_get(all, i);
+        var ron = ScheduledTask_reserved_on(t);
+        if (ron != 0) {
+            if (str_eq(ron, id) == 1) {
+                var r = ScheduledTask_resource_requirements(t);
+                if (axis == 0) { sum = sum + f64_to(f64_mul(ResourceReq_cpu_cores(r), f64_from(1000))); }
+                if (axis == 1) { sum = sum + ResourceReq_memory_mb(r); }
+                if (axis == 2) { sum = sum + ResourceReq_disk_mb(r); }
+            }
+        }
+        i = i + 1;
+    }
+    return sum;
+}
+
+# Capacity never passes its total, and is what the node's tasks leave of it: memory and
+# disk exactly, so below zero only for a node they over-commit (1.5.1, ADR-0007), and
+# cores below zero only then too.
 fn _fz_check_nodes(s, round) {
     var nodes = map_values(TaskScheduler_nodes(s));
     var i = 0;
     while (i < vec_len(nodes)) {
         var n = vec_get(nodes, i);
+        var id = NodeCapacity_node_id(n);
         if (NodeCapacity_available_memory_mb(n) > NodeCapacity_total_memory_mb(n)) { _fz_fail(round, "memory above total"); }
         if (NodeCapacity_available_disk_mb(n) > NodeCapacity_total_disk_mb(n)) { _fz_fail(round, "disk above total"); }
         if (f64_gt(NodeCapacity_available_cpu(n), NodeCapacity_total_cpu(n)) == 1) { _fz_fail(round, "cpu above total"); }
-        if (NodeCapacity_available_memory_mb(n) < 0) { _fz_fail(round, "memory below zero"); }
-        if (NodeCapacity_available_disk_mb(n) < 0) { _fz_fail(round, "disk below zero"); }
         if (NodeCapacity_running_tasks(n) < 0) { _fz_fail(round, "running count below zero"); }
-        if (f64_lt(NodeCapacity_available_cpu(n), f64_from(0)) == 1) { _fz_fail(round, "cpu below zero"); }
+        var mem = NodeCapacity_total_memory_mb(n) - _fz_held(s, id, 1);
+        if (mem < _CAPACITY_FLOOR) { mem = _CAPACITY_FLOOR; }
+        if (NodeCapacity_available_memory_mb(n) != mem) { _fz_fail(round, "memory is not what the tasks leave"); }
+        var disk = NodeCapacity_total_disk_mb(n) - _fz_held(s, id, 2);
+        if (disk < _CAPACITY_FLOOR) { disk = _CAPACITY_FLOOR; }
+        if (NodeCapacity_available_disk_mb(n) != disk) { _fz_fail(round, "disk is not what the tasks leave"); }
+        if (f64_lt(NodeCapacity_available_cpu(n), f64_from(0)) == 1) {
+            var total = f64_to(f64_mul(NodeCapacity_total_cpu(n), f64_from(1000)));
+            if (_fz_held(s, id, 0) <= total) { _fz_fail(round, "cpu below zero on a node not over-committed"); }
+        }
         i = i + 1;
     }
     return 0;

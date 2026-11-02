@@ -31,6 +31,9 @@ a task takes a whole device, or its chips of a TPU pod, and holds it until it fi
   `SAMAY_ACCEL_WHOLE` is 1000. Without either, a task takes one whole device, as since 1.4.3.
 - **⚠ Do not let a release before 1.5.0 restore a snapshot holding a multi-device task.** It reads one
   device for it, and offers the rest while the task uses them.
+- **Since 1.5.1 a snapshot records which devices each task holds** (`held_profiles`), so a restore puts
+  every task back on its own devices. Before, a restore could put two tasks on one GPU and offer a busy
+  device. A snapshot written by 1.5.0 or earlier has no record until it is written again.
 - A snapshot written before 1.4.3 can hold several tasks on one GPU. They all stay counted, and the
   device comes free when the last one finishes.
 
@@ -53,6 +56,12 @@ a task takes a whole device, or its chips of a TPU pod, and holds it until it fi
 | `resource_req_new` | 1.4.5 | `network` is stored as 0 or 1 | compared it with another number, compare with 1 |
 | `task_scheduler_schedule_pending` | 1.5.0 | Work that needs no accelerator goes to a node without one first, even when a GPU node is emptier ([ADR-0017](../adr/0017-cpu-work-goes-to-accelerator-nodes-last.md)) | expected CPU work on your GPU nodes, expect it on CPU nodes until they are full |
 | `ResourceReq_to_json` | 1.5.0 | Writes `accel_devices` and `accel_share` after `disk_mb`; snapshots write them only when used | parse its text yourself, expect two more keys |
+| `NodeCapacity_available_*` | 1.5.1 | Below zero on a node its tasks over-commit, after a smaller re-registration or such a snapshot ([ADR-0007](../adr/0007-reservation-lifecycle.md)) | read free capacity as never negative, clamp it yourself for display |
+| `cron_scheduler_add` | 1.5.1 | Replacing an entry with a different expression starts it fresh and logs that the old one's debt is given up; the same expression keeps its watermark | edit schedules in place, expect the new one to start from the next check |
+| `CronEntry_set_enabled` | 1.5.1 | Any value but 0 enables, as a restore already read it | set 2 to mean off, set 0 |
+| `node_capacity_add_accel` | 1.5.1 | Past `SAMAY_MAX_NODE_DEVICES` (1,024) adds nothing and logs ([ADR-0018](../adr/0018-a-task-records-its-devices.md)) | register a node with more, raise the var |
+| constructors | 1.5.1 | A null required Str (a task's name, a node's id) is stored as the empty Str; `register_node` refuses a null id | passed 0 for a name, expect `""` back |
+| `*_from_json_str` | 1.5.1 | Refuses a requirement missing a field, a profile with no type, device or memory, a non-finite score, and cron masks no expression produces | restore hand-written snapshots, give every field |
 
 ## Things that used to need work from you
 

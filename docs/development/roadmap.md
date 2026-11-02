@@ -1,6 +1,6 @@
 # samay — Roadmap
 
-> **Last refreshed**: 2026-11-02 (v1.5.0)
+> **Last refreshed**: 2026-11-02 (v1.5.1)
 >
 > **Forward-looking only.** Nothing shipped belongs here — per-release detail
 > lives in [`../../CHANGELOG.md`](../../CHANGELOG.md) (complete from 0.1.0), the
@@ -11,10 +11,10 @@
 > 2.0.0. The only unpinned items wait on an event outside this repo:
 > see [Event-gated](#event-gated--no-pin-by-design).
 
-> **Current**: **v1.5.0**, cyrius pin **6.7.18**, floor **6.7.10**, deps ai-hwaccel **2.5.6** +
-> bayan-json **1.11.1**. Gates green: **1,522 assertions**, **16/16 benchmarks**,
+> **Current**: **v1.5.1**, cyrius pin **6.7.18**, floor **6.7.10**, deps ai-hwaccel **2.5.6** +
+> bayan-json **1.11.1**. Gates green: **1,735 assertions**, **16/16 benchmarks**,
 > coverage **89/89** public functions (each called by a test; 6.6.14 stopped counting `main`), lint 0-warn / 0
-> untracked deferrals, fmt clean, `dist/` in sync (3,889 lines), 0 symbol collisions
+> untracked deferrals, fmt clean, `dist/` in sync (4,503 lines), 0 symbol collisions
 > against the vendored deps. `src/` is 9 modules. The 1,479-line Rust oracle was
 > retired after 1.1.5 ([`rust-old-removal.md`](rust-old-removal.md)).
 
@@ -22,15 +22,14 @@
 
 | Version | Theme | Risk | Gate to entry |
 |---|---|---|---|
-| **1.5.1** | A P(-1) audit of everything to date, and restore's parse tree freed | medium | 1.5.0 released: this is next |
-| **1.6.0** | Preemption: placed tasks and several victims | medium | an ADR on the new return shape |
+| **1.6.0** | Preemption: placed tasks and several victims | medium | an ADR on the new return shape: this is next |
 | **1.7.0** | Deadlines and `network`: make them work, or mark them for removal | medium | one ADR each |
 | **1.8.0** | Accounting: stats counters, lifetime totals, failure reasons | low | an ADR on lifetime totals as wire state |
 | **2.0.0** | Removals: `samay_init`, stats meanings, whatever 1.7.0 rejected | high | every consumer on 1.8.x |
 
 The repairs finished with 1.4.6, and 1.5.0 shipped ahead of consumer adoption, by the maintainer's
-call: it had waited on consumers moving to 1.4.x, which has not happened. 1.5.1 audits everything to
-date before the features after it.
+call: it had waited on consumers moving to 1.4.x, which has not happened. 1.5.1 audited everything to
+date, so the features after it start from a swept base.
 
 ---
 
@@ -49,18 +48,7 @@ at any time.
 
 ---
 
-## 1.5.1 onward
-
-### 1.5.1 — a P(-1) audit of everything to date
-
-*Entry gate*: 1.5.0 released, which it now is. The last sweep was 1.4.3's, so 1.4.4 to 1.5.0 have had
-none, and the sweep covers the whole library, not only those.
-
-- [ ] **A P(-1) sweep:** independent auditors who run things rather than read them, whole-source
-  mutation and the fuzz harness. A finding counts once its reproducer has been rerun.
-- [ ] **Restore's parse tree is never freed.** Every restore leaves its tree, about six times the
-  document, on the heap for good, because `alloc()` never frees
-  ([ADR-0014](../adr/0014-what-a-document-may-cost.md)). Build it where it can be let go.
+## 1.6.0 onward — features
 
 ### 1.6.0 — preemption
 

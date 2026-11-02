@@ -159,3 +159,34 @@ back is different: nothing is left to keep, and it starts fresh.
 - The cross-entry aggregate work budget (audit F8/F9) closed in v1.4.1
   ([ADR-0012](0012-cron-burst-budget.md)). That also corrected this ADR's prefilter note: it
   kept `epoch_to_date` off the miss path only, and a match still allocated until then.
+
+## Amendment (v1.5.1)
+
+The 1.5.1 audit compared the scheduler against an independent model over 24,000 random traces with no
+mismatch on anything this ADR describes, and found where what it describes was wrong.
+
+- **A reset keeps how far the entry had got (section 3).** One reading more than 3 hours behind
+  re-anchored every watermark at the bad instant, so the next correct reading fired the whole interval
+  again as catch-up: up to 1,000 duplicates an entry, logged as missed. The watermark before a reset is
+  kept as `reset_from`, and once time is back past it, what had already fired does not fire again.
+  A real step back still fires as time passes a second time, until it passes the mark. `reset_from` is on
+  the wire when set, so a restore between the two readings keeps it.
+- **A wait is logged once (section 3).** A step back of 3 hours or less logged a line per entry on every
+  check, about 320 bytes of heap each, never freed: 1,000 entries checked every 10 s for two hours wrote
+  720,000 lines. It is now said once per entry while it lasts.
+- **A changed schedule starts fresh (section 6).** Replacing an entry kept its watermark whatever the
+  new expression, so the new schedule fired for time before it existed (209 tasks after an outage),
+  and what the old one owed was given up with no log line. A replace with the same expression keeps its
+  watermark as before; a different one starts fresh and logs that the old one's debt is given up.
+- **A disabled entry says what it gave up once, across restores (section 4).** `disabled_seen` was not on
+  the wire, so every restart re-logged every disabled entry with its downtime counted as given up. It is
+  written when set, and a replace with the same schedule carries it.
+- **Only 0 is disabled.** The constructor stored any other value as 1, but `CronEntry_set_enabled(e, 2)`
+  left an entry dormant until a restore read it as 1.
+- **Restore refuses masks no expression produces:** an empty field, Sunday as 7, minute 60, day 0. An
+  entry with one restored enabled and never fired. Star flags absent from a snapshot are read from the
+  masks, a whole field being a star; 1.0.2 wrote none, and reading them as 0 fired `0 0 1 * *` daily.
+- **`cron_expr_next_after` stops a day short of the top of i64**, where the next minute wrapped
+  negative.
+- **Known limit:** a clock at or before the epoch cannot anchor a watermark, since 0 means never, so
+  checks there log a step back. No real clock reads 1970.

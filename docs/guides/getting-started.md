@@ -39,7 +39,7 @@ samay is a **library** exposed as a single-file bundle:
    over the files:
 
    ```sh
-   for f in src/*.cyr tests/*.tcyr tests/*.bcyr; do cyrius fmt "$f" --check; done
+   for f in src/*.cyr tests/*.tcyr tests/*.bcyr tests/*.fcyr docs/examples/*.cyr; do cyrius fmt "$f" --check; done
    for f in src/*.cyr; do cyrius lint "$f"; done   # want 0 warnings, 0 untracked deferrals
    cyrius test && cyrius bench tests/samay.bcyr
    cyrius distlib                                 # refresh dist/samay.cyr

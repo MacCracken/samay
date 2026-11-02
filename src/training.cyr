@@ -44,9 +44,9 @@ struct TrainingJobTemplate {
 fn training_job_template_new(model_id, method, dataset, target_node, max_duration_secs, checkpoint_interval_secs): i64 {
     var p = alloc(48);
     if (p == 0) { panic("samay: out of memory in training_job_template_new"); }
-    TrainingJobTemplate_set_model_id(p, _samay_own(model_id, "samay: out of memory in training_job_template_new"));
+    TrainingJobTemplate_set_model_id(p, _samay_own_req(model_id, "samay: out of memory in training_job_template_new"));
     TrainingJobTemplate_set_method(p, method);
-    TrainingJobTemplate_set_dataset(p, _samay_own(dataset, "samay: out of memory in training_job_template_new"));
+    TrainingJobTemplate_set_dataset(p, _samay_own_req(dataset, "samay: out of memory in training_job_template_new"));
     var target = _samay_own(target_node, "samay: out of memory in training_job_template_new");
     TrainingJobTemplate_set_target_node(p, target);
     TrainingJobTemplate_set_max_duration_secs(p, _req_amount(max_duration_secs));
@@ -87,7 +87,7 @@ fn _train_desc(method, model): Str {
 fn _log_deadline_clamp(model, requested): i64 {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "training '");
-    str_builder_add(sb, model);
+    _samay_log_add(sb, model, 128);
     str_builder_add_cstr(sb, "': max_duration_secs ");
     str_builder_add_int(sb, requested);
     str_builder_add_cstr(sb, " would overflow the deadline; clamped");

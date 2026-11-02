@@ -6,6 +6,7 @@ container is now checked, a collection of the wrong type refuses the snapshot, t
 key refuse it, a node past the profile limit refuses its scheduler, and a dropped record is counted
 and logged. Restore also checks each node against its tasks
 ([ADR-0007](0007-reservation-lifecycle.md)).
+**Amended** 2026-11-02 (v1.5.1): see *Readers that refuse what no writer wrote* below.
 **Amended** 2026-11-02 (v1.4.5): point 3 bounded neither bytes nor memory, and
 [ADR-0014](0014-what-a-document-may-cost.md) replaces its claim. Constructors now settle the same domain
 restore reads, so a value comes back as it was built, and the derived leaf types gain readers that
@@ -109,3 +110,19 @@ samay's own readers never used it. `resource_req_from_json_str`, `cron_expr_from
 `scheduling_decision_from_json_str`, `preemption_action_from_json_str` and
 `scheduler_stats_from_json_str` read the same text, require every field the derive writes, and answer
 0 for one missing or of the wrong type.
+
+## Readers that refuse what no writer wrote (v1.5.1)
+
+The 1.5.1 audit found readers accepting records samay never wrote:
+
+- **A requirement needs all six fields** the derive writes, as this ADR said and the reader did not:
+  `{"cpu_cores":1}` read as a request for nothing else. Every release since 1.0.2 writes all six.
+- **An accelerator profile needs its type, device and memory,** which ai-hwaccel's writer has always
+  given. A `{}` restored into a 184-byte profile, so a 58 MB document of them took 1.2 GB.
+- **A decision's score must be finite.** 1e400 read as +Inf, wrote back as `null`, and did not read again.
+- **A field that is never None is never null.** A constructor given 0 for a task's name, a node's id or
+  any other required Str now stores the empty Str. Kept as 0, the task was placed and counted, and the
+  first snapshot that met it crashed the process.
+- Optional keys added since are refused when of the wrong type: `held_profiles`
+  ([ADR-0018](0018-a-task-records-its-devices.md)), `disabled_seen` and `reset_from`
+  ([ADR-0006](0006-cron-expression-model.md)).
