@@ -12,33 +12,9 @@ jobs:
     name: CI Gate
     uses: ./.github/workflows/ci.yml
 
-  mutation:
-    name: Whole-source mutation
-    # Fails on a survivor not in scripts/mutation-baseline.txt: a line of src/ that can
-    # break with no test noticing. Too slow for every push, so it gates a release.
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4 (pinned — CVE-21)
-
-      - name: Install Cyrius toolchain
-        run: |
-          set -e
-          CYRIUS_VERSION="$(grep '^cyrius = ' cyrius.cyml | head -1 | sed 's/cyrius = "\(.*\)"/\1/')"
-          echo "Installing Cyrius $CYRIUS_VERSION"
-          curl -sSf https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | \
-            CYRIUS_VERSION="$CYRIUS_VERSION" sh
-          echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
-
-      - name: Resolve dependencies
-        run: cyrius deps
-
-      - name: Mutate
-        run: python3 scripts/mutate.py
-
   release:
     name: Build & Release
-    needs: [ci, mutation]
+    needs: [ci]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4 (pinned — CVE-21)

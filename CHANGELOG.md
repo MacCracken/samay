@@ -8,8 +8,8 @@ All notable changes to Samay are documented here. Format follows
 
 **Standing gates: what was checked by hand now fails the build, and `src/` did not change.** CI runs
 the fuzz harness, the suite on aarch64 and in bounds-checked mode, the README example, the examples,
-and a build on the toolchain floor, which is now known: **cyrius 6.7.10**. Whole-source mutation gates
-a release. Every gate was shown to fail on a planted defect. **1,232 tests**, up 8. The toolchain, deps
+and a build on the toolchain floor, which is now known: **cyrius 6.7.10**. Whole-source mutation runs
+locally before a release, never in CI. Every gate was shown to fail on a planted defect. **1,232 tests**, up 8. The toolchain, deps
 and wire format are unchanged, and the bundle differs from 1.4.3 only in its version line.
 
 ### Added — CI ([`ci.yml`](.github/workflows/ci.yml))
@@ -26,7 +26,6 @@ A check that has never failed proves nothing, so each was run against a defect p
 | `scripts/check-readme.sh` | a compile break, a wrong outcome | exit 1 for each |
 | `docs/examples/*.cyr` | a wrong expectation | exit 1 |
 | `scripts/check-floor.sh` | cyrius 6.7.9 | exit 1. 6.7.10 passes |
-| `scripts/mutate.py` | seven uuid assertions removed | exit 1, naming the survivors |
 
 The fmt loop now also covers `tests/*.fcyr` and `docs/examples/*.cyr`. The new jobs `aarch64` and
 `floor` read their versions from `cyrius.cyml`, so no version lives in the YAML.
@@ -46,14 +45,14 @@ came from building every toolchain against the pinned deps, from an empty `lib/`
 The floor is for the pinned deps. `dist/samay.cyr` alone still compiles against a consumer's older
 deps, as daimon's does on 6.6.6, but that is not gated.
 
-### Added — whole-source mutation gates a release
+### Added — whole-source mutation, run locally
 
 `scripts/mutate.py` breaks `src/` one line at a time and runs the suite on each.
 `scripts/mutation-baseline.txt` lists the survivors already read and accepted, and a survivor not on
-that list fails the [release workflow](.github/workflows/release.yml). It is too slow for every push,
-so `--file` runs one module in seconds to minutes. Of 1,184 mutants, 8 do not compile and 149
-survive, all read and accepted. Two full runs on different seeds found the same 149, taking about
-13 minutes each on 12 workers.
+that list fails the run: with seven uuid assertions removed it exits 1 and names the survivors. A run
+takes about 13 minutes on 12 workers and about 45 on a CI runner, so it runs locally before tagging,
+never in CI. `--file` runs one module in seconds to minutes. Of 1,184 mutants, 8 do not compile and
+149 survive, all read and accepted. Two full runs on different seeds found the same 149.
 
 A kill can depend on the per-process hash seed, and that cannot be pinned from outside `lib/`. So a
 survivor gets two more runs, one kill counts, and a kill that needed a retry is printed by name.
@@ -62,7 +61,7 @@ survivor gets two more runs, one kill counts, and a kill that needed a retry is 
 
 Comparing whole mutation runs found four mutants that came and went. Each was caught by a test
 resting on the hash seed or on where random uuids sorted, so the line it guarded was only sometimes
-guarded, and a baseline would have failed releases at random.
+guarded, and a baseline would have failed runs at random.
 
 | Mutant | Survived before | After | The gap |
 |---|---|---|---|
@@ -90,14 +89,15 @@ ghost holds in a row gained a test too, which kills a skip-loop mutant that had 
 ### Changed — tidying
 
 - `CLAUDE.md`'s gate list matches CI, and says when to run mutation by hand.
-- Stale kavach and daimon version stamps are gone from `overview.md` and `state.md`. ADR-0009's claim that daimon ignored the `Err` tag is now past tense.
+- Stale kavach and daimon version stamps are gone from `overview.md` and `state.md`. ADR-0009's
+  claim that daimon ignored the `Err` tag is now past tense.
 - The vendoring comment in `cyrius.cyml` names `cyrius deps`. CI's comment that a bare
   `cyrius fmt --check` exits 0 is gone: the current toolchain exits 1 on a bare `fmt` or `lint`.
 
 ### Not verified
 
 - **The new CI jobs have not run on a real runner.** Each step was run locally. `aarch64` depends on
-  `qemu-user` from apt, and `mutation` has only been timed locally.
+  `qemu-user` from apt.
 - **No consumer was rebuilt.** The bundle's code is unchanged, so this is the same answer as 1.4.3:
   stiva's full suite cannot run on its pin, and kavach and daimon are still on 1.1.x.
 

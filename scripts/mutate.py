@@ -21,8 +21,8 @@ that needed a retry is printed, because a test there is passing by luck.
   scripts/mutate.py --file src/uuid.cyr  just that file, which takes seconds to minutes
   scripts/mutate.py --write-baseline  accept this run's survivors. Read them first.
 
-Run from the repo root. A run takes about 13 minutes on 12 workers, so it gates a release,
-not a push.
+Run from the repo root, locally only, never in CI: about 13 minutes on 12 workers, and about 45
+on a CI runner.
 """
 import argparse
 import collections

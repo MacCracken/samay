@@ -7,7 +7,7 @@
 
 **1.4.4** — standing gates, and no change to `src/`. CI now runs the fuzz harness, the suite on aarch64
 and in bounds-checked mode, the README example, the examples, and a build on the toolchain floor,
-**cyrius 6.7.10**, found by building. Whole-source mutation gates a release. Each gate was shown to
+**cyrius 6.7.10**, found by building. Whole-source mutation runs locally, not in CI. Each gate was shown to
 fail on a planted defect. `docs/examples/` holds two runnable examples, and
 [`migrating-to-1.4.md`](../guides/migrating-to-1.4.md) tells consumers what moved under them. 1,232
 assertions: comparing mutation runs found four tests that passed by luck, now closed.

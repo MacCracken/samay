@@ -87,8 +87,8 @@ function ships with a test that calls it.
 
 Then: scan new public symbols against the vendored deps for collisions. CI runs everything
 above except the collision scan. If `src/` or the tests changed, run `python3 scripts/mutate.py`
-too and read any new survivor. It takes about 13 minutes on 12 workers, so it gates a release, not
-a push.
+too and read any new survivor. Run it locally only, never in CI: about 13 minutes on 12 workers here,
+and about 45 on a CI runner.
 
 ## Rules (Hard Constraints)
 
