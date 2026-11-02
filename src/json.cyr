@@ -111,7 +111,7 @@ fn _budget_refused(al): i64 { return load64(allocator_state(al) + 16); }
 # 1 to give a restore's tree a mapping of its own; tests set 0 to take the heap path.
 var _RESTORE_MAPPED = 1;
 
-# Mappings _budget_mapped has made and _budget_unmap not yet given back: 0 between
+# Mappings _budget_mapped has made, less those _budget_unmap has given back: 0 between
 # restores. Kept so a test can see that every restore lets its tree go.
 var _MAPS_HELD = 0;
 
