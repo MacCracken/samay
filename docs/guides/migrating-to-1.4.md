@@ -1,6 +1,6 @@
-# Moving a consumer to samay 1.4
+# Moving a consumer to samay 1.4 and 1.5
 
-For a consumer on 1.1.x moving to the 1.4 line. Nothing here needs a source change to compile, and
+For a consumer on 1.1.x moving to the 1.4 or 1.5 line. Nothing here needs a source change to compile, and
 no public function was removed or changed its arguments. What changes is behaviour, and the first
 item below can change what your scheduler decides. Per-release detail is in the
 [CHANGELOG](../../CHANGELOG.md).
@@ -24,7 +24,13 @@ a task takes a whole device, or its chips of a TPU pod, and holds it until it fi
 - **A node registered with `gpu_available = 1` has one GPU, so it runs one GPU task at a time.** To run
   more, attach a profile per device with `node_capacity_add_accel`.
 - **`node_capacity_can_fit` now means free**, not present.
-- **There is no way to ask for sharing or for several devices yet.** The roadmap pins that to 1.5.0.
+- **Since 1.5.0 a task can ask for several devices or a share of one**
+  ([ADR-0016](../adr/0016-several-devices-or-a-share-of-one.md)):
+  `resource_req_with_devices(req, 4)` takes four GPUs of one node, and
+  `resource_req_with_share(req, 500)` half of one GPU. Shares are thousandths, and
+  `SAMAY_ACCEL_WHOLE` is 1000. Without either, a task takes one whole device, as since 1.4.3.
+- **⚠ Do not let a release before 1.5.0 restore a snapshot holding a multi-device task.** It reads one
+  device for it, and offers the rest while the task uses them.
 - A snapshot written before 1.4.3 can hold several tasks on one GPU. They all stay counted, and the
   device comes free when the last one finishes.
 
@@ -45,6 +51,8 @@ a task takes a whole device, or its chips of a TPU pod, and holds it until it fi
 | `node_capacity_new` | 1.4.5 | Negative and NaN become 0, and cores stop at 1e18, as for a requirement | built a node with negative capacity to keep work off it, stop |
 | `cron_entry_new` | 1.4.5 | A policy other than `CRON_SKIP` is stored as `CRON_CATCHUP`, which is how it already acted | read the policy back expecting your own value, expect `CRON_CATCHUP` |
 | `resource_req_new` | 1.4.5 | `network` is stored as 0 or 1 | compared it with another number, compare with 1 |
+| `task_scheduler_schedule_pending` | 1.5.0 | Work that needs no accelerator goes to a node without one first, even when a GPU node is emptier ([ADR-0017](../adr/0017-cpu-work-goes-to-accelerator-nodes-last.md)) | expected CPU work on your GPU nodes, expect it on CPU nodes until they are full |
+| `ResourceReq_to_json` | 1.5.0 | Writes `accel_devices` and `accel_share` after `disk_mb`; snapshots write them only when used | parse its text yourself, expect two more keys |
 
 ## Things that used to need work from you
 
@@ -93,7 +101,8 @@ in the table until you remove it.
 - **kavach** reads `ResourceReq` fields through `samay_bridge.cyr`, so only the toolchain and pins
   apply.
 - **daimon**: `POST /v1/scheduler/nodes` reaches the re-registering fix, and `gpu_available` nodes now
-  run one GPU task at a time. It already answers 400 for an empty `node_id`, so the 1.4.5 refusal never
+  run one GPU task at a time. Its tasks use `resource_req_default`, which needs no accelerator, so
+  since 1.5.0 they go to nodes without a GPU first. It already answers 400 for an empty `node_id`, so the 1.4.5 refusal never
   reaches it. Its `submit_task` route already checks the tag. Its own `started_at`
   stamp in `src/sched.cyr` can go. To report where a task runs, read `ScheduledTask_assigned_node`.
 - **stiva**: `cron_due_at` runs CRON_SKIP and writes `now` back, which is safe because a SKIP entry is

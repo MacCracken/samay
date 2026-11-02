@@ -1,6 +1,8 @@
 # 0013 — Accelerators are reserved, and preemption has to help
 
-**Status**: Accepted
+**Status**: Accepted. Points 1 and 2 extended by [ADR-0016](0016-several-devices-or-a-share-of-one.md)
+(v1.5.0): a request can take several devices, or a share of one, and a device is counted in
+thousandths.
 **Date**: 2026-11-01
 
 ## Context

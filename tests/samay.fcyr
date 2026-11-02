@@ -74,7 +74,8 @@ fn _fz_pin_clock(t) {
 }
 
 # A task snapshot with real shapes in it: placed, running, finished and queued
-# tasks, and nodes with accelerators.
+# tasks, and nodes with accelerators, including two GPUs taken whole by one task and
+# one shared by two (1.5.0).
 fn _fz_task_doc() {
     var s = task_scheduler_new();
     task_scheduler_register_node(s, node_capacity_add_accel(
@@ -87,6 +88,16 @@ fn _fz_task_doc() {
         i = i + 1;
     }
     _fz_task(s, 6, 9, resource_req_new(f64_from(2), 4096, REQ_TPU, 4, 0, 1024));
+    var gpus = node_capacity_new(str_from("gpu-3"), f64_from(32), 131072, 1048576, 0);
+    i = 0;
+    while (i < 3) {
+        node_capacity_add_accel(gpus, profile_cuda(i, 17179869184));
+        i = i + 1;
+    }
+    task_scheduler_register_node(s, gpus);
+    _fz_task(s, 8, 6, resource_req_with_devices(resource_req_new(f64_from(2), 4096, REQ_GPU, 0, 0, 1024), 2));
+    _fz_task(s, 9, 4, resource_req_with_share(resource_req_new(f64_from(1), 1024, REQ_GPU, 0, 0, 0), 500));
+    _fz_task(s, 10, 4, resource_req_with_share(resource_req_new(f64_from(1), 1024, REQ_GPU, 0, 0, 0), 500));
     task_scheduler_schedule_pending(s);
     i = 0;
     while (i < 7) {
@@ -94,6 +105,11 @@ fn _fz_task_doc() {
         if (i % 3 == 0) { scheduled_task_transition(t2, TASK_RUNNING); }
         if (i == 3) { task_scheduler_complete_task(s, ScheduledTask_task_id(t2), TASK_COMPLETED); }
         _fz_pin_clock(t2);
+        i = i + 1;
+    }
+    i = 8;
+    while (i < 11) {
+        _fz_pin_clock(task_scheduler_get_task(s, _fz_num("task-", i)));
         i = i + 1;
     }
     _fz_task(s, 7, 5, resource_req_new(f64_from(1000), 1, REQ_NONE, 0, 0, 0));

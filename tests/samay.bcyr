@@ -181,6 +181,48 @@ fn main(): i64 {
     bench_report(b13);
     sakshi_clear_emit_hook();
 
+    # 1.5.0: four whole GPUs on a node of four, half a GPU on a node where one is
+    # already shared, and CPU work ranked across 100 nodes, half of them with a GPU.
+    # Last, for the same reason as above.
+    var four = resource_req_with_devices(resource_req_new(f64_from(2), 4096, REQ_GPU, 0, 0, 1024), 4);
+    var b14 = bench_new("node_can_fit_4_gpus");
+    bench_batch_start(b14);
+    i = 0;
+    while (i < 1000000) { node_capacity_can_fit(gpu_node, four); i = i + 1; }
+    bench_batch_stop(b14, 1000000);
+    bench_report(b14);
+
+    var split_node = node_capacity_new(t_name, f64_from(64), 524288, 1048576, 0);
+    i = 0;
+    while (i < 4) {
+        node_capacity_add_accel(split_node, profile_cuda(i, 17179869184));
+        i = i + 1;
+    }
+    node_capacity_reserve(split_node, resource_req_with_share(resource_req_new(f64_from(1), 1, REQ_GPU, 0, 0, 0), 300));
+    var half = resource_req_with_share(resource_req_new(f64_from(2), 4096, REQ_GPU, 0, 0, 1024), 500);
+    var b15 = bench_new("node_can_fit_share");
+    bench_batch_start(b15);
+    i = 0;
+    while (i < 1000000) { node_capacity_can_fit(split_node, half); i = i + 1; }
+    bench_batch_stop(b15, 1000000);
+    bench_report(b15);
+
+    var mixed = map_new_str();
+    i = 0;
+    while (i < 100) {
+        var mid = _bench_id("m-", i);
+        var mn = node_capacity_new(mid, f64_from(32), 65536, 1048576, 0);
+        if (i % 2 == 0) { node_capacity_add_accel(mn, profile_cuda(0, 17179869184)); }
+        map_set(mixed, mid, mn);
+        i = i + 1;
+    }
+    var b16 = bench_new("best_fit_cpu_100_mixed");
+    bench_batch_start(b16);
+    i = 0;
+    while (i < 20000) { _best_fit_node(mixed, req); i = i + 1; }
+    bench_batch_stop(b16, 20000);
+    bench_report(b16);
+
     return 0;
 }
 

@@ -4,6 +4,103 @@ All notable changes to Samay are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.5.0] — 2026-11-02
+
+**Several GPUs, or a share of one.** A request can ask for four devices on one node, or for half a
+GPU, and CPU work goes to accelerator nodes last. A request that uses neither places and writes as it
+did, proven against real 1.4.6 binaries. **1,522 tests**, up 117. This ships ahead of consumer
+adoption, by the maintainer's call: no consumer has moved past 1.1.x. **⚠ Decisions change** for CPU
+work on a fleet with accelerator nodes, and a release before 1.5.0 must not restore a snapshot that
+holds a multi-device task: see below.
+
+### Added — several devices, or a share of one ([ADR-0016](docs/adr/0016-several-devices-or-a-share-of-one.md))
+
+- **`resource_req_with_devices(req, n)`** asks for `n` whole devices on one node, and
+  **`resource_req_with_share(req, thousandths)`** for a share of one device. `SAMAY_ACCEL_WHOLE` is
+  1000. Both return `req`, and the last one called wins. Out of range settles: fewer than one device
+  is one, and a share of 0 or less, or 1000 or more, is the whole device.
+- **`ResourceReq` gains `accel_devices` and `accel_share`**, with accessors. `resource_req_new` keeps
+  its six arguments and builds one whole device, so exclusive stays the default.
+- **A share joins a device already in use** before it takes an untouched one, so whole devices stay
+  whole. Whole devices go by ai-hwaccel's ranking, as before.
+- **A TPU pod is one device**, still shared by chips. A share does nothing on a pod.
+- **A release gives back every device a request took**, and preemption's check takes them all away
+  before asking whether the task would fit.
+
+### Changed — CPU work goes to accelerator nodes last ([ADR-0017](docs/adr/0017-cpu-work-goes-to-accelerator-nodes-last.md))
+
+- **For a `REQ_NONE` request, a node with no accelerator beats any node with one**, whatever their
+  utilization. Within each group best fit is unchanged. Through 1.4.6 such work could fill the only
+  GPU node's cores while a CPU node had room, and GPU work then waited with its device free.
+- A requested node still comes first, and CPU work still goes to an accelerator node when no other
+  fits. A fleet of one kind of node decides as before.
+- Over the differential below, 1.5.0 places 111,098 tasks where 1.4.6 placed 110,874.
+
+### Changed — the wire ([ADR-0016](docs/adr/0016-several-devices-or-a-share-of-one.md))
+
+- **Only a request that is not one whole device writes `accel_devices` and `accel_share`**, after
+  `disk_mb`. Any other snapshot is byte for byte what 1.4.6 writes. Every reader takes both forms,
+  and a key of the wrong type refuses the record.
+- **The derive's `ResourceReq_to_json` writes both keys always**, so its text grows by 37 bytes.
+- **⚠ A release before 1.5.0 must not restore a snapshot that holds a multi-device task.** Checked on
+  a real 1.4.6 binary: it reads the snapshot, drops the keys, replays one GPU for a four-GPU task, and
+  places the next GPU task on a device that task is using. A share read by 1.4.6 counts as a whole
+  device, past capacity, so nothing is offered twice.
+
+### Performance
+
+1.4.6 against 1.5.0, 1.4.6's bench file built against each `src/`, seven rounds interleaved on one
+pinned CPU. Rows not listed moved by 1% or less.
+
+| | 1.4.6 | 1.5.0 |
+|---|---|---|
+| `node_can_fit_gpu` | 166 ns | 59 ns |
+| `node_can_fit` | 16.0 ns | 14.9 ns |
+| `cron_expr_matches` | 18.7 ns | 18.3 ns |
+| `schedule_pending_place_500` | 18.1 ms | **18.8 ms (+4.0%)** |
+
+Whether a node fits now counts free devices and stops at enough, where 1.4.6 ranked every profile;
+only a hold ranks. Placing CPU work costs 4.0%, and ADR-0017's check is 2.5 points of it: with the
+check switched off the row reads 18.5 ms. New rows: `node_can_fit_4_gpus` 148 ns,
+`node_can_fit_share` 61 ns, `best_fit_cpu_100_mixed` 7.8 µs.
+
+### Not changed — decisions for a request that uses neither
+
+- **Built with ADR-0017's ranking switched off, 1.5.0 matches 1.4.6 byte for byte** over the
+  differential 1.4.6 introduced: 3,000 seeded scenarios of four passes and 16 probes, 2,332,935 lines
+  of decisions, logs and node states. So the device rewrite changed no decision, and ADR-0017 is the
+  only thing that does.
+- **1.5.0 rewrites a busy 1.4.6 snapshot byte for byte**, with GPU, TPU and CPU work on it, and the
+  next GPU task lands where 1.4.6 puts it.
+
+### Tests
+
+- **Constructors:** defaults, each setter, the last call winning, every out-of-range value, a copy,
+  and zeros left by setters.
+- **Shares:** two halves fill a GPU and nothing more fits, 999 and 1 make a device, a release gives
+  back only its own share, a share joins a shared device, and untouched devices keep their ranking.
+- **Devices:** four distinct profiles, not one four times; the best by ranking; a release by an equal
+  copy, which takes one request's worth and only holds equal in every field; never another task's
+  hold; replayed holds with too few free, whichever way the full ones rank; two pods for two devices.
+- **Scheduling:** a four-GPU task finds the node with four, halves share, a two-GPU victim, two
+  one-GPU tasks that are not one victim, and a restore that holds as many devices as before.
+- **Wire:** one whole device writes 1.4.6's bytes, each field round trips, the derive's text and
+  older text read, every value settles, and wrong types are refused.
+- **CPU work:** a tie, a busier CPU node, no CPU node that fits, GPU work, a requested node, a node
+  with only a CPU profile, and 64 tasks over 32 CPU and 32 GPU nodes.
+- `docs/examples/sharing.cyr`, which CI runs.
+- **Whole-source mutation**, run locally: 1,428 mutants, 1,251 killed, 169 survive, 8 do not compile.
+  The first run left 32 new survivors in the new code. New tests, and simpler code for release and
+  for preemption's check, dealt with 18. The other 14 are read and accepted: two `0 - 1` sentinels
+  becoming `0 - 2`, six bounds where the value at the edge gives the same answer, the hash's mixing
+  steps and an empty-profile shortcut, which change speed and not answers, and three returns nothing
+  reads. The fuzz seed now holds a two-GPU task and two shares.
+
+### Not verified
+
+- **No consumer was rebuilt.** kavach, daimon and stiva are still on 1.1.x, and none builds a request
+  with devices or a share yet.
+
 ## [1.4.6] — 2026-11-02
 
 **A pass skips what it already knows fits nowhere.** A placement pass walked every node for every

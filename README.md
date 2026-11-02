@@ -5,7 +5,7 @@ accelerator-conscious** task placement. Cyrius port of the original Rust library
 
 - **Language**: Cyrius (toolchain 6.7.18, floor 6.7.10) · **License**: GPL-3.0-only
 - **Consumers**: daimon (task scheduling), kavach (sandboxed execution), stiva (scheduled containers)
-- **Status**: **v1.4.6** — port complete, P-1 and concurrency audited. Real cron
+- **Status**: **v1.5.0** — port complete, P-1 and concurrency audited. Real cron
   (Vixie DOM/DOW), ai-hwaccel placement, JSON snapshot/restore, deterministic
   scheduling, fail-closed and memory-bounded restore, conserved node capacity. Downstream consumers
   kavach, daimon and stiva are integrated.
@@ -18,12 +18,16 @@ accelerator-conscious** task placement. Cyrius port of the original Rust library
 - **Resource-aware placement** — CPU / memory / disk plus real accelerator
   availability: each node carries ai-hwaccel device profiles (CUDA / ROCm / TPU /
   Gaudi / Neuron), and a placed task holds its device, or its chips of a TPU pod,
-  until it finishes. Placement is best-fit by utilization: an accelerator task never
-  lands on a node without a free matching device, and a pass does not search again for a
+  until it finishes. A task can ask for several GPUs on one node, or a share of one
+  (`resource_req_with_devices`, `resource_req_with_share`). Placement is best-fit by
+  utilization: an accelerator task never lands on a node without a free matching device,
+  CPU work goes to accelerator nodes last, and a pass does not search again for a
   requirement it already knows fits nowhere
   ([ADR-0002](docs/adr/0002-ai-hwaccel-profile-placement.md),
   [ADR-0013](docs/adr/0013-accelerators-are-reserved.md),
-  [ADR-0015](docs/adr/0015-a-pass-only-fills-nodes.md)).
+  [ADR-0015](docs/adr/0015-a-pass-only-fills-nodes.md),
+  [ADR-0016](docs/adr/0016-several-devices-or-a-share-of-one.md),
+  [ADR-0017](docs/adr/0017-cpu-work-goes-to-accelerator-nodes-last.md)).
 - **Real cron expressions** — standard 5-field (`min hour dom month dow`) with
   `*`, ranges, lists, `*/step`, month/day names, and `@hourly`…`@yearly`
   shortcuts, **validated at parse time**. Missed schedules follow an explicit
@@ -38,7 +42,7 @@ accelerator-conscious** task placement. Cyrius port of the original Rust library
 cyrius deps                          # resolve stdlib + ai-hwaccel into lib/
 cyrius build src/main.cyr build/samay
 ./build/samay                        # runnable demo
-cyrius test  tests/samay.tcyr        # 1405/1405 assertions
+cyrius test  tests/samay.tcyr        # 1522/1522 assertions
 cyrius bench tests/samay.bcyr
 ```
 
@@ -49,7 +53,7 @@ Consumers declare the dep and include the committed bundle:
 ```toml
 [deps.samay]
 git = "https://github.com/MacCracken/samay.git"
-tag = "1.4.6"
+tag = "1.5.0"
 modules = ["dist/samay.cyr"]
 ```
 
@@ -103,7 +107,7 @@ the budget is held with its old watermark, and writing `now` over that deletes w
 See [`docs/examples/`](docs/examples/) for runnable examples, `src/main.cyr` for a worked demo, and
 `tests/samay.tcyr` for the full API in use. Coming from 1.1.x? Read the
 [migration note](docs/guides/migrating-to-1.4.md): accelerator tasks that used to share a device now
-queue.
+queue unless they ask for a share, and CPU work now leaves accelerator nodes for last.
 
 ## Thread safety
 

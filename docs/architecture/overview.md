@@ -8,7 +8,7 @@ Single-scheduler, in-memory task scheduler. Pure decision engine: it decides
 | Module          | Owns                                                                 |
 |-----------------|---------------------------------------------------------------------|
 | `uuid.cyr`      | RFC-4122 v4 task ids (getrandom → hex).                              |
-| `types.cyr`     | `ResourceReq`, `TaskStatus`, `TaskPriority`, `ScheduledTask`, `NodeCapacity`, `SchedulingDecision`, `PreemptionAction`, `SchedulerStats` + their logic (transitions, can-fit, utilization, reserve/release). `ScheduledTask.reserved_on` names the node whose capacity the task currently holds, distinct from `node_preference` ([ADR-0007](../adr/0007-reservation-lifecycle.md)). Also `samay_init()`. |
+| `types.cyr`     | `ResourceReq` (with how many devices, or what share of one, since 1.5.0, [ADR-0016](../adr/0016-several-devices-or-a-share-of-one.md)), `TaskStatus`, `TaskPriority`, `ScheduledTask`, `NodeCapacity`, `SchedulingDecision`, `PreemptionAction`, `SchedulerStats` + their logic (transitions, can-fit, utilization, reserve/release). `ScheduledTask.reserved_on` names the node whose capacity the task currently holds, distinct from `node_preference` ([ADR-0007](../adr/0007-reservation-lifecycle.md)). Also `samay_init()`. |
 | `scheduler.cyr` | `TaskScheduler` — submit/get/cancel, pending ordering, best-fit placement, `schedule_pending`, preemption, stats. |
 | `cronexpr.cyr`  | `CronExpr` — standard 5-field cron parse (parse-time validated) + `cron_expr_matches` / `cron_expr_next_after` (Vixie DOM/DOW rule — either field starred => AND both masks, else OR, [ADR-0006](../adr/0006-cron-expression-model.md); names, `@shortcuts`). |
 | `cron.cyr`      | `CronScheduler`, `CronEntry`, `CronTaskTemplate` — recurring triggers via `CronExpr` + missed-schedule catch-up/skip policy, `check_due_at`. |
@@ -31,7 +31,8 @@ schedule_pending ──►  reconcile reservations (release anything no longer
                       │                        Scheduled/Running)
                       ├─ sort pending (priority desc, created_at asc, task_id)
                       └─ per task: preferred node → known to fit nowhere? → best_fit
-                                     │                (min utilization, can_fit)
+                                     │      (CPU work: nodes without accelerators first;
+                                     │       then min utilization, can_fit)
                                      └─ reserve node · task→Scheduled · reserved_on
                                         · SchedulingDecision
 complete_task ────►  transition to Completed/Failed ─► release reserved_on
@@ -42,7 +43,8 @@ preempt_if_needed ►  lowest-priority running task whose node would then fit it
 
 A reservation is held while a task is `Scheduled` or `Running`, and it holds any
 accelerator the task took as well as its CPU, memory and disk
-([ADR-0013](../adr/0013-accelerators-are-reserved.md)). `complete_task` and `cancel_task`
+([ADR-0013](../adr/0013-accelerators-are-reserved.md)): one hold per device, each whole or a share
+counted in thousandths ([ADR-0016](../adr/0016-several-devices-or-a-share-of-one.md)). `complete_task` and `cancel_task`
 return it at once. A task finished through a raw transition returns it at the next
 `schedule_pending`: reconciliation runs at the head of every pass rather than hooking
 the transition, because `scheduled_task_transition` is public — a consumer can

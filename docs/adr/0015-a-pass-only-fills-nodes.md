@@ -26,8 +26,8 @@ one fact about a pass, and is dropped when the fact fails.**
    node can go from yes to no during a pass and never from no to yes, and a requirement that fit no node
    earlier in the pass fits none later.
 2. **A record of shapes that fit nowhere.** When `_best_fit_node` finds nothing, the pass records the
-   requirement. A later requirement equal in the five fields `node_capacity_can_fit` reads (cores,
-   memory, accelerator, chips, disk) is refused without the walk. `network` is not read, so it is not
+   requirement. A later requirement equal in the fields `node_capacity_can_fit` reads (cores, memory,
+   accelerator, chips, disk, and since 1.5.0 devices and share) is refused without the walk. `network` is not read, so it is not
    part of the shape. Cores compare with `f64_eq`, so 0 and -0 are one shape, as can_fit sees them, and
    a NaN matches nothing, which costs only a walk.
 3. **Limits from the nodes.** When the first task of a pass looks past its preferred node, the pass

@@ -1,0 +1,66 @@
+# sharing.cyr: ask for half a GPU, or for four, and see where each goes.
+#
+#   cyrius run docs/examples/sharing.cyr
+#
+# Shares are thousandths of one device, so two halves fill a GPU and a third waits.
+# Several devices are taken whole, on one node, and only where that many are free.
+# Exits non-zero if that stops being true, and CI runs it.
+
+include "src/lib.cyr"
+
+fn _show(label, n): i64 {
+    syscall(1, 1, label, strlen(label));
+    print_num(n);
+    syscall(1, 1, "\n", 1);
+    return 0;
+}
+
+fn _gpu_node(id, gpus): i64 {
+    var n = node_capacity_new(str_from(id), f64_from(32), 131072, 102400, 0);
+    var i = 0;
+    while (i < gpus) {
+        node_capacity_add_accel(n, profile_cuda(i, 17179869184));
+        i = i + 1;
+    }
+    return n;
+}
+
+fn _task(name, req): i64 {
+    return scheduled_task_new(str_from(name), str_from("example"), str_from("agent"), 5, req);
+}
+
+fn _gpu(): i64 {
+    return resource_req_new(f64_from(2), 4096, REQ_GPU, 0, 0, 1024);
+}
+
+fn main(): i64 {
+    alloc_init();
+    var s = task_scheduler_new();
+    task_scheduler_register_node(s, _gpu_node("one-gpu", 1));
+    task_scheduler_register_node(s, _gpu_node("four-gpus", 4));
+
+    # Training wants all four GPUs of one node.
+    var train = _task("train", resource_req_with_devices(_gpu(), 4));
+    task_scheduler_submit_task(s, train);
+    # Three inference services want half a GPU each.
+    var i = 0;
+    while (i < 3) {
+        task_scheduler_submit_task(s, _task("serve", resource_req_with_share(_gpu(), 500)));
+        i = i + 1;
+    }
+
+    var placed = vec_len(task_scheduler_schedule_pending(s));
+    _show("placed: ", placed);
+    _show("still waiting: ", vec_len(task_scheduler_pending_tasks(s)));
+    var on_four = 0;
+    if (str_eq(ScheduledTask_assigned_node(train), str_from("four-gpus")) == 1) { on_four = 1; }
+    _show("training on the four-GPU node: ", on_four);
+
+    # The training run and two halves fit. The third half waits for a share to free up.
+    if (placed != 3) { return 1; }
+    if (on_four != 1) { return 1; }
+    return 0;
+}
+
+var r = main();
+syscall(60, r);

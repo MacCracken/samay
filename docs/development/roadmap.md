@@ -1,6 +1,6 @@
 # samay — Roadmap
 
-> **Last refreshed**: 2026-11-02 (v1.4.6)
+> **Last refreshed**: 2026-11-02 (v1.5.0)
 >
 > **Forward-looking only.** Nothing shipped belongs here — per-release detail
 > lives in [`../../CHANGELOG.md`](../../CHANGELOG.md) (complete from 0.1.0), the
@@ -11,10 +11,10 @@
 > 2.0.0. The only unpinned items wait on an event outside this repo:
 > see [Event-gated](#event-gated--no-pin-by-design).
 
-> **Current**: **v1.4.6**, cyrius pin **6.7.18**, floor **6.7.10**, deps ai-hwaccel **2.5.6** +
-> bayan-json **1.11.1**. Gates green: **1,405 assertions**, **13/13 benchmarks**,
-> coverage **87/87** public functions (each called by a test; 6.6.14 stopped counting `main`), lint 0-warn / 0
-> untracked deferrals, fmt clean, `dist/` in sync (3,673 lines), 0 symbol collisions
+> **Current**: **v1.5.0**, cyrius pin **6.7.18**, floor **6.7.10**, deps ai-hwaccel **2.5.6** +
+> bayan-json **1.11.1**. Gates green: **1,522 assertions**, **16/16 benchmarks**,
+> coverage **89/89** public functions (each called by a test; 6.6.14 stopped counting `main`), lint 0-warn / 0
+> untracked deferrals, fmt clean, `dist/` in sync (3,889 lines), 0 symbol collisions
 > against the vendored deps. `src/` is 9 modules. The 1,479-line Rust oracle was
 > retired after 1.1.5 ([`rust-old-removal.md`](rust-old-removal.md)).
 
@@ -22,22 +22,24 @@
 
 | Version | Theme | Risk | Gate to entry |
 |---|---|---|---|
-| **1.5.0** | Accelerator requests: shared and multi-device | high | consumers on 1.4.x, and an ADR on the unit of sharing |
+| **1.5.1** | A P(-1) audit of everything to date, and restore's parse tree freed | medium | 1.5.0 released: this is next |
 | **1.6.0** | Preemption: placed tasks and several victims | medium | an ADR on the new return shape |
 | **1.7.0** | Deadlines and `network`: make them work, or mark them for removal | medium | one ADR each |
 | **1.8.0** | Accounting: stats counters, lifetime totals, failure reasons | low | an ADR on lifetime totals as wire state |
 | **2.0.0** | Removals: `samay_init`, stats meanings, whatever 1.7.0 rejected | high | every consumer on 1.8.x |
 
-The order is by who it helps. The repairs finished with 1.4.6. New features wait until consumers
-can receive them, because nothing from 1.2 onward has reached one yet: consumer adoption is next.
+The repairs finished with 1.4.6, and 1.5.0 shipped ahead of consumer adoption, by the maintainer's
+call: it had waited on consumers moving to 1.4.x, which has not happened. 1.5.1 audits everything to
+date before the features after it.
 
 ---
 
-## Consumer adoption — gate to 1.5.0
+## Consumer adoption
 
-Not a samay release. **Nothing from 1.2 to 1.4 has reached a consumer**, and new requirement fields
-are no use to a consumer that cannot build them. The toolchain floor and the
-[migration note](../guides/migrating-to-1.4.md) are in place, so this can start at any time.
+Not a samay release, and no longer a gate: 1.5.0 went first. **Nothing from 1.2 to 1.5 has reached a
+consumer**, and the device and share fields are no use to a consumer that cannot build them. The
+toolchain floor and the [migration note](../guides/migrating-to-1.4.md) are in place, so this can start
+at any time.
 
 - [ ] **kavach** moves up from 1.1.6.
 - [ ] **daimon** moves up from 1.1.3. Its node route reaches the re-registering fix in 1.4.3.
@@ -47,20 +49,18 @@ are no use to a consumer that cannot build them. The toolchain floor and the
 
 ---
 
-## 1.5.0 onward — features
+## 1.5.1 onward
 
-### 1.5.0 — accelerator requests
+### 1.5.1 — a P(-1) audit of everything to date
 
-*Entry gate*: consumers on 1.4.x, and an ADR on the unit of sharing. Today a task takes one whole GPU,
-or chips of one pod ([ADR-0013](../adr/0013-accelerators-are-reserved.md)). That ADR must keep a pass
-filling nodes only: taking a share can never leave room for a request that had none, or the pass's
-record of what fits nowhere goes wrong ([ADR-0015](../adr/0015-a-pass-only-fills-nodes.md)).
+*Entry gate*: 1.5.0 released, which it now is. The last sweep was 1.4.3's, so 1.4.4 to 1.5.0 have had
+none, and the sweep covers the whole library, not only those.
 
-- [ ] **Sharing a device.** "Half a GPU" cannot be said. It needs a new requirement field, and
-  exclusive stays the default.
-- [ ] **Several devices.** "Four GPUs" cannot be said either: `accel_min_chips` applies to TPUs only.
-- [ ] **Keep CPU work off the only GPU node.** A tie can fill a GPU node's CPU with CPU work while a
-  CPU node sits idle and accelerator work waits for it.
+- [ ] **A P(-1) sweep:** independent auditors who run things rather than read them, whole-source
+  mutation and the fuzz harness. A finding counts once its reproducer has been rerun.
+- [ ] **Restore's parse tree is never freed.** Every restore leaves its tree, about six times the
+  document, on the heap for good, because `alloc()` never frees
+  ([ADR-0014](../adr/0014-what-a-document-may-cost.md)). Build it where it can be let go.
 
 ### 1.6.0 — preemption
 
@@ -68,7 +68,8 @@ record of what fits nowhere goes wrong ([ADR-0015](../adr/0015-a-pass-only-fills
 
 - [ ] **Placed tasks can be chosen.** A SCHEDULED task holds capacity and cannot be preempted today.
 - [ ] **More than one victim.** A task needing 8 cores on a node holding two 4-core tasks gets no
-  answer today, because one victim has to be enough.
+  answer today, because one victim has to be enough. Since 1.5.0 the same goes for a task needing
+  four GPUs held by four one-GPU tasks.
 
 ### 1.7.0 — deadlines and `network`
 

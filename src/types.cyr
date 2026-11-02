@@ -187,7 +187,9 @@ fn task_status_name(s): i64 {
 # ---------------------------------------------------------------------------
 
 # Fields: cpu_cores (f64), memory_mb, accel_req (ai-hwaccel REQ_*),
-# accel_min_chips (for REQ_TPU; else 0), network (bool 0/1), disk_mb.
+# accel_min_chips (for REQ_TPU; else 0), network (bool 0/1), disk_mb,
+# accel_devices (how many devices, default 1) and accel_share (thousandths of one
+# device, default SAMAY_ACCEL_WHOLE), both since 1.5.0 (ADR-0016).
 # NOTE: no inline `#` comments on field lines — #derive(accessors) parses
 # them as field names.
 #derive(accessors)
@@ -199,7 +201,12 @@ struct ResourceReq {
     accel_min_chips: i64;
     network: i64;
     disk_mb: i64;
+    accel_devices: i64;
+    accel_share: i64;
 }
+
+# A whole device, in the thousandths a share is counted in (ADR-0016).
+var SAMAY_ACCEL_WHOLE = 1000;
 
 # A negative or NaN requirement runs capacity backwards through reserve and release,
 # which subtract it, so it reads as none. A value past 1e18 stops there: no node has
@@ -219,7 +226,7 @@ fn _req_amount(x): i64 {
 }
 
 fn resource_req_new(cpu_cores, memory_mb, accel_req, accel_min_chips, network, disk_mb): i64 {
-    var p = alloc(48);
+    var p = alloc(64);
     # NOT `return 0`: _rr_from (src/json.cyr) forwards this result, and
     # its callers read 0 as ADR-0005's "required field missing -- reject this
     # record", then drop the record and continue. An
@@ -235,7 +242,48 @@ fn resource_req_new(cpu_cores, memory_mb, accel_req, accel_min_chips, network, d
     if (network != 0) { network = 1; }
     ResourceReq_set_network(p, network);
     ResourceReq_set_disk_mb(p, _req_amount(disk_mb));
+    # One whole device: exclusive is the default (ADR-0016).
+    ResourceReq_set_accel_devices(p, 1);
+    ResourceReq_set_accel_share(p, SAMAY_ACCEL_WHOLE);
     return p;
+}
+
+# The share a request takes of one device, in thousandths. 0 or less, or a whole device
+# or more, is the whole device: setters and the derive's decoder can leave a 0.
+fn _req_share(req): i64 {
+    var s = ResourceReq_accel_share(req);
+    if (s <= 0) { return SAMAY_ACCEL_WHOLE; }
+    if (s >= SAMAY_ACCEL_WHOLE) { return SAMAY_ACCEL_WHOLE; }
+    return s;
+}
+
+# How many devices a request takes: at least one, and one for a share.
+fn _req_devices(req): i64 {
+    if (_req_share(req) < SAMAY_ACCEL_WHOLE) { return 1; }
+    var d = ResourceReq_accel_devices(req);
+    if (d < 1) { return 1; }
+    return d;
+}
+
+# Ask for `n` whole devices on one node; returns `req`. Fewer than one is one, and it
+# replaces any share, since several devices are each taken whole (ADR-0016).
+fn resource_req_with_devices(req, n): i64 {
+    var d = n;
+    if (d < 1) { d = 1; }
+    ResourceReq_set_accel_devices(req, d);
+    ResourceReq_set_accel_share(req, SAMAY_ACCEL_WHOLE);
+    return req;
+}
+
+# Ask for `thousandths` of one device; returns `req`. 0 or less, or SAMAY_ACCEL_WHOLE or
+# more, is the whole device, and it replaces any device count, since a share is of one.
+fn resource_req_with_share(req, thousandths): i64 {
+    var s = thousandths;
+    if (s <= 0) { s = SAMAY_ACCEL_WHOLE; }
+    if (s > SAMAY_ACCEL_WHOLE) { s = SAMAY_ACCEL_WHOLE; }
+    ResourceReq_set_accel_share(req, s);
+    ResourceReq_set_accel_devices(req, 1);
+    return req;
 }
 
 # Rust Default: 1.0 cpu, 256 MB, no accelerator, no network, 0 disk.
@@ -243,12 +291,16 @@ fn resource_req_default(): i64 {
     return resource_req_new(f64_from(1), 256, REQ_NONE, 0, 0, 0);
 }
 
-# Deep copy (Rust derives Clone; cron fires clone the template's req).
+# Deep copy (Rust derives Clone; cron fires clone the template's req). Devices and
+# share are copied as placement reads them.
 fn resource_req_clone(req): i64 {
-    return resource_req_new(
+    var c = resource_req_new(
       ResourceReq_cpu_cores(req), ResourceReq_memory_mb(req),
       ResourceReq_accel_req(req), ResourceReq_accel_min_chips(req),
       ResourceReq_network(req), ResourceReq_disk_mb(req));
+    ResourceReq_set_accel_devices(c, _req_devices(req));
+    ResourceReq_set_accel_share(c, _req_share(req));
+    return c;
 }
 
 # ---------------------------------------------------------------------------
@@ -442,29 +494,32 @@ fn node_capacity_with_tpu(node, chip_count): i64 {
     return node;
 }
 
-# --- accelerator holds (ADR-0013) ---
+# --- accelerator holds (ADR-0013, ADR-0016) ---
 #
 # requirement_satisfied says a device exists. Placement also needs it to be free,
 # so a node counts what is in use on each profile. accel_used runs parallel to
 # accel_profiles. accel_holds is flat pairs of (requirement, profile index), one per
-# reservation, so a release gives back exactly the profile that reservation took:
-# undoing a pick by requirement type alone would free the wrong one when two
-# requirements overlap, and leave the other held for good.
+# profile a reservation took, so a release gives back exactly the profiles that
+# reservation took: undoing a pick by requirement type alone would free the wrong one
+# when two requirements overlap, and leave the other held for good.
 
-# What a profile offers: a TPU pod shares its chips, anything else is one device.
+# What a profile offers: a TPU pod shares its chips, and anything else is one device
+# of SAMAY_ACCEL_WHOLE thousandths.
 fn _accel_capacity(p): i64 {
     if (profile_accel_type(p) == ACCEL_TPU) { return profile_tpu_chips(p); }
-    return 1;
+    return SAMAY_ACCEL_WHOLE;
 }
 
-# What a requirement takes of a profile. REQ_GPU_OR_TPU and REQ_ANY_ACCELERATOR do
-# not check chips, so one can ask for more than a pod has. It then takes the pod.
-fn _accel_units(p, req_chips): i64 {
-    if (profile_accel_type(p) != ACCEL_TPU) { return 1; }
+# What a request takes of one profile: its share of a device, or chips of a pod.
+# REQ_GPU_OR_TPU and REQ_ANY_ACCELERATOR do not check chips, so one can ask for more
+# than a pod has. It then takes the pod.
+fn _accel_units(p, req): i64 {
+    if (profile_accel_type(p) != ACCEL_TPU) { return _req_share(req); }
     var chips = profile_tpu_chips(p);
-    if (req_chips < 1) { return 1; }
-    if (req_chips > chips) { return chips; }
-    return req_chips;
+    var want = ResourceReq_accel_min_chips(req);
+    if (want < 1) { return 1; }
+    if (want > chips) { return chips; }
+    return want;
 }
 
 fn _accel_used_at(node, i): i64 {
@@ -481,79 +536,154 @@ fn _accel_add_used(node, i, delta): i64 {
     return 0;
 }
 
-# The index of the profile this requirement would take, or -1. Ranked as ai-hwaccel's
+# 1 if profile `a` comes before profile `b` for `req`, as ai-hwaccel's
 # find_satisfying_profile ranks: highest profile_rank, then most memory, then lowest
-# index. With free_only 0, a profile with no room left still counts.
-fn _accel_pick(node, req_ar, req_chips, free_only): i64 {
+# index. A share puts a device already in use first, so it leaves whole devices whole
+# while a shared one has room (ADR-0016).
+fn _accel_before(node, req, a, b): i64 {
+    if (_req_share(req) < SAMAY_ACCEL_WHOLE) {
+        var ua = 0;
+        var ub = 0;
+        if (_accel_used_at(node, a) > 0) { ua = 1; }
+        if (_accel_used_at(node, b) > 0) { ub = 1; }
+        if (ua > ub) { return 1; }
+        if (ua < ub) { return 0; }
+    }
+    var profs = NodeCapacity_accel_profiles(node);
+    var pa = vec_get(profs, a);
+    var pb = vec_get(profs, b);
+    if (profile_rank(pa) > profile_rank(pb)) { return 1; }
+    if (profile_rank(pa) < profile_rank(pb)) { return 0; }
+    if (profile_memory_bytes(pa) > profile_memory_bytes(pb)) { return 1; }
+    if (profile_memory_bytes(pa) < profile_memory_bytes(pb)) { return 0; }
+    if (a < b) { return 1; }
+    return 0;
+}
+
+# The profile `req` would take next, or -1: the first, by _accel_before, of those that
+# satisfy it and come after `after` (-1 for none). `room` 1 looks only at profiles
+# with room left for it, and 0 only at those without.
+fn _accel_pick(node, req, room, after): i64 {
     var profs = NodeCapacity_accel_profiles(node);
     var n = vec_len(profs);
+    var ar = ResourceReq_accel_req(req);
+    var chips = ResourceReq_accel_min_chips(req);
     var best = 0 - 1;
-    var best_rank = 0;
-    var best_mem = 0;
     var i = 0;
     while (i < n) {
         var p = vec_get(profs, i);
-        if (requirement_satisfied(req_ar, req_chips, p) == 1) {
-            var room = 1;
-            if (free_only == 1) {
-                if (_accel_used_at(node, i) + _accel_units(p, req_chips) > _accel_capacity(p)) { room = 0; }
+        if (requirement_satisfied(ar, chips, p) == 1) {
+            var fits = 1;
+            if (_accel_used_at(node, i) + _accel_units(p, req) > _accel_capacity(p)) { fits = 0; }
+            var take = 0;
+            if (fits == room) { take = 1; }
+            if (take == 1) {
+                if (after >= 0) {
+                    if (_accel_before(node, req, after, i) == 0) { take = 0; }
+                }
             }
-            if (room == 1) {
-                var rank = profile_rank(p);
-                var mem = profile_memory_bytes(p);
-                var better = 1;
+            if (take == 1) {
                 if (best >= 0) {
-                    if (rank < best_rank) { better = 0; }
-                    if (rank == best_rank) {
-                        if (mem <= best_mem) { better = 0; }
-                    }
-                }
-                if (better == 1) {
-                    best = i;
-                    best_rank = rank;
-                    best_mem = mem;
+                    if (_accel_before(node, req, i, best) == 0) { take = 0; }
                 }
             }
+            if (take == 1) { best = i; }
         }
         i = i + 1;
     }
     return best;
 }
 
-# Record a reservation's use of a device. A requirement nothing here can serve holds
-# nothing. With no room it is counted anyway, past capacity: an old snapshot can hold
-# four tasks on one GPU, and losing track of three would offer the device again
-# while they run (ADR-0013).
-fn _accel_hold(node, req): i64 {
+# How many profiles have room for `req`, counting no further than `most`. Whether a
+# node fits needs only this; which profiles are taken needs the ranking.
+fn _accel_free(node, req, most): i64 {
+    var profs = NodeCapacity_accel_profiles(node);
+    var n = vec_len(profs);
     var ar = ResourceReq_accel_req(req);
-    if (ar == REQ_NONE) { return 0; }
     var chips = ResourceReq_accel_min_chips(req);
-    var i = _accel_pick(node, ar, chips, 1);
-    if (i < 0) { i = _accel_pick(node, ar, chips, 0); }
-    if (i < 0) { return 0; }
-    _accel_add_used(node, i, _accel_units(vec_get(NodeCapacity_accel_profiles(node), i), chips));
+    var free = 0;
+    var i = 0;
+    while (i < n) {
+        var p = vec_get(profs, i);
+        if (requirement_satisfied(ar, chips, p) == 1) {
+            if (_accel_used_at(node, i) + _accel_units(p, req) <= _accel_capacity(p)) {
+                free = free + 1;
+                if (free >= most) { return free; }
+            }
+        }
+        i = i + 1;
+    }
+    return free;
+}
+
+fn _accel_take(node, req, at): i64 {
+    _accel_add_used(node, at, _accel_units(vec_get(NodeCapacity_accel_profiles(node), at), req));
     var holds = NodeCapacity_accel_holds(node);
     vec_push(holds, req);
-    vec_push(holds, i);
+    vec_push(holds, at);
     return 0;
 }
 
-# Where in accel_holds this requirement's hold sits, or -1. The same ResourceReq if
-# there is one; otherwise an equal one, for a caller releasing with its own copy.
-fn _accel_find_hold(node, req): i64 {
+# Record a reservation's use of devices: the free profiles it needs, first by rank.
+# With too few free it takes ones with no room as well, counted past capacity: an old
+# snapshot can hold four tasks on one GPU, and losing track of three would offer the
+# device again while they run (ADR-0013). Those are taken first, so a free profile
+# filled here is not taken twice. A requirement nothing here can serve holds nothing.
+fn _accel_hold(node, req): i64 {
+    if (ResourceReq_accel_req(req) == REQ_NONE) { return 0; }
+    var want = _req_devices(req);
+    var free = _accel_free(node, req, want);
+    var more = 0;
+    var at = 0 - 1;
+    while (free + more < want) {
+        at = _accel_pick(node, req, 0, at);
+        if (at < 0) { break; }
+        _accel_take(node, req, at);
+        more = more + 1;
+    }
+    at = 0 - 1;
+    var i = 0;
+    while (i < free) {
+        at = _accel_pick(node, req, 1, at);
+        _accel_take(node, req, at);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# 1 if a hold made for `h` would serve `req` alike: same devices, chips and share.
+fn _accel_same(h, req): i64 {
+    if (ResourceReq_accel_req(h) != ResourceReq_accel_req(req)) { return 0; }
+    if (ResourceReq_accel_min_chips(h) != ResourceReq_accel_min_chips(req)) { return 0; }
+    if (_req_devices(h) != _req_devices(req)) { return 0; }
+    if (_req_share(h) != _req_share(req)) { return 0; }
+    return 1;
+}
+
+# 1 if this very ResourceReq holds a device here.
+fn _accel_owns(node, req): i64 {
     var holds = NodeCapacity_accel_holds(node);
     var n = vec_len(holds);
     var i = 0;
     while (i < n) {
-        if (vec_get(holds, i) == req) { return i; }
+        if (vec_get(holds, i) == req) { return 1; }
         i = i + 2;
     }
-    i = 0;
+    return 0;
+}
+
+# The next hold at or after `from` that a release of `req` gives back, or -1. With
+# `mine` 1 those are its own holds; with 0, equal ones, for a caller releasing with its
+# own copy.
+fn _accel_hold_from(node, req, mine, from): i64 {
+    var holds = NodeCapacity_accel_holds(node);
+    var n = vec_len(holds);
+    var i = from;
     while (i < n) {
         var h = vec_get(holds, i);
-        if (ResourceReq_accel_req(h) == ResourceReq_accel_req(req)) {
-            if (ResourceReq_accel_min_chips(h) == ResourceReq_accel_min_chips(req)) { return i; }
-        }
+        if (mine == 1) {
+            if (h == req) { return i; }
+        } elif (_accel_same(h, req) == 1) { return i; }
         i = i + 2;
     }
     return 0 - 1;
@@ -563,33 +693,58 @@ fn _accel_find_hold(node, req): i64 {
 fn _accel_hold_units(node, at): i64 {
     var holds = NodeCapacity_accel_holds(node);
     var p = vec_get(NodeCapacity_accel_profiles(node), vec_get(holds, at + 1));
-    return _accel_units(p, ResourceReq_accel_min_chips(vec_get(holds, at)));
+    return _accel_units(p, vec_get(holds, at));
 }
 
+# Give back every hold of `req` here; or, if it has none, as many equal ones as it
+# would have taken, for a caller releasing with its own copy.
 fn _accel_drop(node, req): i64 {
     if (ResourceReq_accel_req(req) == REQ_NONE) { return 0; }
-    var at = _accel_find_hold(node, req);
-    if (at < 0) { return 0; }
+    var mine = _accel_owns(node, req);
+    var left = _req_devices(req);
     var holds = NodeCapacity_accel_holds(node);
-    _accel_add_used(node, vec_get(holds, at + 1), 0 - _accel_hold_units(node, at));
-    # Holds have no order, so the last pair fills the gap.
+    var at = _accel_hold_from(node, req, mine, 0);
+    while (at >= 0) {
+        if (mine == 0) {
+            if (left == 0) { return 0; }
+            left = left - 1;
+        }
+        _accel_add_used(node, vec_get(holds, at + 1), 0 - _accel_hold_units(node, at));
+        # Holds have no order, so the last pair fills the gap.
+        var n = vec_len(holds);
+        vec_set(holds, at, vec_get(holds, n - 2));
+        vec_set(holds, at + 1, vec_get(holds, n - 1));
+        vec_truncate(holds, n - 2);
+        at = _accel_hold_from(node, req, mine, 0);
+    }
+    return 0;
+}
+
+# Add `sign` times what each of `held`'s own holds takes to what its profile has in
+# use, and keep the holds. -1 then 1 asks a question and leaves the node as it was.
+fn _accel_lend(node, held, sign): i64 {
+    var holds = NodeCapacity_accel_holds(node);
     var n = vec_len(holds);
-    vec_set(holds, at, vec_get(holds, n - 2));
-    vec_set(holds, at + 1, vec_get(holds, n - 1));
-    vec_truncate(holds, n - 2);
+    var i = 0;
+    while (i < n) {
+        if (vec_get(holds, i) == held) {
+            _accel_add_used(node, vec_get(holds, i + 1), sign * _accel_hold_units(node, i));
+        }
+        i = i + 2;
+    }
     return 0;
 }
 
 # Accelerator availability check (M3, ADR-0002): delegates to ai-hwaccel's
-# requirement_satisfied() over this node's real profiles, and a profile must also
-# have room. REQ_NONE always
-# fits; any other requirement must be satisfied by at least one profile —
-# so REQ_GAUDI / REQ_AWS_NEURON / REQ_ANY_ACCELERATOR now require an actual
-# matching accelerator (vs the Rust port's always-true stub).
-fn _accel_ok(req_ar, req_chips, node): i64 {
-    if (req_ar == REQ_NONE) { return 1; }
-    if (_accel_pick(node, req_ar, req_chips, 1) >= 0) { return 1; }
-    return 0;
+# requirement_satisfied() over this node's real profiles, and each profile taken must
+# also have room. REQ_NONE always fits; any other requirement needs as many profiles
+# as it asks for devices, so REQ_GAUDI / REQ_AWS_NEURON / REQ_ANY_ACCELERATOR require
+# an actual matching accelerator (vs the Rust port's always-true stub).
+fn _accel_ok(req, node): i64 {
+    if (ResourceReq_accel_req(req) == REQ_NONE) { return 1; }
+    var want = _req_devices(req);
+    if (_accel_free(node, req, want) < want) { return 0; }
+    return 1;
 }
 
 # 1 if `required` cores fit in `available`. The margin is 1e-9 of a core: f64 sums
@@ -605,7 +760,7 @@ fn _cpu_short(available, required): i64 {
 fn node_capacity_can_fit(node, req): i64 {
     if (_cpu_short(NodeCapacity_available_cpu(node), ResourceReq_cpu_cores(req)) == 1) { return 0; }
     if (NodeCapacity_available_memory_mb(node) < ResourceReq_memory_mb(req)) { return 0; }
-    if (_accel_ok(ResourceReq_accel_req(req), ResourceReq_accel_min_chips(req), node) != 1) { return 0; }
+    if (_accel_ok(req, node) != 1) { return 0; }
     if (NodeCapacity_available_disk_mb(node) < ResourceReq_disk_mb(req)) { return 0; }
     return 1;
 }
@@ -683,15 +838,10 @@ fn _fits_without(node, held, req): i64 {
     var disk = _capacity_returned(NodeCapacity_available_disk_mb(node),
       ResourceReq_disk_mb(held), NodeCapacity_total_disk_mb(node));
     if (disk < ResourceReq_disk_mb(req)) { return 0; }
-    var ar = ResourceReq_accel_req(req);
-    if (ar == REQ_NONE) { return 1; }
-    var at = _accel_find_hold(node, held);
-    if (at < 0) { return _accel_ok(ar, ResourceReq_accel_min_chips(req), node); }
-    var slot = vec_get(NodeCapacity_accel_holds(node), at + 1);
-    var units = _accel_hold_units(node, at);
-    _accel_add_used(node, slot, 0 - units);
-    var ok = _accel_ok(ar, ResourceReq_accel_min_chips(req), node);
-    _accel_add_used(node, slot, units);
+    if (ResourceReq_accel_req(req) == REQ_NONE) { return 1; }
+    _accel_lend(node, held, 0 - 1);
+    var ok = _accel_ok(req, node);
+    _accel_lend(node, held, 1);
     return ok;
 }
 

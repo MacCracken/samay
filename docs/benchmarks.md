@@ -14,6 +14,44 @@ pre-warm off every hot path, and re-measured within noise of the table below
 | `samay_uuid_v4`         | 606 ns   | 613 ns   | getrandom(2) syscall-bound         |
 | `scheduled_task_new`    | 2.07 µs  | 2.06 µs  | alloc + uuid + `dt_now`            |
 
+## v1.5.0 — several devices, a share of one, and CPU work last
+
+[ADR-0016](adr/0016-several-devices-or-a-share-of-one.md),
+[ADR-0017](adr/0017-cpu-work-goes-to-accelerator-nodes-last.md). 1.4.6's own bench file built against
+1.4.6's `src/` and 1.5.0's, seven rounds interleaved and shuffled on one pinned CPU (2026-11-02).
+Medians:
+
+| Op | 1.4.6 | 1.5.0 | Δ |
+|---|---|---|---|
+| `node_can_fit` | 16.00 ns | 14.93 ns | -6.7% |
+| `priority_from_numeric` | 4.56 ns | 4.54 ns | -0.4% |
+| `samay_uuid_v4` | 660 ns | 659 ns | -0.2% |
+| `scheduled_task_new` | 2.39 µs | 2.38 µs | -0.5% |
+| `cron_expr_matches` | 18.72 ns | 18.27 ns | -2.4% |
+| `pending_tasks_2000` | 344 µs | 340 µs | -1.0% |
+| `cron_count_window` | 24.4 µs | 24.4 µs | -0.1% |
+| `scheduled_task_to_jsonv` | 2.51 µs | 2.50 µs | -0.3% |
+| `cron_entry_to_jsonv` | 2.59 µs | 2.60 µs | +0.2% |
+| `node_can_fit_gpu` | 166 ns | 59 ns | **-64.5%** |
+| `best_fit_tpu_100_nodes` | 13.6 µs | 13.5 µs | -0.3% |
+| `schedule_pending_stuck_2000` | 1.88 ms | 1.88 ms | -0.1% |
+| `schedule_pending_place_500` | 18.1 ms | 18.8 ms | **+4.0%** |
+
+- **`node_can_fit_gpu`**: whether a node fits now counts free matching devices and stops at enough.
+  1.4.6 ranked every profile to pick one, and only a hold needs the ranking.
+- **`schedule_pending_place_500`**, 500 CPU tasks on 500 CPU nodes, costs 4.0%, and the runs do not
+  overlap (18.1 to 18.2 ms against 18.8 to 18.9). ADR-0017's check is 2.5 points of it: built with the
+  check switched off, the row reads 18.4 to 18.6 ms. The check is looked up only for a node that would
+  win on utilization, and is about 2 ns a node.
+
+New rows, 1.5.0 only:
+
+| Op | avg |
+|---|---|
+| `node_can_fit_4_gpus`: four whole GPUs on a node of four | 148 ns |
+| `node_can_fit_share`: half a GPU where one is already shared | 61 ns |
+| `best_fit_cpu_100_mixed`: CPU work across 100 nodes, half with a GPU | 7.8 µs |
+
 ## v1.4.6 — a pass that skips what fits nowhere
 
 [ADR-0015](adr/0015-a-pass-only-fills-nodes.md). Measured on cyrius 6.7.18 (2026-11-02), each case its own

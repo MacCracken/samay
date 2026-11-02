@@ -3661,6 +3661,11 @@ fn _wire_req(floats, ints) {
     ResourceReq_set_accel_min_chips(r, _wire_int(ints));
     ResourceReq_set_network(r, _wire_int(ints));
     ResourceReq_set_disk_mb(r, _wire_int(ints));
+    # Half of them ask for devices or a share, written raw as the derive writes them.
+    if (_wire_int(ints) % 2 == 0) {
+        ResourceReq_set_accel_devices(r, _wire_int(ints));
+        ResourceReq_set_accel_share(r, _wire_int(ints));
+    }
     return r;
 }
 
@@ -3690,6 +3695,18 @@ fn _req_derive_text(r) {
     return str_builder_build(sb);
 }
 
+# The derive's text as a snapshot writes it: one whole device leaves out the two keys
+# 1.5.0 added, so the bytes are 1.4.6's (ADR-0016).
+fn _req_wire_text(r) {
+    var text = _req_derive_text(r);
+    var tail = str_from(",\"accel_devices\":1,\"accel_share\":1000}");
+    if (str_ends_with(text, tail) == 0) { return text; }
+    var sb = str_builder_new();
+    str_builder_add(sb, str_sub(text, 0, str_len(text) - str_len(tail)));
+    str_builder_add_cstr(sb, "}");
+    return str_builder_build(sb);
+}
+
 fn _expr_derive_text(e) {
     var sb = str_builder_new();
     CronExpr_to_json(e, sb);
@@ -3712,7 +3729,7 @@ fn test_wire_corpus_resource_req() {
         var r0 = resource_req_new(f64_from(0), 4096, 1, 2, 1, 1024);
         ResourceReq_set_cpu_cores(r0, f);
         var got0 = bayan_json_v_build(_rr_node(r0));
-        var text0 = _req_derive_text(r0);
+        var text0 = _req_wire_text(r0);
         if (str_eq(got0, text0) != 1) { bad_derive = bad_derive + 1; }
         if (str_eq(got0, _bridge_bytes(text0)) != 1) { bad_bridge = bad_bridge + 1; }
         i = i + 1;
@@ -3721,7 +3738,7 @@ fn test_wire_corpus_resource_req() {
     while (i < 2000) {
         var r = _wire_req(floats, ints);
         var got = bayan_json_v_build(_rr_node(r));
-        var text = _req_derive_text(r);
+        var text = _req_wire_text(r);
         if (str_eq(got, text) != 1) { bad_derive = bad_derive + 1; }
         if (str_eq(got, _bridge_bytes(text)) != 1) { bad_bridge = bad_bridge + 1; }
         i = i + 1;
@@ -3798,7 +3815,7 @@ fn test_wire_nested_bytes() {
     str_builder_add_cstr(want, "{\"name\":\"n\",\"expr\":");
     str_builder_add(want, _expr_derive_text(CronEntry_expr(e)));
     str_builder_add_cstr(want, ",\"task_template\":{\"name\":\"t\",\"description\":\"d\",\"agent_id\":\"a\",\"priority\":5,\"resource_requirements\":");
-    str_builder_add(want, _req_derive_text(req));
+    str_builder_add(want, _req_wire_text(req));
     str_builder_add_cstr(want, "},\"enabled\":1,\"last_fired\":0,\"missed_policy\":1}");
     assert_eq(str_eq(cron_entry_to_json_str(e), str_builder_build(want)), 1, "cron entry bytes, nesting included");
     assert_eq(str_contains(cron_entry_to_json_str(e), str_from("\"cpu_cores\":0.3333333333333333,")), 1, "1/3 keeps every digit");
@@ -4068,7 +4085,7 @@ fn test_accel_release_is_exact() {
     var m = _gpu_node("g", 2);
     node_capacity_reserve(m, req);
     node_capacity_release(m, resource_req_new(f64_from(0), 0, REQ_TPU, 2, 0, 0));
-    assert_eq(_accel_used_at(m, 0) + _accel_used_at(m, 1), 1, "nothing held under that requirement");
+    assert_eq(_accel_used_at(m, 0) + _accel_used_at(m, 1), SAMAY_ACCEL_WHOLE, "nothing held under that requirement");
     return 0;
 }
 
@@ -4102,7 +4119,7 @@ fn test_accel_restore_rebuilds_holds() {
     ScheduledTask_set_reserved_on(two, str_from("g"));
     var r = task_scheduler_from_json_str(task_scheduler_to_json_str(over));
     var rn = map_get(TaskScheduler_nodes(r), str_from("g"));
-    assert_eq(_accel_used_at(rn, 0), 2, "both tasks counted past capacity");
+    assert_eq(_accel_used_at(rn, 0), 2 * SAMAY_ACCEL_WHOLE, "both tasks counted past capacity");
     _finish(r, task_scheduler_get_task(r, ScheduledTask_task_id(one)));
     assert_eq(node_capacity_can_fit(rn, ScheduledTask_resource_requirements(two)), 0, "still taken by the other");
     _finish(r, task_scheduler_get_task(r, ScheduledTask_task_id(two)));
@@ -4192,7 +4209,7 @@ fn test_preempt_targets_the_holder() {
     assert_eq(act != 0, 1, "an action");
     assert_eq(str_eq(PreemptionAction_preempted_task_id(act), ScheduledTask_task_id(holder)), 1, "it stops whoever holds the device");
     assert_eq(NodeCapacity_available_cpu(node) == cpu_before, 1, "asking changes nothing");
-    assert_eq(_accel_used_at(node, 0), 1, "and the device is still held");
+    assert_eq(_accel_used_at(node, 0), SAMAY_ACCEL_WHOLE, "and the device is still held");
 
     # Obeying it places the task.
     scheduled_task_transition(holder, TASK_PREEMPTED);
@@ -4234,7 +4251,7 @@ fn test_register_node_keeps_reservations() {
     assert_eq(NodeCapacity_available_memory_mb(again), 7168, "memory still held");
     assert_eq(NodeCapacity_available_disk_mb(again), 9728, "disk still held");
     assert_eq(NodeCapacity_running_tasks(again), 1, "the task is still counted");
-    assert_eq(_accel_used_at(again, 0), 1, "and so is its device");
+    assert_eq(_accel_used_at(again, 0), SAMAY_ACCEL_WHOLE, "and so is its device");
     task_scheduler_submit_task(s, _accel_task("b", 5, REQ_GPU, 0));
     assert_eq(vec_len(task_scheduler_schedule_pending(s)), 0, "the GPU is not sold again");
     _finish(s, a);
@@ -5541,20 +5558,20 @@ fn test_accel_holds_many() {
     node_capacity_release(n, b);
     assert_eq(vec_len(NodeCapacity_accel_holds(n)), 4, "one pair gone");
     assert_eq(_accel_used_at(n, used_b), 0, "the profile b held is free");
-    assert_eq(_accel_find_hold(n, a) >= 0, 1, "a is still held");
-    assert_eq(_accel_find_hold(n, c) >= 0, 1, "c is still held");
-    assert_eq(vec_get(NodeCapacity_accel_holds(n), _accel_find_hold(n, a)), a, "by a itself");
-    assert_eq(vec_get(NodeCapacity_accel_holds(n), _accel_find_hold(n, c)), c, "and c itself");
+    assert_eq(_accel_hold_from(n, a, 1, 0) >= 0, 1, "a is still held");
+    assert_eq(_accel_hold_from(n, c, 1, 0) >= 0, 1, "c is still held");
+    assert_eq(vec_get(NodeCapacity_accel_holds(n), _accel_hold_from(n, a, 1, 0)), a, "by a itself");
+    assert_eq(vec_get(NodeCapacity_accel_holds(n), _accel_hold_from(n, c, 1, 0)), c, "and c itself");
     # Each hold must still name its own profile. Summing across profiles would hide a
     # hold that moved and kept the wrong one.
-    var used_a = vec_get(NodeCapacity_accel_holds(n), _accel_find_hold(n, a) + 1);
-    var used_c = vec_get(NodeCapacity_accel_holds(n), _accel_find_hold(n, c) + 1);
+    var used_a = vec_get(NodeCapacity_accel_holds(n), _accel_hold_from(n, a, 1, 0) + 1);
+    var used_c = vec_get(NodeCapacity_accel_holds(n), _accel_hold_from(n, c, 1, 0) + 1);
     assert_eq(used_a != used_c, 1, "a and c are on different devices");
-    assert_eq(_accel_used_at(n, used_a), 1, "a's device is held");
-    assert_eq(_accel_used_at(n, used_c), 1, "c's device is held");
+    assert_eq(_accel_used_at(n, used_a), SAMAY_ACCEL_WHOLE, "a's device is held");
+    assert_eq(_accel_used_at(n, used_c), SAMAY_ACCEL_WHOLE, "c's device is held");
     node_capacity_release(n, c);
     assert_eq(_accel_used_at(n, used_c), 0, "releasing c frees c's device");
-    assert_eq(_accel_used_at(n, used_a), 1, "and not a's");
+    assert_eq(_accel_used_at(n, used_a), SAMAY_ACCEL_WHOLE, "and not a's");
     node_capacity_release(n, a);
     assert_eq(_accel_used_at(n, 0) + _accel_used_at(n, 1) + _accel_used_at(n, 2), 0, "all free");
     assert_eq(vec_len(NodeCapacity_accel_holds(n)), 0, "no record left");
@@ -5579,27 +5596,29 @@ fn test_accel_pick_order() {
     node_capacity_add_accel(n, profile_cuda(0, small));
     node_capacity_add_accel(n, profile_cuda(1, big));
     node_capacity_add_accel(n, profile_cuda(2, small));
-    assert_eq(_accel_pick(n, REQ_GPU, 0, 1), 1, "most memory first");
+    var gpu = resource_req_new(f64_from(1), 1, REQ_GPU, 0, 0, 0);
+    assert_eq(_accel_pick(n, gpu, 1, 0 - 1), 1, "most memory first");
     var req = resource_req_new(f64_from(1), 1, REQ_GPU, 0, 0, 0);
     node_capacity_reserve(n, req);
-    assert_eq(_accel_used_at(n, 1), 1, "and that is the one taken");
-    assert_eq(_accel_pick(n, REQ_GPU, 0, 1), 0, "then the first of the equals");
+    assert_eq(_accel_used_at(n, 1), SAMAY_ACCEL_WHOLE, "and that is the one taken");
+    assert_eq(_accel_pick(n, gpu, 1, 0 - 1), 0, "then the first of the equals");
     node_capacity_reserve(n, resource_req_new(f64_from(1), 1, REQ_GPU, 0, 0, 0));
-    assert_eq(_accel_pick(n, REQ_GPU, 0, 1), 2, "then the last free one");
+    assert_eq(_accel_pick(n, gpu, 1, 0 - 1), 2, "then the last free one");
     node_capacity_reserve(n, resource_req_new(f64_from(1), 1, REQ_GPU, 0, 0, 0));
-    assert_eq(_accel_pick(n, REQ_GPU, 0, 1), 0 - 1, "none free");
-    assert_eq(_accel_pick(n, REQ_GPU, 0, 0), 1, "unless room does not matter");
+    assert_eq(_accel_pick(n, gpu, 1, 0 - 1), 0 - 1, "none free");
+    assert_eq(_accel_pick(n, gpu, 0, 0 - 1), 1, "among the full ones, the same order");
     # Rank beats memory, in either listing order.
     var m = make_node("m", f64_from(64), 524288);
     node_capacity_add_accel(m, profile_tpu(0, 8, TPU_V5P));
     node_capacity_add_accel(m, profile_cuda(0, big));
     var want = 0;
     if (profile_rank(vec_get(NodeCapacity_accel_profiles(m), 1)) > profile_rank(vec_get(NodeCapacity_accel_profiles(m), 0))) { want = 1; }
-    assert_eq(_accel_pick(m, REQ_ANY_ACCELERATOR, 1, 1), want, "the better rank");
+    var any = resource_req_new(f64_from(1), 1, REQ_ANY_ACCELERATOR, 1, 0, 0);
+    assert_eq(_accel_pick(m, any, 1, 0 - 1), want, "the better rank");
     var r = make_node("r", f64_from(64), 524288);
     node_capacity_add_accel(r, profile_cuda(0, big));
     node_capacity_add_accel(r, profile_tpu(0, 8, TPU_V5P));
-    assert_eq(_accel_pick(r, REQ_ANY_ACCELERATOR, 1, 1), 1 - want, "whichever is listed first");
+    assert_eq(_accel_pick(r, any, 1, 0 - 1), 1 - want, "whichever is listed first");
     # A chip count of 0 still takes a chip, and a pod of 0 chips offers none.
     var pod = make_node("p", f64_from(64), 524288);
     node_capacity_add_accel(pod, profile_tpu(0, 2, TPU_V5P));
@@ -5607,7 +5626,7 @@ fn test_accel_pick_order() {
     assert_eq(_accel_used_at(pod, 0), 1, "no chip count means one chip");
     node_capacity_reserve(pod, resource_req_new(f64_from(1), 1, REQ_TPU, 1, 0, 0));
     assert_eq(_accel_used_at(pod, 0), 2, "and exactly the last one fits");
-    assert_eq(_accel_pick(pod, REQ_TPU, 1, 1), 0 - 1, "then the pod is full");
+    assert_eq(_accel_pick(pod, resource_req_new(f64_from(1), 1, REQ_TPU, 1, 0, 0), 1, 0 - 1), 0 - 1, "then the pod is full");
     assert_eq(vec_len(NodeCapacity_accel_profiles(node_capacity_with_tpu(make_node("t", f64_from(8), 8192), 0))), 0, "no chips, no profile");
     assert_eq(vec_len(NodeCapacity_accel_profiles(node_capacity_with_tpu(make_node("t", f64_from(8), 8192), 1))), 1, "one chip is a profile");
     return 0;
@@ -6344,6 +6363,26 @@ fn test_known_record() {
         k = k + 1;
     }
     assert_eq(spread, 64, "and each amount of disk");
+    spread = 0;
+    last_at = 0 - 1;
+    k = 1;
+    while (k <= 64) {
+        var at5 = _shape_slot(resource_req_with_devices(resource_req_new(f64_from(1), 1024, REQ_GPU, 0, 0, 0), k));
+        if (at5 != last_at) { spread = spread + 1; }
+        last_at = at5;
+        k = k + 1;
+    }
+    assert_eq(spread, 64, "and each device count");
+    spread = 0;
+    last_at = 0 - 1;
+    k = 1;
+    while (k <= 64) {
+        var at6 = _shape_slot(resource_req_with_share(resource_req_new(f64_from(1), 1024, REQ_GPU, 0, 0, 0), k));
+        if (at6 != last_at) { spread = spread + 1; }
+        last_at = at6;
+        k = k + 1;
+    }
+    assert_eq(spread, 64, "and each share");
 
     # The limits come from every node, wherever the table put it: each of 32 in turn
     # holds the most.
@@ -6414,7 +6453,7 @@ fn test_reserve_grew() {
         node_capacity_reserve(three, resource_req_new(f64_from(1), 0, REQ_GPU, 0, 0, 0));
         k = k + 1;
     }
-    assert_eq(_accel_in_use(three), 3, "three GPUs, three in use");
+    assert_eq(_accel_in_use(three), 3 * SAMAY_ACCEL_WHOLE, "three GPUs, three in use");
     return 0;
 }
 
@@ -6545,6 +6584,555 @@ fn test_schedule_skips_soundly() {
     task_scheduler_cancel_task(s, ScheduledTask_task_id(t1));
     task_scheduler_schedule_pending(s);
     assert_eq(_went(t2, "a"), 1, "the next pass tries the shape again");
+    return 0;
+}
+
+# --- v1.5.0: several devices, or a share of one (ADR-0016) ---
+
+fn _gpu_req(cpu) {
+    return resource_req_new(f64_from(cpu), 1, REQ_GPU, 0, 0, 0);
+}
+
+fn _req_task(name, prio, req) {
+    return scheduled_task_new(str_from(name), str_from("d"), str_from("a"), prio, req);
+}
+
+fn test_req_devices_and_share() {
+    test_group("req_devices_and_share");
+    var r = _gpu_req(1);
+    assert_eq(ResourceReq_accel_devices(r), 1, "one device by default");
+    assert_eq(ResourceReq_accel_share(r), SAMAY_ACCEL_WHOLE, "all of it");
+    assert_eq(SAMAY_ACCEL_WHOLE, 1000, "counted in thousandths");
+    assert_eq(resource_req_with_devices(r, 4), r, "chainable");
+    assert_eq(ResourceReq_accel_devices(r), 4, "four devices");
+    assert_eq(ResourceReq_accel_share(r), SAMAY_ACCEL_WHOLE, "each whole");
+    assert_eq(resource_req_with_share(r, 250), r, "chainable too");
+    assert_eq(ResourceReq_accel_share(r), 250, "a quarter");
+    assert_eq(ResourceReq_accel_devices(r), 1, "of one device: the last call wins");
+    resource_req_with_devices(r, 2);
+    assert_eq(ResourceReq_accel_share(r), SAMAY_ACCEL_WHOLE, "and devices replace a share");
+    resource_req_with_devices(r, 0);
+    assert_eq(ResourceReq_accel_devices(r), 1, "fewer than one is one");
+    resource_req_with_devices(r, 0 - 5);
+    assert_eq(ResourceReq_accel_devices(r), 1, "so is a negative count");
+    resource_req_with_share(r, 0);
+    assert_eq(ResourceReq_accel_share(r), SAMAY_ACCEL_WHOLE, "a share of nothing is the whole device");
+    resource_req_with_share(r, 0 - 1);
+    assert_eq(ResourceReq_accel_share(r), SAMAY_ACCEL_WHOLE, "and of less than nothing");
+    resource_req_with_share(r, 1001);
+    assert_eq(ResourceReq_accel_share(r), SAMAY_ACCEL_WHOLE, "and of more than one");
+    resource_req_with_share(r, 999);
+    assert_eq(ResourceReq_accel_share(r), 999, "999 thousandths is a share");
+    resource_req_with_share(r, 1);
+    assert_eq(ResourceReq_accel_share(r), 1, "and so is one");
+    # A copy carries both, as placement reads them.
+    var c = resource_req_clone(resource_req_with_devices(_gpu_req(1), 3));
+    assert_eq(ResourceReq_accel_devices(c), 3, "a copy keeps the count");
+    c = resource_req_clone(resource_req_with_share(_gpu_req(1), 400));
+    assert_eq(ResourceReq_accel_share(c), 400, "and the share");
+    var raw = _gpu_req(1);
+    ResourceReq_set_accel_devices(raw, 4);
+    ResourceReq_set_accel_share(raw, 500);
+    c = resource_req_clone(raw);
+    assert_eq(ResourceReq_accel_devices(c), 1, "a share set beside a count is of one device");
+    assert_eq(ResourceReq_accel_share(c), 500, "and keeps the share");
+    # Zeros, as setters and the derive's decoder leave them, read as one whole device.
+    ResourceReq_set_accel_devices(raw, 0);
+    ResourceReq_set_accel_share(raw, 0);
+    assert_eq(_req_devices(raw), 1, "no count is one device");
+    assert_eq(_req_share(raw), SAMAY_ACCEL_WHOLE, "no share is all of it");
+    ResourceReq_set_accel_share(raw, 2000);
+    assert_eq(_req_share(raw), SAMAY_ACCEL_WHOLE, "a share past whole is whole");
+    ResourceReq_set_accel_devices(raw, 3);
+    ResourceReq_set_accel_share(raw, SAMAY_ACCEL_WHOLE);
+    assert_eq(_req_devices(raw), 3, "a count of whole devices stands");
+    var t = _req_task("t", 5, resource_req_with_devices(_gpu_req(1), 2));
+    assert_eq(ResourceReq_accel_devices(ScheduledTask_resource_requirements(t)), 2, "a task keeps its count");
+    return 0;
+}
+
+fn test_accel_shares() {
+    test_group("accel_shares");
+    var n = _gpu_node("g", 1);
+    var a = resource_req_with_share(_gpu_req(1), 500);
+    var b = resource_req_with_share(_gpu_req(1), 500);
+    assert_eq(node_capacity_can_fit(n, a), 1, "half a GPU fits");
+    node_capacity_reserve(n, a);
+    assert_eq(_accel_used_at(n, 0), 500, "and takes half");
+    assert_eq(node_capacity_can_fit(n, _gpu_req(1)), 0, "a whole GPU no longer fits");
+    assert_eq(node_capacity_can_fit(n, b), 1, "the other half does");
+    node_capacity_reserve(n, b);
+    assert_eq(node_capacity_can_fit(n, resource_req_with_share(_gpu_req(1), 1)), 0, "then not a thousandth more");
+    node_capacity_release(n, a);
+    assert_eq(_accel_used_at(n, 0), 500, "a release gives back its own half");
+    assert_eq(node_capacity_can_fit(n, _gpu_req(1)), 0, "so the device is still shared");
+    node_capacity_release(n, b);
+    assert_eq(node_capacity_can_fit(n, _gpu_req(1)), 1, "then whole again");
+    node_capacity_reserve(n, resource_req_with_share(_gpu_req(1), 999));
+    assert_eq(node_capacity_can_fit(n, resource_req_with_share(_gpu_req(1), 1)), 1, "999 and 1 make a device");
+    assert_eq(node_capacity_can_fit(n, resource_req_with_share(_gpu_req(1), 2)), 0, "999 and 2 do not");
+
+    # A share joins a device already shared, so a whole one stays whole.
+    var two = _gpu_node("two", 2);
+    node_capacity_reserve(two, resource_req_with_share(_gpu_req(1), 300));
+    var first = 0;
+    if (_accel_used_at(two, 1) > 0) { first = 1; }
+    node_capacity_reserve(two, resource_req_with_share(_gpu_req(1), 300));
+    assert_eq(_accel_used_at(two, first), 600, "the second share joins the first");
+    assert_eq(_accel_used_at(two, 1 - first), 0, "the other device stays whole");
+    assert_eq(node_capacity_can_fit(two, _gpu_req(1)), 1, "so a whole GPU still fits");
+    # Untouched devices go by ai-hwaccel's ranking, but a shared one comes first.
+    var mixed = make_node("mixed", f64_from(64), 524288);
+    node_capacity_add_accel(mixed, profile_cuda(0, 8589934592));
+    node_capacity_add_accel(mixed, profile_cuda(1, 34359738368));
+    var whole = _gpu_req(1);
+    node_capacity_reserve(mixed, whole);
+    assert_eq(_accel_used_at(mixed, 1), SAMAY_ACCEL_WHOLE, "a whole GPU takes the bigger");
+    node_capacity_reserve(mixed, resource_req_with_share(_gpu_req(1), 100));
+    assert_eq(_accel_used_at(mixed, 0), 100, "a share takes what is left");
+    node_capacity_release(mixed, whole);
+    node_capacity_reserve(mixed, resource_req_with_share(_gpu_req(1), 100));
+    assert_eq(_accel_used_at(mixed, 0), 200, "the next share joins it, not the bigger whole one");
+    assert_eq(_accel_used_at(mixed, 1), 0, "which stays whole");
+    var fresh = make_node("fresh", f64_from(64), 524288);
+    node_capacity_add_accel(fresh, profile_cuda(0, 8589934592));
+    node_capacity_add_accel(fresh, profile_cuda(1, 34359738368));
+    node_capacity_reserve(fresh, resource_req_with_share(_gpu_req(1), 100));
+    assert_eq(_accel_used_at(fresh, 1), 100, "among untouched ones, the bigger first");
+    return 0;
+}
+
+fn test_accel_devices() {
+    test_group("accel_devices");
+    var n = _gpu_node("g", 4);
+    var four = resource_req_with_devices(_gpu_req(1), 4);
+    assert_eq(node_capacity_can_fit(n, four), 1, "four GPUs fit on four");
+    assert_eq(node_capacity_can_fit(n, resource_req_with_devices(_gpu_req(1), 5)), 0, "five do not");
+    node_capacity_reserve(n, four);
+    assert_eq(vec_len(NodeCapacity_accel_holds(n)), 8, "one hold per device");
+    var k = 0;
+    var each = 0;
+    while (k < 4) {
+        if (_accel_used_at(n, k) == SAMAY_ACCEL_WHOLE) { each = each + 1; }
+        k = k + 1;
+    }
+    assert_eq(each, 4, "four different devices, not one four times");
+    assert_eq(node_capacity_can_fit(n, _gpu_req(1)), 0, "none left");
+    node_capacity_release(n, four);
+    assert_eq(_accel_in_use(n) + vec_len(NodeCapacity_accel_holds(n)), 0, "a release gives back all four");
+
+    var three = _gpu_node("three", 3);
+    node_capacity_reserve(three, resource_req_with_devices(_gpu_req(1), 2));
+    assert_eq(node_capacity_can_fit(three, resource_req_with_devices(_gpu_req(1), 2)), 0, "two do not fit on one free");
+    assert_eq(node_capacity_can_fit(three, _gpu_req(1)), 1, "one does");
+
+    # Several devices take the best, by ai-hwaccel's ranking.
+    var ranked = make_node("ranked", f64_from(64), 524288);
+    node_capacity_add_accel(ranked, profile_cuda(0, 8589934592));
+    node_capacity_add_accel(ranked, profile_cuda(1, 34359738368));
+    node_capacity_add_accel(ranked, profile_cuda(2, 17179869184));
+    node_capacity_reserve(ranked, resource_req_with_devices(_gpu_req(1), 2));
+    assert_eq(_accel_used_at(ranked, 0), 0, "the smallest is left");
+    assert_eq(_accel_used_at(ranked, 1) + _accel_used_at(ranked, 2), 2 * SAMAY_ACCEL_WHOLE, "the two biggest are taken");
+
+    # A caller's equal copy gives back as many as the request took.
+    var copied = _gpu_node("copy", 2);
+    var pair = resource_req_with_devices(_gpu_req(1), 2);
+    node_capacity_reserve(copied, pair);
+    node_capacity_release(copied, resource_req_clone(pair));
+    assert_eq(_accel_in_use(copied), 0, "an equal copy releases both");
+    # It never takes another task's hold: with one of its own left, only that goes.
+    var own = _gpu_node("own", 3);
+    var other = resource_req_with_devices(_gpu_req(1), 2);
+    node_capacity_reserve(own, other);
+    var mine = _gpu_req(1);
+    node_capacity_reserve(own, mine);
+    node_capacity_release(own, mine);
+    assert_eq(_accel_in_use(own), 2 * SAMAY_ACCEL_WHOLE, "a release of one leaves the other task's two");
+
+    # A replayed hold with too few free counts the rest past capacity, elsewhere.
+    var over = _gpu_node("over", 2);
+    node_capacity_reserve(over, _gpu_req(1));
+    var taken = 0;
+    if (_accel_used_at(over, 1) > 0) { taken = 1; }
+    var both = resource_req_with_devices(_gpu_req(1), 2);
+    node_capacity_reserve(over, both);
+    assert_eq(_accel_used_at(over, taken), 2 * SAMAY_ACCEL_WHOLE, "the full device is counted twice");
+    assert_eq(_accel_used_at(over, 1 - taken), SAMAY_ACCEL_WHOLE, "and the free one once");
+    node_capacity_release(over, both);
+    assert_eq(_accel_in_use(over), SAMAY_ACCEL_WHOLE, "a release takes back exactly those two");
+
+    # A pod is one device, and gives chips.
+    var pods = make_node("pods", f64_from(64), 524288);
+    node_capacity_add_accel(pods, profile_tpu(0, 8, TPU_V5P));
+    var two_pods = resource_req_with_devices(resource_req_new(f64_from(1), 1, REQ_TPU, 4, 0, 0), 2);
+    assert_eq(node_capacity_can_fit(pods, two_pods), 0, "one pod is not two devices");
+    node_capacity_add_accel(pods, profile_tpu(1, 8, TPU_V5P));
+    assert_eq(node_capacity_can_fit(pods, two_pods), 1, "two pods are");
+    node_capacity_reserve(pods, two_pods);
+    assert_eq(_accel_used_at(pods, 0) + _accel_used_at(pods, 1), 8, "four chips of each");
+    var pod = make_node("pod", f64_from(64), 524288);
+    node_capacity_add_accel(pod, profile_tpu(0, 8, TPU_V5P));
+    node_capacity_reserve(pod, resource_req_with_share(resource_req_new(f64_from(1), 1, REQ_GPU_OR_TPU, 2, 0, 0), 500));
+    assert_eq(_accel_used_at(pod, 0), 2, "a share does nothing on a pod: it takes chips");
+    return 0;
+}
+
+fn test_accel_devices_place_and_preempt() {
+    test_group("accel_devices_place_and_preempt");
+    # A four-GPU task goes where four are free, even onto the busier node.
+    var s = task_scheduler_new();
+    task_scheduler_register_node(s, _gpu_node("a-two", 2));
+    var b = _gpu_node("b-four", 4);
+    node_capacity_reserve(b, make_req(f64_from(32), 1));
+    task_scheduler_register_node(s, b);
+    var t = _req_task("four", 5, resource_req_with_devices(_gpu_req(1), 4));
+    task_scheduler_submit_task(s, t);
+    task_scheduler_schedule_pending(s);
+    assert_eq(_went(t, "b-four"), 1, "four GPUs go where there are four");
+
+    # Two half-GPU tasks share one GPU, and a third waits.
+    var h = task_scheduler_new();
+    task_scheduler_register_node(h, _gpu_node("g", 1));
+    var i = 0;
+    while (i < 3) {
+        task_scheduler_submit_task(h, _req_task("half", 5, resource_req_with_share(_gpu_req(1), 500)));
+        i = i + 1;
+    }
+    assert_eq(vec_len(task_scheduler_schedule_pending(h)), 2, "two halves share a GPU");
+    assert_eq(vec_len(task_scheduler_pending_tasks(h)), 1, "the third waits");
+
+    # A running two-GPU task is a victim for a queued two-GPU task.
+    var p = task_scheduler_new();
+    task_scheduler_register_node(p, _gpu_node("g", 2));
+    var low = _req_task("low", 1, resource_req_with_devices(_gpu_req(1), 2));
+    task_scheduler_submit_task(p, low);
+    task_scheduler_schedule_pending(p);
+    scheduled_task_transition(low, TASK_RUNNING);
+    var high = _req_task("high", 10, resource_req_with_devices(_gpu_req(1), 2));
+    task_scheduler_submit_task(p, high);
+    var act = task_scheduler_preempt_if_needed(p, high);
+    assert_eq(act != 0, 1, "stopping it frees both");
+    if (act != 0) {
+        assert_eq(str_eq(PreemptionAction_preempted_task_id(act), ScheduledTask_task_id(low)), 1, "and it is named");
+    }
+    assert_eq(_accel_in_use(map_get(TaskScheduler_nodes(p), str_from("g"))), 2 * SAMAY_ACCEL_WHOLE, "asking changed nothing");
+
+    # Two one-GPU tasks are not one victim.
+    var q = task_scheduler_new();
+    task_scheduler_register_node(q, _gpu_node("g", 2));
+    i = 0;
+    while (i < 2) {
+        var one = _req_task("one", 1, _gpu_req(1));
+        task_scheduler_submit_task(q, one);
+        task_scheduler_schedule_pending(q);
+        scheduled_task_transition(one, TASK_RUNNING);
+        i = i + 1;
+    }
+    var big = _req_task("big", 10, resource_req_with_devices(_gpu_req(1), 2));
+    task_scheduler_submit_task(q, big);
+    assert_eq(task_scheduler_preempt_if_needed(q, big), 0, "one victim has to be enough");
+
+    # A restore replays a multi-device hold and a share on as many devices.
+    var r = task_scheduler_from_json_str(task_scheduler_to_json_str(s));
+    assert_eq(_accel_in_use(map_get(TaskScheduler_nodes(r), str_from("b-four"))), 4 * SAMAY_ACCEL_WHOLE, "four held after a restore");
+    var hr = task_scheduler_from_json_str(task_scheduler_to_json_str(h));
+    assert_eq(_accel_in_use(map_get(TaskScheduler_nodes(hr), str_from("g"))), SAMAY_ACCEL_WHOLE, "two halves held after a restore");
+    assert_eq(vec_len(task_scheduler_schedule_pending(hr)), 0, "and the third still waits");
+    return 0;
+}
+
+fn test_accel_wire() {
+    test_group("accel_wire");
+    # One whole device writes what 1.4.6 wrote.
+    var plain = _gpu_req(1);
+    assert_eq(str_eq(bayan_json_v_build(_rr_node(plain)),
+        str_from("{\"cpu_cores\":1.0,\"memory_mb\":1,\"accel_req\":1,\"accel_min_chips\":0,\"network\":0,\"disk_mb\":0}")), 1,
+      "no new keys for one whole device");
+    var four = resource_req_with_devices(_gpu_req(1), 4);
+    assert_eq(str_contains(bayan_json_v_build(_rr_node(four)), str_from(",\"disk_mb\":0,\"accel_devices\":4,\"accel_share\":1000}")), 1,
+      "a count writes both, after disk_mb");
+    # Each field round trips on its own.
+    var back = resource_req_from_json_str(bayan_json_v_build(_rr_node(four)));
+    assert_eq(ResourceReq_accel_devices(back), 4, "accel_devices round trips");
+    back = resource_req_from_json_str(bayan_json_v_build(_rr_node(resource_req_with_share(_gpu_req(1), 250))));
+    assert_eq(ResourceReq_accel_share(back), 250, "accel_share round trips");
+    assert_eq(ResourceReq_accel_devices(back), 1, "with one device");
+    # The derive writes both always, and its text reads back too.
+    back = resource_req_from_json_str(_req_derive_text(four));
+    assert_eq(ResourceReq_accel_devices(back), 4, "the derive's text reads");
+    # Text from before 1.5.0 reads as one whole device.
+    back = resource_req_from_json_str(str_from("{\"cpu_cores\":1.0,\"memory_mb\":1,\"accel_req\":1,\"accel_min_chips\":0,\"network\":0,\"disk_mb\":0}"));
+    assert_eq(ResourceReq_accel_devices(back) * 10000 + ResourceReq_accel_share(back), 11000, "old text is one whole device");
+    # Restore settles them as the constructors do.
+    var base = "{\"cpu_cores\":1.0,\"memory_mb\":1,\"accel_req\":1,\"accel_min_chips\":0,\"network\":0,\"disk_mb\":0,";
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, base);
+    str_builder_add_cstr(sb, "\"accel_devices\":4,\"accel_share\":500}");
+    back = resource_req_from_json_str(str_builder_build(sb));
+    assert_eq(ResourceReq_accel_devices(back) * 10000 + ResourceReq_accel_share(back), 10500, "a share beside a count is of one device");
+    sb = str_builder_new();
+    str_builder_add_cstr(sb, base);
+    str_builder_add_cstr(sb, "\"accel_devices\":0,\"accel_share\":0}");
+    back = resource_req_from_json_str(str_builder_build(sb));
+    assert_eq(ResourceReq_accel_devices(back) * 10000 + ResourceReq_accel_share(back), 11000, "zeros are one whole device");
+    sb = str_builder_new();
+    str_builder_add_cstr(sb, base);
+    str_builder_add_cstr(sb, "\"accel_devices\":-3,\"accel_share\":5000}");
+    back = resource_req_from_json_str(str_builder_build(sb));
+    assert_eq(ResourceReq_accel_devices(back) * 10000 + ResourceReq_accel_share(back), 11000, "out of range settles");
+    sb = str_builder_new();
+    str_builder_add_cstr(sb, base);
+    str_builder_add_cstr(sb, "\"accel_devices\":\"4\"}");
+    assert_eq(resource_req_from_json_str(str_builder_build(sb)), 0, "a Str for a count is refused");
+    sb = str_builder_new();
+    str_builder_add_cstr(sb, base);
+    str_builder_add_cstr(sb, "\"accel_share\":[500]}");
+    assert_eq(resource_req_from_json_str(str_builder_build(sb)), 0, "an array for a share is refused");
+    # Inside a task, through a whole snapshot.
+    var s = task_scheduler_new();
+    var t = _req_task("t", 5, resource_req_with_share(_gpu_req(1), 750));
+    task_scheduler_submit_task(s, t);
+    var r = task_scheduler_from_json_str(task_scheduler_to_json_str(s));
+    var rt = task_scheduler_get_task(r, ScheduledTask_task_id(t));
+    assert_eq(ResourceReq_accel_share(ScheduledTask_resource_requirements(rt)), 750, "a task's share survives a snapshot");
+    assert_eq(str_eq(task_scheduler_to_json_str(r), task_scheduler_to_json_str(s)), 1, "and writes back byte for byte");
+    return 0;
+}
+
+# --- v1.5.0: CPU work goes to accelerator nodes last (ADR-0017) ---
+
+fn test_cpu_work_avoids_accel_nodes() {
+    test_group("cpu_work_avoids_accel_nodes");
+    # Both idle: the GPU node's id sorts first, and through 1.4.6 that decided it.
+    var s = task_scheduler_new();
+    task_scheduler_register_node(s, _gpu_node("a-gpu", 1));
+    task_scheduler_register_node(s, make_node("b-cpu", f64_from(64), 524288));
+    var t = make_task("t", 5);
+    task_scheduler_submit_task(s, t);
+    task_scheduler_schedule_pending(s);
+    assert_eq(_went(t, "b-cpu"), 1, "a tie goes to the CPU node");
+    # The GPU node emptier: still the CPU node.
+    var e = task_scheduler_new();
+    task_scheduler_register_node(e, _gpu_node("a-gpu", 1));
+    var busy = make_node("b-cpu", f64_from(64), 524288);
+    node_capacity_reserve(busy, make_req(f64_from(48), 1));
+    task_scheduler_register_node(e, busy);
+    t = make_task("t", 5);
+    task_scheduler_submit_task(e, t);
+    task_scheduler_schedule_pending(e);
+    assert_eq(_went(t, "b-cpu"), 1, "a busier CPU node beats an idle GPU node");
+    # No CPU node fits: the GPU node takes it rather than leave it waiting.
+    var f = task_scheduler_new();
+    task_scheduler_register_node(f, _gpu_node("a-gpu", 1));
+    task_scheduler_register_node(f, make_node("b-cpu", f64_from(1), 1024));
+    t = _req_task("big", 5, make_req(f64_from(8), 4096));
+    task_scheduler_submit_task(f, t);
+    task_scheduler_schedule_pending(f);
+    assert_eq(_went(t, "a-gpu"), 1, "an accelerator node when nothing else fits");
+    # Accelerator work and a requested node are as before.
+    var g = task_scheduler_new();
+    task_scheduler_register_node(g, _gpu_node("b-gpu", 1));
+    task_scheduler_register_node(g, make_node("a-cpu", f64_from(64), 524288));
+    var gt = _accel_task("gpu", 5, REQ_GPU, 0);
+    task_scheduler_submit_task(g, gt);
+    var asked = make_task("asked", 5);
+    ScheduledTask_set_requested_node(asked, str_from("b-gpu"));
+    task_scheduler_submit_task(g, asked);
+    task_scheduler_schedule_pending(g);
+    assert_eq(_went(gt, "b-gpu"), 1, "GPU work goes to the GPU");
+    assert_eq(_went(asked, "b-gpu"), 1, "and a task that asks for a node gets it");
+    # A CPU profile is not an accelerator.
+    var c = task_scheduler_new();
+    task_scheduler_register_node(c, node_capacity_add_accel(make_node("a-cpu-profile", f64_from(64), 524288), profile_cpu(1073741824)));
+    task_scheduler_register_node(c, make_node("b-plain", f64_from(64), 524288));
+    t = make_task("t", 5);
+    task_scheduler_submit_task(c, t);
+    task_scheduler_schedule_pending(c);
+    assert_eq(_went(t, "a-cpu-profile"), 1, "a node with only a CPU profile ranks as a CPU node");
+    # Among 32 of each, every CPU task lands on a CPU node until they are full.
+    var m = task_scheduler_new();
+    var i = 0;
+    while (i < 32) {
+        var sb = str_builder_new();
+        str_builder_add_cstr(sb, "gpu-");
+        str_builder_add_int(sb, i);
+        task_scheduler_register_node(m, node_capacity_add_accel(node_capacity_new(str_builder_build(sb), f64_from(4), 8192, 1024, 0),
+            profile_cuda(0, 17179869184)));
+        var sc = str_builder_new();
+        str_builder_add_cstr(sc, "cpu-");
+        str_builder_add_int(sc, i);
+        task_scheduler_register_node(m, node_capacity_new(str_builder_build(sc), f64_from(4), 8192, 1024, 0));
+        i = i + 1;
+    }
+    i = 0;
+    var tasks = vec_new();
+    while (i < 64) {
+        var w = _req_task("w", 5, make_req(f64_from(2), 1024));
+        task_scheduler_submit_task(m, w);
+        vec_push(tasks, w);
+        i = i + 1;
+    }
+    var on_cpu = 0;
+    task_scheduler_schedule_pending(m);
+    i = 0;
+    while (i < 64) {
+        var a = ScheduledTask_assigned_node(vec_get(tasks, i));
+        if (a != 0) {
+            if (str_starts_with(a, str_from("cpu-")) == 1) { on_cpu = on_cpu + 1; }
+        }
+        i = i + 1;
+    }
+    assert_eq(on_cpu, 64, "64 two-core tasks fill 32 four-core CPU nodes first");
+    return 0;
+}
+
+fn _hold_profile(n, req) {
+    var holds = NodeCapacity_accel_holds(n);
+    var i = 0;
+    while (i < vec_len(holds)) {
+        if (vec_get(holds, i) == req) { return vec_get(holds, i + 1); }
+        i = i + 2;
+    }
+    return 0 - 1;
+}
+
+fn test_accel_hold_edges() {
+    test_group("accel_hold_edges");
+    # A replayed two-GPU hold on a node whose four GPUs are all taken: two more, on
+    # two different devices, the first two by rank.
+    var full = _gpu_node("full", 4);
+    var k = 0;
+    while (k < 4) {
+        node_capacity_reserve(full, _gpu_req(1));
+        k = k + 1;
+    }
+    node_capacity_reserve(full, resource_req_with_devices(_gpu_req(1), 2));
+    assert_eq(_accel_in_use(full), 6 * SAMAY_ACCEL_WHOLE, "two more past capacity, no more and no fewer");
+    assert_eq(_accel_used_at(full, 0), 2 * SAMAY_ACCEL_WHOLE, "the first by rank");
+    assert_eq(_accel_used_at(full, 1), 2 * SAMAY_ACCEL_WHOLE, "and the next, not the first again");
+    assert_eq(_accel_used_at(full, 2) + _accel_used_at(full, 3), 2 * SAMAY_ACCEL_WHOLE, "the rest as they were");
+
+    # Too few free, and the full one ranks last: the free ones are still taken.
+    var last = make_node("last", f64_from(64), 524288);
+    node_capacity_add_accel(last, profile_cuda(0, 8589934592));
+    node_capacity_add_accel(last, profile_cuda(1, 34359738368));
+    node_capacity_add_accel(last, profile_cuda(2, 17179869184));
+    var r1 = _gpu_req(1);
+    var r2 = _gpu_req(1);
+    node_capacity_reserve(last, r1);
+    node_capacity_reserve(last, r2);
+    node_capacity_reserve(last, _gpu_req(1));
+    node_capacity_release(last, r1);
+    node_capacity_release(last, r2);
+    node_capacity_reserve(last, resource_req_with_devices(_gpu_req(1), 3));
+    assert_eq(_accel_used_at(last, 0), 2 * SAMAY_ACCEL_WHOLE, "the smallest, full, is counted again");
+    assert_eq(_accel_used_at(last, 1) + _accel_used_at(last, 2), 2 * SAMAY_ACCEL_WHOLE, "and both free ones taken");
+
+    # A whole request goes by rank even when a pod is partly taken: packing is for shares.
+    var pods = make_node("pods", f64_from(64), 524288);
+    node_capacity_add_accel(pods, profile_tpu(0, 8, TPU_V5P));
+    node_capacity_add_accel(pods, profile_tpu(1, 16, TPU_V5P));
+    var all16 = resource_req_new(f64_from(1), 1, REQ_TPU, 16, 0, 0);
+    node_capacity_reserve(pods, all16);
+    node_capacity_reserve(pods, resource_req_new(f64_from(1), 1, REQ_TPU, 4, 0, 0));
+    node_capacity_release(pods, all16);
+    node_capacity_reserve(pods, resource_req_new(f64_from(1), 1, REQ_TPU, 2, 0, 0));
+    assert_eq(_accel_used_at(pods, 1), 2, "the bigger pod, untouched");
+    assert_eq(_accel_used_at(pods, 0), 4, "not the one partly taken");
+
+    # Shares, with the shared device listed after an untouched bigger one.
+    var after = make_node("after", f64_from(64), 524288);
+    node_capacity_add_accel(after, profile_cuda(0, 34359738368));
+    node_capacity_add_accel(after, profile_cuda(1, 8589934592));
+    var whole = _gpu_req(1);
+    node_capacity_reserve(after, whole);
+    node_capacity_reserve(after, resource_req_with_share(_gpu_req(1), 100));
+    node_capacity_release(after, whole);
+    node_capacity_reserve(after, resource_req_with_share(_gpu_req(1), 100));
+    assert_eq(_accel_used_at(after, 1), 200, "a share joins the shared device listed later");
+    assert_eq(_accel_used_at(after, 0), 0, "and leaves the bigger one whole");
+    var first = make_node("first", f64_from(64), 524288);
+    node_capacity_add_accel(first, profile_cuda(0, 34359738368));
+    node_capacity_add_accel(first, profile_cuda(1, 8589934592));
+    node_capacity_reserve(first, resource_req_with_share(_gpu_req(1), 100));
+    assert_eq(_accel_used_at(first, 0), 100, "untouched devices: the bigger, listed first");
+
+    # A caller's equal copy releases one request's worth, never another task's.
+    var eq = _gpu_node("eq", 2);
+    node_capacity_reserve(eq, _gpu_req(1));
+    var a = _gpu_req(1);
+    node_capacity_reserve(eq, a);
+    node_capacity_release(eq, resource_req_clone(a));
+    assert_eq(_accel_in_use(eq), SAMAY_ACCEL_WHOLE, "one equal hold released, not both");
+    # Each field of the request decides which holds are equal.
+    var sh = _gpu_node("sh", 2);
+    node_capacity_reserve(sh, _gpu_req(1));
+    var half = resource_req_with_share(_gpu_req(1), 500);
+    node_capacity_reserve(sh, half);
+    node_capacity_release(sh, resource_req_clone(half));
+    assert_eq(_accel_in_use(sh), SAMAY_ACCEL_WHOLE, "a share's copy does not release a whole device");
+    var dv = _gpu_node("dv", 3);
+    node_capacity_reserve(dv, resource_req_with_devices(_gpu_req(1), 2));
+    var one = _gpu_req(1);
+    node_capacity_reserve(dv, one);
+    var where = _hold_profile(dv, one);
+    node_capacity_release(dv, resource_req_clone(one));
+    assert_eq(_accel_used_at(dv, where), 0, "a one-device copy releases that device, not one of two");
+    var ch = make_node("ch", f64_from(64), 524288);
+    node_capacity_add_accel(ch, profile_tpu(0, 8, TPU_V5P));
+    node_capacity_reserve(ch, resource_req_new(f64_from(1), 1, REQ_TPU, 4, 0, 0));
+    var two = resource_req_new(f64_from(1), 1, REQ_TPU, 2, 0, 0);
+    node_capacity_reserve(ch, two);
+    node_capacity_release(ch, resource_req_clone(two));
+    assert_eq(_accel_used_at(ch, 0), 4, "a two-chip copy releases two chips, not four");
+
+    # A share key of 0 is no share, so the device count beside it stands.
+    var t = resource_req_from_json_str(str_from(
+        "{\"cpu_cores\":1.0,\"memory_mb\":1,\"accel_req\":1,\"accel_min_chips\":0,\"network\":0,\"disk_mb\":0,\"accel_devices\":4,\"accel_share\":0}"));
+    assert_eq(ResourceReq_accel_devices(t), 4, "a share of 0 beside four devices keeps four");
+
+    # A node whose accelerator is not its first profile still has one.
+    var s = task_scheduler_new();
+    var mixed = make_node("a-mixed", f64_from(64), 524288);
+    node_capacity_add_accel(mixed, profile_cpu(1073741824));
+    node_capacity_add_accel(mixed, profile_cuda(0, 17179869184));
+    task_scheduler_register_node(s, mixed);
+    task_scheduler_register_node(s, make_node("b-plain", f64_from(64), 524288));
+    var cpu = make_task("cpu", 5);
+    task_scheduler_submit_task(s, cpu);
+    task_scheduler_schedule_pending(s);
+    assert_eq(_went(cpu, "b-plain"), 1, "a GPU listed second still marks an accelerator node");
+    return 0;
+}
+
+fn test_known_shapes_count_devices() {
+    test_group("known_shapes_count_devices");
+    var x = resource_req_with_devices(_gpu_req(1), 2);
+    assert_eq(_same_shape(x, resource_req_with_devices(_gpu_req(1), 3)), 0, "another count is another shape");
+    assert_eq(_same_shape(resource_req_with_share(_gpu_req(1), 500), resource_req_with_share(_gpu_req(1), 400)), 0,
+      "another share is another shape");
+    # Two GPUs fit nowhere, and one GPU is placed after them in the same pass.
+    var s = task_scheduler_new();
+    task_scheduler_register_node(s, _gpu_node("a", 1));
+    var t1 = _req_task("t1", 9, resource_req_with_devices(_gpu_req(1), 2));
+    var t2 = _req_task("t2", 8, _gpu_req(1));
+    var t3 = _req_task("t3", 7, resource_req_with_share(_gpu_req(1), 300));
+    task_scheduler_submit_task(s, t1);
+    task_scheduler_submit_task(s, t2);
+    task_scheduler_submit_task(s, t3);
+    task_scheduler_schedule_pending(s);
+    assert_eq(_went(t1, 0) + _went(t2, "a") + _went(t3, 0), 3, "a count's neighbour without it is placed");
+    var u = task_scheduler_new();
+    task_scheduler_register_node(u, _gpu_node("a", 1));
+    var h1 = _req_task("h1", 9, resource_req_with_share(_gpu_req(1), 700));
+    var h2 = _req_task("h2", 8, resource_req_with_share(_gpu_req(1), 400));
+    var h3 = _req_task("h3", 7, resource_req_with_share(_gpu_req(1), 300));
+    task_scheduler_submit_task(u, h1);
+    task_scheduler_submit_task(u, h2);
+    task_scheduler_submit_task(u, h3);
+    task_scheduler_schedule_pending(u);
+    assert_eq(_went(h1, "a") + _went(h2, 0) + _went(h3, "a"), 3, "a smaller share is placed after a refused one");
     return 0;
 }
 
@@ -6779,6 +7367,14 @@ fn main() {
     test_known_record();
     test_reserve_grew();
     test_schedule_skips_soundly();
+    test_req_devices_and_share();
+    test_accel_shares();
+    test_accel_devices();
+    test_accel_devices_place_and_preempt();
+    test_accel_wire();
+    test_cpu_work_avoids_accel_nodes();
+    test_accel_hold_edges();
+    test_known_shapes_count_devices();
     return assert_summary();
 }
 

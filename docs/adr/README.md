@@ -35,6 +35,8 @@ Decisions about samay — what we chose, the context, and the consequences we ac
 | [0010](0010-request-and-assignment.md) | A task's request and its assignment are two fields | Accepted (v1.3.0) — `node_preference` stays as a view, in memory and on the wire |
 | [0011](0011-bounded-task-history.md) | The stdlib sort, explicit task removal, and refusing an oversized snapshot | Accepted (v1.4.0) — closes audit F5; capacity is released in `task_id` order |
 | [0012](0012-cron-burst-budget.md) | An exact due count, and a burst budget that holds entries instead of dropping them | Accepted (v1.4.1) — closes audit F8 and F9 |
-| [0013](0013-accelerators-are-reserved.md) | Accelerators are reserved, and preemption has to help | Accepted (v1.4.3) — what 0002's availability has to mean |
+| [0013](0013-accelerators-are-reserved.md) | Accelerators are reserved, and preemption has to help | Accepted (v1.4.3) — what 0002's availability has to mean; points 1 and 2 extended by 0016 |
 | [0014](0014-what-a-document-may-cost.md) | A document has a byte limit and a parse budget, and writers keep to both | Accepted (v1.4.5) — what 0005's item limit could not bound |
 | [0015](0015-a-pass-only-fills-nodes.md) | A pass only fills nodes, so it skips what it already knows fits nowhere | Accepted (v1.4.6) — decisions unchanged, proven against 1.4.5 binaries |
+| [0016](0016-several-devices-or-a-share-of-one.md) | A request takes several whole devices, or a share of one | Accepted (v1.5.0) — extends 0013's unit; keys on the wire only when used |
+| [0017](0017-cpu-work-goes-to-accelerator-nodes-last.md) | CPU work goes to accelerator nodes last | Accepted (v1.5.0) — changes decisions on mixed fleets |

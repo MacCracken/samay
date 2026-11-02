@@ -366,6 +366,16 @@ fn _rr_node(req): i64 {
     bayan_json_v_obj_set(o, str_from("accel_min_chips"), bayan_json_v_int_new(ResourceReq_accel_min_chips(req)));
     bayan_json_v_obj_set(o, str_from("network"), bayan_json_v_int_new(ResourceReq_network(req)));
     bayan_json_v_obj_set(o, str_from("disk_mb"), bayan_json_v_int_new(ResourceReq_disk_mb(req)));
+    # Only a request that is not one whole device writes these, so a snapshot that
+    # uses neither is what 1.4.6 wrote (ADR-0016). The derive writes them always.
+    var whole_one = 0;
+    if (ResourceReq_accel_devices(req) == 1) {
+        if (ResourceReq_accel_share(req) == SAMAY_ACCEL_WHOLE) { whole_one = 1; }
+    }
+    if (whole_one == 0) {
+        bayan_json_v_obj_set(o, str_from("accel_devices"), bayan_json_v_int_new(ResourceReq_accel_devices(req)));
+        bayan_json_v_obj_set(o, str_from("accel_share"), bayan_json_v_int_new(ResourceReq_accel_share(req)));
+    }
     return o;
 }
 
@@ -390,16 +400,24 @@ fn _rr_read(el): i64 {
     # Require a mandatory key, so a wrong-shaped object is rejected too.
     if (bayan_json_v_obj_get_by_cstr(el, "cpu_cores") == 0) { return 0; }
     var bad = _jv_not_num(el, "cpu_cores") + _jv_not_num(el, "memory_mb") + _jv_not_num(el, "accel_req")
-    + _jv_not_num(el, "accel_min_chips") + _jv_not_flag(el, "network") + _jv_not_num(el, "disk_mb");
+    + _jv_not_num(el, "accel_min_chips") + _jv_not_flag(el, "network") + _jv_not_num(el, "disk_mb")
+    + _jv_not_num(el, "accel_devices") + _jv_not_num(el, "accel_share");
     if (bad != 0) { return 0; }
     # resource_req_new settles the domain, so a huge requirement stays one.
-    return resource_req_new(
+    var req = resource_req_new(
       _jv_f64(el, "cpu_cores", f64_from(0)),
       _jv_uint(el, "memory_mb", 0),
       _jv_int(el, "accel_req", REQ_NONE),
       _jv_uint(el, "accel_min_chips", 0),
       _jv_bool01(el, "network", 0),
       _jv_uint(el, "disk_mb", 0));
+    # Absent before 1.5.0, and absent since for one whole device. Settled as the
+    # constructors settle them: a share is of one device (ADR-0016).
+    var share = _jv_int(el, "accel_share", SAMAY_ACCEL_WHOLE);
+    if (share > 0) {
+        if (share < SAMAY_ACCEL_WHOLE) { return resource_req_with_share(req, share); }
+    }
+    return resource_req_with_devices(req, _jv_int(el, "accel_devices", 1));
 }
 
 # CronExpr -> json node, built directly. Same reasoning and the same rule as
