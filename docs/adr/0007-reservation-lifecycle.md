@@ -91,5 +91,5 @@ drives the state machine. It costs one `map_values` pass on a path that already 
   of a shipped field. Deferred to a minor release with its own ADR, which is
   [ADR-0010](0010-request-and-assignment.md) (v1.3.0).
 - Terminal tasks still accumulate in `TaskScheduler.tasks` — there is no removal API.
-  Capacity is no longer leaked, but memory and per-pass sort cost still grow. Tracked as
-  audit F5 in [`docs/development/roadmap.md`](../development/roadmap.md).
+  Capacity is no longer leaked, but memory and per-pass sort cost still grow. Audit F5,
+  closed in v1.4.0 by [ADR-0011](0011-bounded-task-history.md).

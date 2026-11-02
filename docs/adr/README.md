@@ -33,3 +33,4 @@ Decisions about samay — what we chose, the context, and the consequences we ac
 | [0008](0008-threading-contract.md) | samay is single-threaded by contract | Accepted (v1.0.4) — measured; no internal lock, deliberately |
 | [0009](0009-oom-policy.md) | Check every allocation, abort on failure | Accepted (v1.1.1) — never propagate an OOM as `0` or `Err`; CI-gated |
 | [0010](0010-request-and-assignment.md) | A task's request and its assignment are two fields | Accepted (v1.3.0) — `node_preference` stays as a view, in memory and on the wire |
+| [0011](0011-bounded-task-history.md) | The stdlib sort, explicit task removal, and refusing an oversized snapshot | Accepted (v1.4.0) — closes audit F5; capacity is released in `task_id` order |

@@ -4,6 +4,129 @@ All notable changes to Samay are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.0] — 2026-11-01
+
+**A scheduling pass at 100,000 tasks takes 58 ms, not 58 seconds; finished tasks can be removed; and
+samay no longer writes a snapshot it cannot read back** ([ADR-0011](docs/adr/0011-bounded-task-history.md)).
+This closes audit finding F5. A determinism bug found on the way is fixed too. **804 tests**, up 76.
+The toolchain and deps are unchanged.
+
+### Changed — one sort, from the stdlib
+
+The four hand-written insertion sorts are gone, about 70 lines. Each site now calls `vec_sort_by` with
+a comparator (`_task_cmp`, `_task_id_cmp`, `_node_id_cmp`, `_entry_name_cmp`). `samay_str_lt` keeps
+its meaning.
+
+| queued tasks | 1.3.0 | 1.4.0 | faster |
+|---:|---:|---:|---:|
+| 100 | 43.9 µs | 10.7 µs | 4× |
+| 1,000 | 3.60 ms | 146 µs | 25× |
+| 8,000 | 225 ms | 2.09 ms | 107× |
+| 100,000 | 57.9 s | 58.0 ms | 998× |
+
+- **Not a merge sort, as the roadmap planned.** `alloc()` never frees and these sorts run on every
+  pass, so a merge sort's scratch buffer would leak each time. `vec_sort_by` allocates nothing.
+- **It is not stable, and need not be.** ADR-0004 made every one of these a total order ending on a
+  unique key, so each has exactly one sorted result. See *Verified* for the proof.
+
+### Fixed — the same schedule leaves the same capacity
+
+`_reconcile_reservations` returned capacity in hashmap order. Capacity is f64, and once a sum crosses
+a power of two the order of the adds changes the low bits, and map order changes with the per-process
+hash seed. Over 200 runs of one schedule, 1.3.0 left 5 different `available_cpu` values, from
+92.57142857142854 to 92.5714285714286. So identical runs wrote different snapshots and could break a
+utilization tie differently, against ADR-0004. Releases now run in `task_id` order: 200 runs, 200
+hash orders, 1 value. It only touched tasks a consumer finished through
+`scheduled_task_transition`. `complete_task` and `cancel_task` release at once.
+
+### Added — removing finished tasks
+
+- **`task_scheduler_remove_task(s, id)`** forgets one finished task, and returns any reservation it
+  still holds. `Err(1)` for an unknown id, `Err(2)` for a task that is not finished. Cancel a task
+  first: a running task is still using its node. PREEMPTED is not finished, because it goes back to
+  QUEUED.
+- **`task_scheduler_prune_terminal(s, before_ns)`** forgets every finished task that completed
+  strictly before `before_ns`, and returns how many went. samay never prunes on its own.
+
+Three things to know:
+
+- **`task_scheduler_stats` counts what is left**, so pruning lowers `completed`, `failed`,
+  `total_tasks` and the averages. Read lifetime counts before pruning.
+- **Memory does not come back.** `alloc()` never frees. What comes back is the task's share of each
+  pass, and the snapshot.
+- **The hash table keeps its peak size.** A pass with nothing to place takes 21.7 ms over 100,000
+  finished tasks, 2.22 ms once they are pruned, and 0.69 µs on a scheduler that never grew.
+
+### Changed — a snapshot past the restore limit is refused
+
+Restore has always refused a collection over `SAMAY_JSON_MAX_ITEMS` (100,000), but the writers did
+not check, so samay could write a snapshot it would then refuse to read. Now `*_to_jsonv` and
+`*_to_json_str` log an error and answer **0** for tasks, nodes, cron entries or a node's accelerator
+profiles over that limit. A refused node refuses its scheduler.
+
+- **The snapshot is refused whole, never truncated.** A partial one would drop records silently.
+- **⚠ These functions used to always return a Str.** Check for 0 before using the result. Pruning is
+  the way back: a test refuses a snapshot, prunes, and writes it.
+
+### Consumers
+
+- **No source change is needed**, and `dist/samay.deps` is unchanged. Nothing calls the new functions
+  unless a consumer does. `vec_sort_by` is in the stdlib at every consumer's pin.
+- **daimon's 56 scheduler tests and 40 main tests pass against 1.4.0**, in a scratch copy on its own
+  6.6.6 pin.
+- **Prune with cyrius 6.6.20 or later.** Earlier stdlibs do not count tombstones toward a rebuild.
+  daimon, kavach and stiva all pin earlier versions today.
+- A consumer that includes only `bayan-json`, `ai-hwaccel` and `dist/samay.cyr` still compiles on
+  6.7.18 with no undefined functions and runs.
+
+### Tests
+
+- **Ten new tests, 76 assertions.** They cover the sort gate, hostile shapes, removal in every status,
+  pruning and its boundary, churn, the write cap on all four collections, and release order.
+- **`test_sort_every_site`** was added after mutation testing. Deleting the sort from
+  `tasks_for_node`, `check_due_at` or the two snapshot writers could pass the whole suite, because
+  the determinism tests use three or four elements. It uses 64.
+- **All 34 mutations of this work are caught**, each built and run in a copy of the tree.
+- **`tests/samay.bcyr` gains `pending_tasks_2000`**, so this release's claim can be re-run. Its other
+  rows keep their layout.
+
+### Performance
+
+1.3.0 against 1.4.0, both on cyrius 6.7.18: 60 rounds, interleaved, shuffled and pinned to one CPU.
+The machine was busy for part of it (load 2 to 6). Medians:
+
+| row | 1.3.0 | 1.4.0 | Δ | p |
+|---|---:|---:|---:|---:|
+| `node_can_fit` | 12.31 ns | 12.30 ns | −0.1% | 0.21 |
+| `priority_from_numeric` | 4.21 ns | 4.21 ns | 0.0% | 0.59 |
+| `samay_uuid_v4` | 645.0 ns | 643.0 ns | −0.3% | 0.10 |
+| `scheduled_task_new` | 2.23 µs | 2.23 µs | 0.0% | 0.74 |
+| `cron_expr_matches` | 13.61 ns | 13.56 ns | −0.3% | 0.07 |
+| `pending_tasks_2000` | 15.23 ms | 359.6 µs | **−97.6%** | <0.01 |
+| snapshot restore (scratch) | 196.8 µs | 198.4 µs | +0.8% | 0.52 |
+| snapshot write (scratch) | 288.0 µs | 288.1 µs | 0.0% | 0.76 |
+
+The size table above comes from a scratch harness, best of three runs.
+
+### Verified
+
+- **The roadmap's entry gate.** 3,500 random inputs across the four orders match the old insertion
+  sort element for element, including 2,000 in scheduling order, with priority and `created_at` tied
+  constantly. The test keeps the old comparators' logic separately, so it cannot share a bug with
+  them. Reverse-sorted, all-tied and already-sorted inputs of 2,000 match too.
+- **Real binaries.** On a 6,000-task snapshot, 1.3.0 and 1.4.0 give byte-identical output:
+  re-serialization, pending order, every node's task order, and every placement decision.
+- **Old readers.** 1.0.2, 1.0.4, 1.1.2 and 1.2.2 still read a 1.4.0 snapshot and see what they saw.
+- CI's steps, run locally on 6.7.18: build, 804/804 tests, fmt and lint over `src/` and `tests/`,
+  every public function called by a test, every allocation guarded (ADR-0009), `dist/` in sync
+  (2,566 lines), and the benchmarks. `cyrius coverage --min 100` passes, 82/82.
+- No symbol collisions: none of samay's 144 functions is defined in the vendored `lib/`.
+
+### Docs
+
+- **The remaining repairs move into 1.4.x.** F8/F9, the cron work budget, is now 1.4.1, and the
+  write-side JSON codec is 1.4.2. Their scope and order are unchanged.
+
 ## [1.3.0] — 2026-11-01
 
 **A task's request and its assignment are two fields** ([ADR-0010](docs/adr/0010-request-and-assignment.md)).

@@ -14,6 +14,49 @@ pre-warm off every hot path, and re-measured within noise of the table below
 | `samay_uuid_v4`         | 606 ns   | 613 ns   | getrandom(2) syscall-bound         |
 | `scheduled_task_new`    | 2.07 µs  | 2.06 µs  | alloc + uuid + `dt_now`            |
 
+## v1.4.0 — one sort, and task removal
+
+**Sorting.** 1.3.0 against 1.4.0, both on cyrius 6.7.18, 60 rounds interleaved, shuffled and pinned
+to one CPU (2026-11-01). The machine was busy for part of it (load 2 to 6). Medians:
+
+| Op                      | 1.3.0    | 1.4.0    | Δ       |
+|-------------------------|----------|----------|---------|
+| `priority_from_numeric` | 4.21 ns  | 4.21 ns  | 0.0%    |
+| `node_can_fit`          | 12.31 ns | 12.30 ns | −0.1%   |
+| `cron_expr_matches`     | 13.61 ns | 13.56 ns | −0.3%   |
+| `samay_uuid_v4`         | 645.0 ns | 643.0 ns | −0.3%   |
+| `scheduled_task_new`    | 2.23 µs  | 2.23 µs  | 0.0%    |
+| `pending_tasks_2000`    | 15.23 ms | 359.6 µs | **−97.6%** |
+| snapshot restore        | 196.8 µs | 198.4 µs | +0.8%   |
+| snapshot write          | 288.0 µs | 288.1 µs | 0.0%    |
+
+`pending_tasks_2000` is new in this release, and both columns ran the same row (p < 0.01). None of
+the others is under p = 0.05. The snapshot rows use the v1.2.1 scratch harness, and their sorts are
+small next to the JSON work.
+
+`task_scheduler_pending_tasks` at growing sizes, from a scratch harness, best of three runs:
+
+| queued tasks | 1.3.0    | 1.4.0    | faster |
+|--------------|----------|----------|--------|
+| 100          | 43.9 µs  | 10.7 µs  | 4×     |
+| 1,000        | 3.60 ms  | 146 µs   | 25×    |
+| 8,000        | 225 ms   | 2.09 ms  | 107×   |
+| 100,000      | 57.9 s   | 58.0 ms  | 998×   |
+
+100,000 is the snapshot ceiling, so through 1.3.0 a restored scheduler at the limit could spend about
+a minute on one `schedule_pending`. 1.4.0's sort allocates nothing.
+
+**Pruning.** `task_scheduler_schedule_pending` with nothing to place, 40 passes, three runs:
+
+| scheduler                               | one pass |
+|-----------------------------------------|----------|
+| 100,000 finished tasks                  | 21.7 ms  |
+| the same, pruned to none                | 2.22 ms  |
+| one that never grew                     | 0.69 µs  |
+
+Pruning is worth 10×, not more, because the hash table keeps its peak capacity and `map_values` walks
+every slot. Pruning those 100,000 tasks took about 250 ms.
+
 ## v1.3.0 — `node_preference` split into two fields
 
 1.2.2 against 1.3.0, both on cyrius 6.7.18, 60 rounds interleaved, shuffled and pinned to one

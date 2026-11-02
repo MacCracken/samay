@@ -61,6 +61,7 @@ Validate at the restore boundary, matching Rust serde's fail-closed semantics:
   samay may not make), plus the cron aggregate-work budget (F8/F9). The size cap bounds all
   of these to a finite worst case; eliminating the residual is deferred rather than risk a
   sort rewrite destabilising the M5 determinism guarantee ([ADR-0004](0004-deterministic-tie-breaks.md)).
+  F5 closed in v1.4.0 ([ADR-0011](0011-bounded-task-history.md)).
 - Fail-closed on a bad record means a corrupt snapshot loses that record silently. For a
   scheduler restoring its own well-formed snapshot this never triggers; it only drops
   attacker/corruption-injected records, which is the desired posture.

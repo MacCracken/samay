@@ -12,8 +12,8 @@
 # Str keys hash by content (hash_str_v) and compare via str_eq, so a lookup
 # by an equal-but-distinct Str works.
 # Iteration uses map_values (→ vec). Pending tasks are sorted by priority
-# desc, then created_at asc (stable insertion sort), matching Rust's
-# sort_by. Requires: hashmap, vec, str, string, chrono, result + types.cyr.
+# desc, then created_at asc, matching Rust's sort_by.
+# Requires: hashmap, vec, str, string, chrono, result + types.cyr.
 
 #derive(accessors)
 struct TaskScheduler {
@@ -39,61 +39,35 @@ fn task_scheduler_new(): i64 {
 }
 
 # --- ordering ---
+#
+# Every sort here is lib/vec.cyr's vec_sort_by with one of these comparators. It
+# allocates nothing, which matters because alloc() never frees and these run on
+# every pass. It is not stable, and need not be: each comparator ends on a unique
+# key, so each is a total order with exactly one sorted result (ADR-0004, ADR-0011).
 
-# True (1) if task `a` should be scheduled before `b`: higher priority
-# first, then earlier created_at (Rust sort_by), then — the determinism
-# tie-break the Rust HashMap left to iteration order — smaller task_id.
-# task_id is a unique UUID, so this is a total order (ADR-0004).
-fn _task_before(a, b): i64 {
+# Scheduling order: higher priority first, then earlier created_at (Rust sort_by),
+# then — the determinism tie-break the Rust HashMap left to iteration order —
+# smaller task_id.
+fn _task_cmp(a, b): i64 {
     var pa = ScheduledTask_priority(a);
     var pb = ScheduledTask_priority(b);
-    if (pa > pb) { return 1; }
-    if (pa < pb) { return 0; }
+    if (pa > pb) { return 0 - 1; }
+    if (pa < pb) { return 1; }
     var ca = ScheduledTask_created_at(a);
     var cb = ScheduledTask_created_at(b);
-    if (ca < cb) { return 1; }
-    if (ca > cb) { return 0; }
-    return samay_str_lt(ScheduledTask_task_id(a), ScheduledTask_task_id(b));
+    if (ca < cb) { return 0 - 1; }
+    if (ca > cb) { return 1; }
+    return _samay_str_cmp(ScheduledTask_task_id(a), ScheduledTask_task_id(b));
 }
 
-# Stable insertion sort of a vec of task pointers by `_task_before`.
-fn _sort_tasks(v): i64 {
-    var n = vec_len(v);
-    var i = 1;
-    while (i < n) {
-        var key = vec_get(v, i);
-        var j = i - 1;
-        while (j >= 0) {
-            var cur = vec_get(v, j);
-            if (_task_before(key, cur) == 0) { break; }
-            vec_set(v, j + 1, cur);
-            j = j - 1;
-        }
-        vec_set(v, j + 1, key);
-        i = i + 1;
-    }
-    return 0;
+# By task_id: gives `tasks_for_node` a deterministic order (Rust returned raw
+# HashMap iteration order).
+fn _task_id_cmp(a, b): i64 {
+    return _samay_str_cmp(ScheduledTask_task_id(a), ScheduledTask_task_id(b));
 }
 
-# Stable insertion sort of a vec of task pointers by task_id (ascending).
-# Gives `tasks_for_node` a deterministic order (Rust returned raw HashMap
-# iteration order); task_id is unique so the order is total.
-fn _sort_tasks_by_id(v): i64 {
-    var n = vec_len(v);
-    var i = 1;
-    while (i < n) {
-        var key = vec_get(v, i);
-        var j = i - 1;
-        while (j >= 0) {
-            var cur = vec_get(v, j);
-            if (samay_str_lt(ScheduledTask_task_id(key), ScheduledTask_task_id(cur)) == 0) { break; }
-            vec_set(v, j + 1, cur);
-            j = j - 1;
-        }
-        vec_set(v, j + 1, key);
-        i = i + 1;
-    }
-    return 0;
+fn _node_id_cmp(a, b): i64 {
+    return _samay_str_cmp(NodeCapacity_node_id(a), NodeCapacity_node_id(b));
 }
 
 # --- registration / submission / lookup ---
@@ -141,18 +115,36 @@ fn _release_task_node(s, task): i64 {
 # This reconciles rather than hooking the transition because
 # scheduled_task_transition is public — a consumer can drive a task terminal
 # without calling any scheduler API, so a hook would leave the hole open.
+#
+# Releases run in task_id order, not map order. Capacity is f64, and once a sum
+# crosses a power of two the order of the adds changes the result. Map order changes
+# with the per-process hash seed, so through 1.3.0 the same schedule left different
+# low bits in available_cpu from run to run (ADR-0004, ADR-0011). The vec is made only
+# when something needs releasing, so a normal pass allocates nothing here.
 fn _reconcile_reservations(s): i64 {
     var all = map_values(TaskScheduler_tasks(s));
     var n = vec_len(all);
+    var stale = 0;
     var i = 0;
     while (i < n) {
         var t = vec_get(all, i);
         if (ScheduledTask_reserved_on(t) != 0) {
             var st = ScheduledTask_status(t);
             if (st != TASK_SCHEDULED) {
-                if (st != TASK_RUNNING) { _release_task_node(s, t); }
+                if (st != TASK_RUNNING) {
+                    if (stale == 0) { stale = vec_new(); }
+                    vec_push(stale, t);
+                }
             }
         }
+        i = i + 1;
+    }
+    if (stale == 0) { return 0; }
+    vec_sort_by(stale, &_task_id_cmp);
+    n = vec_len(stale);
+    i = 0;
+    while (i < n) {
+        _release_task_node(s, vec_get(stale, i));
         i = i + 1;
     }
     return 0;
@@ -193,6 +185,63 @@ fn task_scheduler_complete_task(s, id, final_status): i64 {
     return Ok(0);
 }
 
+# --- removal ---
+
+# 1 once a task cannot run again. PREEMPTED is not finished: it goes back to QUEUED.
+fn _task_is_finished(t): i64 {
+    var st = ScheduledTask_status(t);
+    if (st == TASK_COMPLETED) { return 1; }
+    if (st == TASK_FAILED) { return 1; }
+    if (st == TASK_CANCELLED) { return 1; }
+    return 0;
+}
+
+# Forget a finished task. Ok(0) on success; Err(1) unknown id; Err(2) not finished.
+#
+# An unfinished task is refused, so cancel it first: a running task is still using
+# its node, and removing it would hand that capacity to something else. A finished
+# task can still hold a reservation if a consumer drove it there through
+# scheduled_task_transition, so this returns it.
+#
+# Removal takes a task off every later pass and out of snapshots. Its memory stays
+# allocated, because alloc() never frees.
+fn task_scheduler_remove_task(s, id): i64 {
+    var task = map_get(TaskScheduler_tasks(s), id);
+    if (task == 0) { return Err(1); }
+    if (_task_is_finished(task) == 0) { return Err(2); }
+    _release_task_node(s, task);
+    map_delete(TaskScheduler_tasks(s), id);
+    return Ok(0);
+}
+
+# Forget every finished task that completed before `before_ns`, and return how many
+# went. Only the caller decides this: samay never prunes on its own, and takes the
+# time as an argument, as cron_scheduler_check_due_at does, so the same schedule at
+# the same time prunes the same tasks. A task with no completed_at, because a consumer
+# finished it through scheduled_task_transition, counts as the oldest.
+#
+# task_scheduler_stats counts the tasks it can see, so its totals drop by what goes.
+fn task_scheduler_prune_terminal(s, before_ns): i64 {
+    var all = map_values(TaskScheduler_tasks(s));
+    # task_id order, for the reason _reconcile_reservations gives.
+    vec_sort_by(all, &_task_id_cmp);
+    var removed = 0;
+    var n = vec_len(all);
+    var i = 0;
+    while (i < n) {
+        var t = vec_get(all, i);
+        if (_task_is_finished(t) == 1) {
+            if (ScheduledTask_completed_at(t) < before_ns) {
+                _release_task_node(s, t);
+                map_delete(TaskScheduler_tasks(s), ScheduledTask_task_id(t));
+                removed = removed + 1;
+            }
+        }
+        i = i + 1;
+    }
+    return removed;
+}
+
 # --- queries ---
 
 # Pending (Queued) tasks, sorted by priority desc then created_at asc.
@@ -206,7 +255,7 @@ fn task_scheduler_pending_tasks(s): i64 {
         if (ScheduledTask_status(t) == TASK_QUEUED) { vec_push(out, t); }
         i = i + 1;
     }
-    _sort_tasks(out);
+    vec_sort_by(out, &_task_cmp);
     return out;
 }
 
@@ -230,7 +279,7 @@ fn task_scheduler_tasks_for_node(s, node_id): i64 {
         }
         i = i + 1;
     }
-    _sort_tasks_by_id(out);
+    vec_sort_by(out, &_task_id_cmp);
     return out;
 }
 

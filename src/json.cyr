@@ -97,11 +97,34 @@ fn _jv_f64(obj, key, dflt): i64 {
 # Ceiling on how many items a restored collection may hold, so a hostile
 # snapshot cannot force unbounded allocation. Far above any realistic
 # scheduler; caps the anti-catastrophe bound (OOM / minutes-long work). Note
-# this bounds but does not fully eliminate the O(n^2)-sort (F5) and
-# hash-collision (F4) costs within the cap. Both are tracked in
-# docs/development/roadmap.md — F5 is pinned to 1.3.0, F4 is trigger-gated on
-# an upstream fix; origin is docs/audit/2026-07-21-audit.md.
+# this bounds but does not fully eliminate the hash-collision (F4) cost within
+# the cap, which is trigger-gated on an upstream fix (see
+# docs/development/roadmap.md); origin is docs/audit/2026-07-21-audit.md.
 var SAMAY_JSON_MAX_ITEMS = 100000;
+
+# 1 if a collection is too large to write. Restore refuses a collection past the
+# ceiling outright, so a snapshot holding one could never be read back. The writers
+# refuse it here instead, while the caller can still prune, and answer 0. They never
+# truncate: a partial snapshot would drop records silently (ADR-0011).
+fn _over_item_limit(n, what): i64 {
+    if (n <= SAMAY_JSON_MAX_ITEMS) { return 0; }
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "snapshot refused: ");
+    str_builder_add_int(sb, n);
+    str_builder_add_cstr(sb, " ");
+    str_builder_add_cstr(sb, what);
+    str_builder_add_cstr(sb, ", past the restore limit of ");
+    str_builder_add_int(sb, SAMAY_JSON_MAX_ITEMS);
+    var msg = str_builder_build(sb);
+    sakshi_error(str_data(msg), str_len(msg));
+    return 1;
+}
+
+# bayan_json_v_build, passing on a refused snapshot's 0.
+fn _build_or_0(v): i64 {
+    if (v == 0) { return 0; }
+    return bayan_json_v_build(v);
+}
 
 # Clamp an i64 into [lo, hi].
 fn _clamp_i64(x, lo, hi): i64 {
@@ -430,6 +453,7 @@ fn scheduled_task_from_json_str(s): i64 { return scheduled_task_from_jsonv(_pars
 # ---------------------------------------------------------------------------
 
 fn node_capacity_to_jsonv(node): i64 {
+    if (_over_item_limit(vec_len(NodeCapacity_accel_profiles(node)), "accelerator profiles") == 1) { return 0; }
     var o = bayan_json_v_obj_new();
     bayan_json_v_obj_set(o, str_from("node_id"), bayan_json_v_str_new(NodeCapacity_node_id(node)));
     bayan_json_v_obj_set(o, str_from("total_cpu"), bayan_json_v_float_new(NodeCapacity_total_cpu(node)));
@@ -527,7 +551,7 @@ fn node_capacity_from_jsonv(v): i64 {
     return p;
 }
 
-fn node_capacity_to_json_str(node): i64 { return bayan_json_v_build(node_capacity_to_jsonv(node)); }
+fn node_capacity_to_json_str(node): i64 { return _build_or_0(node_capacity_to_jsonv(node)); }
 fn node_capacity_from_json_str(s): i64 { return node_capacity_from_jsonv(_parse(s)); }
 
 # ---------------------------------------------------------------------------
@@ -570,51 +594,18 @@ fn cron_entry_to_json_str(e): i64 { return bayan_json_v_build(cron_entry_to_json
 fn cron_entry_from_json_str(s): i64 { return cron_entry_from_jsonv(_parse(s)); }
 
 # ---------------------------------------------------------------------------
-# Deterministic map ordering
-# ---------------------------------------------------------------------------
-
-# The map key for a value, by container kind:
-#   0 = ScheduledTask (task_id)   1 = NodeCapacity (node_id)   2 = CronEntry (name)
-fn _key_of(v, kind): i64 {
-    if (kind == 0) { return ScheduledTask_task_id(v); }
-    if (kind == 1) { return NodeCapacity_node_id(v); }
-    return CronEntry_name(v);
-}
-
-# Stable insertion sort of a vec of struct pointers by their key Str, ascending.
-# samay serializes maps as sorted arrays so output is deterministic regardless
-# of hashmap iteration order (domain principle).
-fn _sort_by_key(vec, kind): i64 {
-    var n = vec_len(vec);
-    var i = 1;
-    while (i < n) {
-        var key = vec_get(vec, i);
-        var kk = _key_of(key, kind);
-        var j = i - 1;
-        while (j >= 0) {
-            var cur = vec_get(vec, j);
-            if (samay_str_lt(kk, _key_of(cur, kind)) == 1) {
-                vec_set(vec, j + 1, cur);
-                j = j - 1;
-            } else {
-                break;
-            }
-        }
-        vec_set(vec, j + 1, key);
-        i = i + 1;
-    }
-    return 0;
-}
-
-# ---------------------------------------------------------------------------
 # CronScheduler — map of CronEntry keyed by name
+#
+# Maps serialize as arrays sorted by key, so output is deterministic regardless
+# of hashmap iteration order (domain principle).
 # ---------------------------------------------------------------------------
 
 fn cron_scheduler_to_jsonv(c): i64 {
+    var vals = map_values(CronScheduler_entries(c));
+    if (_over_item_limit(vec_len(vals), "cron entries") == 1) { return 0; }
     var o = bayan_json_v_obj_new();
     var arr = bayan_json_v_arr_new();
-    var vals = map_values(CronScheduler_entries(c));
-    _sort_by_key(vals, 2);
+    vec_sort_by(vals, &_entry_name_cmp);
     var n = vec_len(vals);
     var i = 0;
     while (i < n) {
@@ -643,7 +634,7 @@ fn cron_scheduler_from_jsonv(v): i64 {
     return c;
 }
 
-fn cron_scheduler_to_json_str(c): i64 { return bayan_json_v_build(cron_scheduler_to_jsonv(c)); }
+fn cron_scheduler_to_json_str(c): i64 { return _build_or_0(cron_scheduler_to_jsonv(c)); }
 fn cron_scheduler_from_json_str(s): i64 { return cron_scheduler_from_jsonv(_parse(s)); }
 
 # ---------------------------------------------------------------------------
@@ -651,10 +642,13 @@ fn cron_scheduler_from_json_str(s): i64 { return cron_scheduler_from_jsonv(_pars
 # ---------------------------------------------------------------------------
 
 fn task_scheduler_to_jsonv(s): i64 {
+    var tvals = map_values(TaskScheduler_tasks(s));
+    var nvals = map_values(TaskScheduler_nodes(s));
+    if (_over_item_limit(vec_len(tvals), "tasks") == 1) { return 0; }
+    if (_over_item_limit(vec_len(nvals), "nodes") == 1) { return 0; }
     var o = bayan_json_v_obj_new();
     var tarr = bayan_json_v_arr_new();
-    var tvals = map_values(TaskScheduler_tasks(s));
-    _sort_by_key(tvals, 0);
+    vec_sort_by(tvals, &_task_id_cmp);
     var tn = vec_len(tvals);
     var ti = 0;
     while (ti < tn) {
@@ -663,12 +657,13 @@ fn task_scheduler_to_jsonv(s): i64 {
     }
     bayan_json_v_obj_set(o, str_from("tasks"), tarr);
     var narr = bayan_json_v_arr_new();
-    var nvals = map_values(TaskScheduler_nodes(s));
-    _sort_by_key(nvals, 1);
+    vec_sort_by(nvals, &_node_id_cmp);
     var nn = vec_len(nvals);
     var ni = 0;
     while (ni < nn) {
-        bayan_json_v_arr_push(narr, node_capacity_to_jsonv(vec_get(nvals, ni)));
+        var nj = node_capacity_to_jsonv(vec_get(nvals, ni));
+        if (nj == 0) { return 0; }
+        bayan_json_v_arr_push(narr, nj);
         ni = ni + 1;
     }
     bayan_json_v_obj_set(o, str_from("nodes"), narr);
@@ -704,5 +699,5 @@ fn task_scheduler_from_jsonv(v): i64 {
     return s;
 }
 
-fn task_scheduler_to_json_str(s): i64 { return bayan_json_v_build(task_scheduler_to_jsonv(s)); }
+fn task_scheduler_to_json_str(s): i64 { return _build_or_0(task_scheduler_to_jsonv(s)); }
 fn task_scheduler_from_json_str(s): i64 { return task_scheduler_from_jsonv(_parse(s)); }

@@ -59,6 +59,21 @@ fn main(): i64 {
     bench_batch_stop(b5, 100000);
     bench_report(b5);
 
+    # pending_tasks at 2,000 queued tasks: the scan and sort every schedule_pending
+    # runs. Last, so the rows above keep their code layout.
+    var sched = task_scheduler_new();
+    i = 0;
+    while (i < 2000) {
+        task_scheduler_submit_task(sched, scheduled_task_new(t_name, t_desc, t_agent, 1 + i % 10, req));
+        i = i + 1;
+    }
+    var b6 = bench_new("pending_tasks_2000");
+    bench_batch_start(b6);
+    i = 0;
+    while (i < 100) { task_scheduler_pending_tasks(sched); i = i + 1; }
+    bench_batch_stop(b6, 100);
+    bench_report(b6);
+
     return 0;
 }
 
