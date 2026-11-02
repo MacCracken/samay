@@ -24,6 +24,9 @@ Thumbs.db
 *.pem
 *.key
 
+# Python bytecode (scripts/)
+__pycache__/
+
 # Coverage
 /coverage/
 *.profraw
